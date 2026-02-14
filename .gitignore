@@ -1,0 +1,7 @@
+.venv/
+.config/
+uploads/*.deb
+uploads/*.rpm
+__pycache__/
+*.pyc
+.DS_Store
