@@ -110,7 +110,8 @@ def takserver_page():
     modules = detect_modules()
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=load_settings(), modules=modules, tak=modules.get('takserver', {}),
-        metrics=get_system_metrics(), version=VERSION)
+        metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
+        deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
 
 @app.route('/mediamtx')
 @login_required
@@ -270,9 +271,7 @@ def run_cmd(cmd, desc=None, check=True):
 
 def wait_for_package_lock():
     """Wait for unattended-upgrades to finish (common on fresh VPS).
-    NO TIMEOUT - waits as long as needed (can be 20-45 min on fresh images).
-    Uses pgrep -f to match exact process, not the shutdown handler.
-    Battle-tested from Ubuntu_22.04_TAK_Server_install.sh"""
+    NO TIMEOUT - waits as long as needed. Ticks every 10 seconds."""
     log_step("Checking for system upgrades in progress...")
     r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
     if r.stdout.strip() == '':
@@ -290,9 +289,8 @@ def wait_for_package_lock():
             log_step(f"\u2713 System upgrades complete! (waited {m}m {s}s)")
             time.sleep(5)
             return True
-        if waited % 60 == 0:
-            m = waited // 60
-            log_step(f"  Still waiting... {m} minute{'s' if m != 1 else ''} elapsed")
+        m, s = divmod(waited, 60)
+        deploy_log.append(f"  \u23f3 {m:02d}:{s:02d}")
 
 def run_takserver_deploy(config):
     try:
@@ -640,7 +638,9 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">TAK Server</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
 <main class="main">
 <div class="status-banner" id="status-banner">
-{% if tak.installed and tak.running %}
+{% if deploying %}
+<div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🗺️</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
+{% elif tak.installed and tak.running %}
 <div class="status-info"><div class="status-icon running">🗺️</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
 <div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
@@ -651,7 +651,14 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 {% endif %}
 </div>
 
-{% if tak.installed %}
+{% if deploying or deploy_done or deploy_error %}
+<div class="section-title">Deployment Log</div>
+<div id="deploy-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);max-height:500px;overflow-y:auto;line-height:1.7;white-space:pre-wrap">Reconnecting to deployment log...</div>
+<div id="deploy-log-area" style="display:block"></div>
+{% if deploy_done %}
+<div id="cert-download-area" style="margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-secondary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>
+{% endif %}
+{% elif tak.installed %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:12px;flex-wrap:wrap">
@@ -720,6 +727,11 @@ async function loadCertFiles(){
     }catch(e){el.innerHTML='<span style="color:var(--red)">Failed to load</span>'}
 }
 loadCertFiles();
+
+{% if deploying or deploy_done or deploy_error %}
+// Reconnect to running deployment log
+pollDeployLog();
+{% endif %}
 
 async function takControl(action){
     const btns=document.querySelectorAll('.control-btn');
@@ -864,7 +876,7 @@ function pollDeployLog(){
     const el=document.getElementById('deploy-log');
     const poll=async()=>{
         try{const r=await fetch('/api/deploy/log?after='+logIndex);const d=await r.json();pollFails=0;
-            if(d.entries.length>0){d.entries.forEach(e=>{const l=document.createElement('div');if(e.includes('✓'))l.style.color='var(--green)';else if(e.includes('✗')||e.includes('FATAL'))l.style.color='var(--red)';else if(e.includes('━━━'))l.style.color='var(--cyan)';else if(e.includes('⚠'))l.style.color='var(--yellow)';else if(e.includes('===')||e.includes('WebGUI')||e.includes('Username'))l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
+            if(d.entries.length>0){d.entries.forEach(e=>{const isTimer=e.includes('\u23f3')&&/\\d{2}:\\d{2}\s*$/.test(e.trim());if(isTimer){const prev=el.querySelector('[data-timer]');if(prev){prev.textContent=e;logIndex=d.total;return}};const l=document.createElement('div');if(isTimer)l.setAttribute('data-timer','1');if(e.includes('\u2713'))l.style.color='var(--green)';else if(e.includes('\u2717')||e.includes('FATAL'))l.style.color='var(--red)';else if(e.includes('\u2501\u2501\u2501'))l.style.color='var(--cyan)';else if(e.includes('\u26a0'))l.style.color='var(--yellow)';else if(e.includes('===')||e.includes('WebGUI')||e.includes('Username'))l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
             if(d.running)setTimeout(poll,1000);
             else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';var wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';var wt=document.createElement('div');wt.style.cssText='font-family:JetBrains Mono,monospace;font-size:14px;color:#06b6d4;margin-bottom:12px';wt.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.';var wb=document.createElement('button');wb.textContent='Refresh Page';wb.style.cssText='padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer';wb.onclick=function(){window.location.href='/takserver'};wa.appendChild(wt);wa.appendChild(wb);document.getElementById('deploy-log-area').after(wa)}
             else if(d.error){const b=document.getElementById('deploy-btn');b.textContent='✗ Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}
