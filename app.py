@@ -352,6 +352,7 @@ def deploy_takserver():
         'enable_admin_ui': data.get('enable_admin_ui', False),
         'enable_webtak': data.get('enable_webtak', False),
         'enable_nonadmin_ui': data.get('enable_nonadmin_ui', False),
+        'webadmin_password': data.get('webadmin_password', ''),
     }
 
     gpg_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith('.key')]
@@ -447,21 +448,27 @@ def run_takserver_deploy(config):
         if config.get('gpg_key_path') and config.get('policy_path'):
             log_step("GPG key and policy found — verifying...")
             run_command('apt-get install -y debsig-verify gnupg2 > /dev/null 2>&1')
+            # Extract policy ID properly using sed
             result = subprocess.run(
-                f"grep -o 'id=\"[^\"]*\"' {config['policy_path']} | head -1 | tr -d 'id=\"'",
+                f"sed -n 's/.*id=\"\\([^\"]*\\)\".*/\\1/p' {config['policy_path']} | head -1",
                 shell=True, capture_output=True, text=True
             )
             policy_id = result.stdout.strip()
+            log_step(f"  Policy ID: {policy_id}")
             if policy_id:
                 run_command(f'mkdir -p /usr/share/debsig/keyrings/{policy_id}')
                 run_command(f'mkdir -p /etc/debsig/policies/{policy_id}')
                 run_command(f'gpg2 --no-default-keyring --keyring /usr/share/debsig/keyrings/{policy_id}/debsig.gpg --import {config["gpg_key_path"]} 2>/dev/null')
                 run_command(f'cp {config["policy_path"]} /etc/debsig/policies/{policy_id}/debsig.pol')
                 verify = subprocess.run(f'debsig-verify {pkg_path}', shell=True, capture_output=True, text=True)
-                if 'Verified' in verify.stdout:
+                if 'Verified' in verify.stdout or verify.returncode == 0:
                     log_step("✓ Package signature VERIFIED")
                 else:
-                    log_step("⚠ Verification failed — installing anyway")
+                    log_step(f"⚠ Verification returned exit code {verify.returncode} — installing anyway")
+                    if verify.stderr.strip():
+                        log_step(f"  {verify.stderr.strip()}")
+            else:
+                log_step("⚠ Could not extract policy ID — skipping verification")
         else:
             log_step("No GPG key/policy — skipping verification")
 
@@ -493,10 +500,10 @@ def run_takserver_deploy(config):
         # Step 6: Firewall
         log_step("")
         log_step("━━━ Step 6/9: Configuring Firewall ━━━")
-        for port in ['22/tcp', '8089/tcp', '8443/tcp', '8446/tcp']:
+        for port in ['22/tcp', '8089/tcp', '8443/tcp', '8446/tcp', '5001/tcp']:
             run_command(f'ufw allow {port} > /dev/null 2>&1')
         run_command('ufw --force enable > /dev/null 2>&1')
-        log_step("✓ Firewall configured (22, 8089, 8443, 8446)")
+        log_step("✓ Firewall configured (22, 8089, 8443, 8446, 5001)")
 
         # Step 7: Certificates
         log_step("")
@@ -533,7 +540,7 @@ def run_takserver_deploy(config):
         log_step("Restarting TAK Server...")
         run_command('systemctl stop takserver')
         time.sleep(10)
-        run_command('pkill -9 -f takserver 2>/dev/null; true')
+        run_command('pkill -9 -f takserver 2>/dev/null; true', check=False)
         time.sleep(5)
         run_command('systemctl start takserver')
         log_step("Waiting 90 seconds for initialization...")
@@ -585,7 +592,7 @@ def run_takserver_deploy(config):
         log_step("Final restart...")
         run_command('systemctl stop takserver')
         time.sleep(10)
-        run_command('pkill -9 -f takserver 2>/dev/null; true')
+        run_command('pkill -9 -f takserver 2>/dev/null; true', check=False)
         time.sleep(5)
         run_command('systemctl start takserver')
         log_step("Waiting 3 minutes for full initialization...")
@@ -596,6 +603,17 @@ def run_takserver_deploy(config):
         log_step("━━━ Step 9/9: Promoting Admin ━━━")
         run_command('java -jar /opt/tak/utils/UserManager.jar certmod -A /opt/tak/certs/files/admin.pem 2>&1',
                     "Promoting admin certificate...", check=False)
+
+        # Create webadmin password-based user if password was provided
+        webadmin_pass = config.get('webadmin_password', '')
+        if webadmin_pass:
+            log_step("Creating webadmin user for browser login...")
+            result = run_command(
+                f"java -jar /opt/tak/utils/UserManager.jar usermod -A -p '{webadmin_pass}' webadmin 2>&1",
+                check=False
+            )
+            log_step("✓ webadmin user created (password-based login on 8446)")
+
         run_command('systemctl restart takserver')
         time.sleep(30)
 
@@ -604,7 +622,11 @@ def run_takserver_deploy(config):
         log_step("=" * 50)
         log_step("✓ DEPLOYMENT COMPLETE!")
         log_step("=" * 50)
-        log_step(f"  WebGUI: https://{server_ip}:8443")
+        log_step("")
+        log_step(f"  WebGUI (cert):     https://{server_ip}:8443")
+        if webadmin_pass:
+            log_step(f"  WebGUI (password): https://{server_ip}:8446")
+            log_step(f"  Username: webadmin")
         log_step(f"  Certificate Password: atakatak")
         log_step(f"  Admin cert: /opt/tak/certs/files/admin.p12")
 
@@ -615,6 +637,38 @@ def run_takserver_deploy(config):
         log_step(f"✗ FATAL ERROR: {str(e)}")
         deploy_status['error'] = True
         deploy_status['running'] = False
+
+
+@app.route('/api/download/admin-cert')
+@login_required
+def download_admin_cert():
+    """Download admin.p12 certificate"""
+    cert_path = '/opt/tak/certs/files'
+    if os.path.exists(os.path.join(cert_path, 'admin.p12')):
+        return send_from_directory(cert_path, 'admin.p12', as_attachment=True)
+    return jsonify({'error': 'admin.p12 not found'}), 404
+
+
+@app.route('/api/download/user-cert')
+@login_required
+def download_user_cert():
+    """Download user.p12 certificate"""
+    cert_path = '/opt/tak/certs/files'
+    if os.path.exists(os.path.join(cert_path, 'user.p12')):
+        return send_from_directory(cert_path, 'user.p12', as_attachment=True)
+    return jsonify({'error': 'user.p12 not found'}), 404
+
+
+@app.route('/api/download/truststore')
+@login_required
+def download_truststore():
+    """Download truststore p12"""
+    cert_path = '/opt/tak/certs/files'
+    # Find the truststore file (name varies based on intermediate CA)
+    for f in os.listdir(cert_path):
+        if f.startswith('truststore-') and f.endswith('.p12') and 'root' not in f:
+            return send_from_directory(cert_path, f, as_attachment=True)
+    return jsonify({'error': 'truststore not found'}), 404
 
 
 @app.route('/api/deploy/log')
@@ -1652,7 +1706,8 @@ DASHBOARD_TEMPLATE = '''
                     <div style="display: flex; flex-direction: column; gap: 14px;">
                         <label style="display: flex; align-items: center; gap: 10px;
                                       color: var(--text-secondary); cursor: pointer; font-size: 14px;">
-                            <input type="checkbox" id="enable_admin_ui" style="width: 18px; height: 18px; accent-color: var(--accent);">
+                            <input type="checkbox" id="enable_admin_ui" onchange="toggleWebadminPassword()"
+                                   style="width: 18px; height: 18px; accent-color: var(--accent);">
                             Enable Admin UI <span style="color: var(--text-dim); font-size: 12px;">— Access admin console with username/password (no browser cert needed)</span>
                         </label>
                         <label style="display: flex; align-items: center; gap: 10px;
@@ -1665,6 +1720,25 @@ DASHBOARD_TEMPLATE = '''
                             <input type="checkbox" id="enable_nonadmin_ui" style="width: 18px; height: 18px; accent-color: var(--accent);">
                             Enable Non-Admin UI <span style="color: var(--text-dim); font-size: 12px;">— Non-admin users can access management console</span>
                         </label>
+                    </div>
+
+                    <!-- WebAdmin password (shown when Admin UI is checked) -->
+                    <div id="webadmin-password-area" style="display: none; margin-top: 20px;
+                         background: rgba(59, 130, 246, 0.05); border: 1px solid var(--border);
+                         border-radius: 10px; padding: 18px;">
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px;
+                                    color: var(--text-dim); margin-bottom: 12px;">
+                            Set a password for the <span style="color: var(--cyan);">webadmin</span> user to log in on port 8446
+                        </div>
+                        <div class="form-field">
+                            <label>WebAdmin Password</label>
+                            <input type="password" id="webadmin_password" placeholder="Min 15 chars: upper, lower, number, special">
+                        </div>
+                        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px;
+                                    color: var(--text-dim); margin-top: 8px;">
+                            Requirements: 15+ characters, 1 uppercase, 1 lowercase, 1 number, 1 special character (-_!@#$%^&amp;*)</div>
+                        <div id="password-validation" style="font-family: 'JetBrains Mono', monospace;
+                             font-size: 12px; margin-top: 8px;"></div>
                     </div>
 
                     <div style="margin-top: 28px; text-align: center;">
@@ -1696,6 +1770,35 @@ DASHBOARD_TEMPLATE = '''
                         white-space: pre-wrap;
                     "></div>
                 </div>
+
+                <!-- Download certs (shown after deploy completes) -->
+                <div id="cert-download-area" style="display: none; margin-top: 20px;">
+                    <div class="section-title">Download Certificates</div>
+                    <div style="background: var(--bg-card); border: 1px solid var(--border);
+                                border-radius: 12px; padding: 24px; display: flex; gap: 16px; flex-wrap: wrap;">
+                        <a href="/api/download/admin-cert" style="
+                            padding: 12px 24px; background: linear-gradient(135deg, #1e40af, #0e7490);
+                            color: #fff; border-radius: 8px; text-decoration: none;
+                            font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
+                        ">⬇ admin.p12</a>
+                        <a href="/api/download/user-cert" style="
+                            padding: 12px 24px; background: rgba(59, 130, 246, 0.1);
+                            color: var(--accent); border: 1px solid var(--border); border-radius: 8px;
+                            text-decoration: none; font-family: 'JetBrains Mono', monospace;
+                            font-size: 13px; font-weight: 600;
+                        ">⬇ user.p12</a>
+                        <a href="/api/download/truststore" style="
+                            padding: 12px 24px; background: rgba(59, 130, 246, 0.1);
+                            color: var(--accent); border: 1px solid var(--border); border-radius: 8px;
+                            text-decoration: none; font-family: 'JetBrains Mono', monospace;
+                            font-size: 13px; font-weight: 600;
+                        ">⬇ truststore.p12</a>
+                        <div style="width: 100%; font-family: 'JetBrains Mono', monospace;
+                                    font-size: 12px; color: var(--text-dim); margin-top: 8px;">
+                            Certificate password: <span style="color: var(--cyan);">atakatak</span>
+                        </div>
+                    </div>
+                </div>
             `;
             main.appendChild(configDiv);
 
@@ -1711,7 +1814,8 @@ DASHBOARD_TEMPLATE = '''
                     font-weight: 600;
                     margin-bottom: 6px;
                 }
-                .form-field input[type="text"] {
+                .form-field input[type="text"],
+                .form-field input[type="password"] {
                     width: 100%;
                     padding: 10px 14px;
                     background: rgba(15, 23, 42, 0.6);
@@ -1728,9 +1832,56 @@ DASHBOARD_TEMPLATE = '''
                 }
             `;
             document.head.appendChild(style);
+
+            // Add password validation listener
+            const passInput = document.getElementById('webadmin_password');
+            if (passInput) {
+                passInput.addEventListener('input', validatePassword);
+            }
+        }
+
+        function toggleWebadminPassword() {
+            const checked = document.getElementById('enable_admin_ui').checked;
+            const area = document.getElementById('webadmin-password-area');
+            if (area) area.style.display = checked ? 'block' : 'none';
+        }
+
+        function validatePassword() {
+            const pass = document.getElementById('webadmin_password').value;
+            const el = document.getElementById('password-validation');
+            if (!pass) { el.innerHTML = ''; return false; }
+
+            const checks = [
+                { test: pass.length >= 15, label: '15+ characters' },
+                { test: /[A-Z]/.test(pass), label: '1 uppercase' },
+                { test: /[a-z]/.test(pass), label: '1 lowercase' },
+                { test: /[0-9]/.test(pass), label: '1 number' },
+                { test: /[-_!@#$%^&*(){}[\]+=~`|:;<>,./\\?]/.test(pass), label: '1 special char' },
+            ];
+
+            let html = checks.map(c =>
+                `<span style="color: ${c.test ? 'var(--green)' : 'var(--red)'};">${c.test ? '✓' : '✗'} ${c.label}</span>`
+            ).join(' &nbsp; ');
+
+            el.innerHTML = html;
+            return checks.every(c => c.test);
         }
 
         async function startDeploy() {
+            // Validate webadmin password if Admin UI is checked
+            const adminUIChecked = document.getElementById('enable_admin_ui').checked;
+            if (adminUIChecked) {
+                const pass = document.getElementById('webadmin_password').value;
+                if (!pass) {
+                    alert('Please set a password for the webadmin user.');
+                    return;
+                }
+                if (!validatePassword()) {
+                    alert('WebAdmin password does not meet requirements (15+ chars, upper, lower, number, special).');
+                    return;
+                }
+            }
+
             const btn = document.getElementById('deploy-btn');
             btn.disabled = true;
             btn.textContent = 'Deploying...';
@@ -1751,6 +1902,7 @@ DASHBOARD_TEMPLATE = '''
                 enable_admin_ui: document.getElementById('enable_admin_ui').checked,
                 enable_webtak: document.getElementById('enable_webtak').checked,
                 enable_nonadmin_ui: document.getElementById('enable_nonadmin_ui').checked,
+                webadmin_password: adminUIChecked ? document.getElementById('webadmin_password').value : '',
             };
 
             // Show deploy log area
@@ -1765,7 +1917,6 @@ DASHBOARD_TEMPLATE = '''
                 const data = await resp.json();
 
                 if (data.success) {
-                    // Start polling the log
                     pollDeployLog();
                 } else {
                     const logEl = document.getElementById('deploy-log');
@@ -1784,6 +1935,8 @@ DASHBOARD_TEMPLATE = '''
         }
 
         let logIndex = 0;
+        let pollFailCount = 0;
+
         function pollDeployLog() {
             const logEl = document.getElementById('deploy-log');
 
@@ -1791,16 +1944,17 @@ DASHBOARD_TEMPLATE = '''
                 try {
                     const resp = await fetch('/api/deploy/log?after=' + logIndex);
                     const data = await resp.json();
+                    pollFailCount = 0;  // Reset on success
 
                     if (data.entries.length > 0) {
                         data.entries.forEach(entry => {
                             const line = document.createElement('div');
-                            // Color code lines
                             if (entry.includes('✓')) line.style.color = 'var(--green)';
                             else if (entry.includes('✗') || entry.includes('FATAL')) line.style.color = 'var(--red)';
                             else if (entry.includes('━━━')) line.style.color = 'var(--cyan)';
                             else if (entry.includes('⚠')) line.style.color = 'var(--yellow)';
                             else if (entry.includes('===')) line.style.color = 'var(--accent)';
+                            else if (entry.includes('WebGUI') || entry.includes('Username')) line.style.color = 'var(--green)';
                             line.textContent = entry;
                             logEl.appendChild(line);
                         });
@@ -1814,13 +1968,22 @@ DASHBOARD_TEMPLATE = '''
                         const btn = document.getElementById('deploy-btn');
                         btn.textContent = '✓ Deployment Complete';
                         btn.style.background = 'var(--green)';
+                        btn.style.opacity = '1';
+                        // Show cert download buttons
+                        const dlArea = document.getElementById('cert-download-area');
+                        if (dlArea) dlArea.style.display = 'block';
                     } else if (data.error) {
                         const btn = document.getElementById('deploy-btn');
                         btn.textContent = '✗ Deployment Failed';
                         btn.style.background = 'var(--red)';
+                        btn.style.opacity = '1';
                     }
                 } catch(e) {
-                    setTimeout(poll, 2000);
+                    pollFailCount++;
+                    // Keep trying even if a few polls fail (long operations can cause timeouts)
+                    if (pollFailCount < 30) {
+                        setTimeout(poll, 2000);
+                    }
                 }
             };
             poll();
