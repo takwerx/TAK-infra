@@ -180,7 +180,7 @@ print(generate_password_hash(sys.argv[1]))
     # Save auth config
     cat > "$AUTH_FILE" << EOF
 {
-    "admin_password_hash": "$PASS_HASH",
+    "password_hash": "$PASS_HASH",
     "created": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 EOF
