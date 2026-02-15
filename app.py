@@ -313,6 +313,323 @@ def upload_takserver_package():
         'has_verification': results['gpg_key'] is not None and results['policy'] is not None
     })
 
+
+# =============================================================================
+# TAK Server Deployment
+# =============================================================================
+
+deploy_log = []
+deploy_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/deploy/takserver', methods=['POST'])
+@login_required
+def deploy_takserver():
+    """Start TAK Server deployment in background thread"""
+    import threading
+
+    if deploy_status['running']:
+        return jsonify({'error': 'Deployment already in progress'}), 400
+
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No configuration provided'}), 400
+
+    pkg_files = [f for f in os.listdir(UPLOAD_DIR)
+                 if f.endswith('.deb') or f.endswith('.rpm')]
+    if not pkg_files:
+        return jsonify({'error': 'No package file found. Upload a .deb or .rpm first.'}), 400
+
+    config = {
+        'package_path': os.path.join(UPLOAD_DIR, pkg_files[0]),
+        'cert_country': data.get('cert_country', 'US'),
+        'cert_state': data.get('cert_state', 'CA'),
+        'cert_city': data.get('cert_city', 'SACRAMENTO'),
+        'cert_org': data.get('cert_org', 'TAK'),
+        'cert_ou': data.get('cert_ou', 'TAK'),
+        'root_ca_name': data.get('root_ca_name', 'ROOT-CA-01'),
+        'intermediate_ca_name': data.get('intermediate_ca_name', 'INTERMEDIATE-CA-01'),
+        'cert_password': data.get('cert_password', 'atakatak'),
+        'enable_admin_ui': data.get('enable_admin_ui', False),
+        'enable_webtak': data.get('enable_webtak', False),
+        'enable_nonadmin_ui': data.get('enable_nonadmin_ui', False),
+    }
+
+    gpg_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith('.key')]
+    pol_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith('.pol')]
+    if gpg_files:
+        config['gpg_key_path'] = os.path.join(UPLOAD_DIR, gpg_files[0])
+    if pol_files:
+        config['policy_path'] = os.path.join(UPLOAD_DIR, pol_files[0])
+
+    deploy_log.clear()
+    deploy_status['running'] = True
+    deploy_status['complete'] = False
+    deploy_status['error'] = False
+
+    thread = threading.Thread(target=run_takserver_deploy, args=(config,))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'success': True, 'message': 'Deployment started'})
+
+
+def log_step(msg):
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    entry = f"[{timestamp}] {msg}"
+    deploy_log.append(entry)
+    print(entry, flush=True)
+
+
+def run_command(cmd, desc=None, check=True):
+    if desc:
+        log_step(desc)
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+        if result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                deploy_log.append(f"  {line}")
+        if result.stderr.strip():
+            for line in result.stderr.strip().split('\n'):
+                if 'error' in line.lower():
+                    deploy_log.append(f"  ✗ {line}")
+        if check and result.returncode != 0:
+            log_step(f"✗ Command failed (exit {result.returncode})")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        log_step("✗ Command timed out")
+        return False
+    except Exception as e:
+        log_step(f"✗ Exception: {str(e)}")
+        return False
+
+
+def run_takserver_deploy(config):
+    try:
+        log_step("=" * 50)
+        log_step("TAK Server Deployment Starting")
+        log_step("=" * 50)
+
+        pkg_path = config['package_path']
+        pkg_name = os.path.basename(pkg_path)
+
+        # Step 1: System Limits
+        log_step("")
+        log_step("━━━ Step 1/9: System Limits ━━━")
+        run_command(
+            'grep -q "soft nofile 32768" /etc/security/limits.conf || '
+            'echo -e "* soft nofile 32768\\n* hard nofile 32768" >> /etc/security/limits.conf',
+            "Increasing JVM thread limits..."
+        )
+        log_step("✓ System limits configured")
+
+        # Step 2: PostgreSQL Repository
+        log_step("")
+        log_step("━━━ Step 2/9: PostgreSQL Repository ━━━")
+        run_command('apt-get install -y lsb-release > /dev/null 2>&1', "Installing prerequisites...")
+        run_command('install -d /usr/share/postgresql-common/pgdg', check=False)
+        run_command(
+            'curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc '
+            '--fail https://www.postgresql.org/media/keys/ACCC4CF8.asc 2>/dev/null',
+            "Adding PostgreSQL GPG key..."
+        )
+        run_command(
+            'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] '
+            'https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" '
+            '> /etc/apt/sources.list.d/pgdg.list'
+        )
+        run_command('apt-get update -qq > /dev/null 2>&1', "Updating package lists...")
+        log_step("✓ PostgreSQL repository configured")
+
+        # Step 3: GPG Verification
+        log_step("")
+        log_step("━━━ Step 3/9: Package Verification ━━━")
+        if config.get('gpg_key_path') and config.get('policy_path'):
+            log_step("GPG key and policy found — verifying...")
+            run_command('apt-get install -y debsig-verify gnupg2 > /dev/null 2>&1')
+            result = subprocess.run(
+                f"grep -o 'id=\"[^\"]*\"' {config['policy_path']} | head -1 | tr -d 'id=\"'",
+                shell=True, capture_output=True, text=True
+            )
+            policy_id = result.stdout.strip()
+            if policy_id:
+                run_command(f'mkdir -p /usr/share/debsig/keyrings/{policy_id}')
+                run_command(f'mkdir -p /etc/debsig/policies/{policy_id}')
+                run_command(f'gpg2 --no-default-keyring --keyring /usr/share/debsig/keyrings/{policy_id}/debsig.gpg --import {config["gpg_key_path"]} 2>/dev/null')
+                run_command(f'cp {config["policy_path"]} /etc/debsig/policies/{policy_id}/debsig.pol')
+                verify = subprocess.run(f'debsig-verify {pkg_path}', shell=True, capture_output=True, text=True)
+                if 'Verified' in verify.stdout:
+                    log_step("✓ Package signature VERIFIED")
+                else:
+                    log_step("⚠ Verification failed — installing anyway")
+        else:
+            log_step("No GPG key/policy — skipping verification")
+
+        # Step 4: Install Package
+        log_step("")
+        log_step("━━━ Step 4/9: Installing TAK Server ━━━")
+        log_step(f"Installing {pkg_name}...")
+        if not run_command(f'DEBIAN_FRONTEND=noninteractive apt-get install -y {pkg_path} 2>&1', check=False):
+            run_command(f'dpkg -i {pkg_path} 2>&1', check=False)
+            run_command('apt-get install -f -y 2>&1', check=False)
+
+        if not os.path.exists('/opt/tak'):
+            log_step("✗ FATAL: /opt/tak not found")
+            deploy_status['error'] = True
+            deploy_status['running'] = False
+            return
+        log_step("✓ TAK Server installed")
+
+        # Step 5: Start TAK Server
+        log_step("")
+        log_step("━━━ Step 5/9: Starting TAK Server ━━━")
+        run_command('systemctl daemon-reload')
+        run_command('systemctl start takserver', "Starting TAK Server...")
+        run_command('systemctl enable takserver > /dev/null 2>&1')
+        log_step("Waiting 30 seconds for initialization...")
+        time.sleep(30)
+        log_step("✓ TAK Server started")
+
+        # Step 6: Firewall
+        log_step("")
+        log_step("━━━ Step 6/9: Configuring Firewall ━━━")
+        for port in ['22/tcp', '8089/tcp', '8443/tcp', '8446/tcp']:
+            run_command(f'ufw allow {port} > /dev/null 2>&1')
+        run_command('ufw --force enable > /dev/null 2>&1')
+        log_step("✓ Firewall configured (22, 8089, 8443, 8446)")
+
+        # Step 7: Certificates
+        log_step("")
+        log_step("━━━ Step 7/9: Generating Certificates ━━━")
+        root_ca = config['root_ca_name']
+        int_ca = config['intermediate_ca_name']
+        log_step(f"  Root CA: {root_ca} | Intermediate CA: {int_ca}")
+
+        run_command('rm -rf /opt/tak/certs/files')
+        run_command('cd /opt/tak/certs && cp cert-metadata.sh cert-metadata.sh.original 2>/dev/null; true')
+        run_command('cd /opt/tak/certs && cp cert-metadata.sh.original cert-metadata.sh 2>/dev/null; true')
+
+        for field, val in [('COUNTRY=US', f'COUNTRY={config["cert_country"]}'),
+                           ('STATE=${STATE}', f'STATE={config["cert_state"]}'),
+                           ('CITY=${CITY}', f'CITY={config["cert_city"]}'),
+                           ('ORGANIZATION=${ORGANIZATION:-TAK}', f'ORGANIZATION={config["cert_org"]}'),
+                           ('ORGANIZATIONAL_UNIT=${ORGANIZATIONAL_UNIT}', f'ORGANIZATIONAL_UNIT={config["cert_ou"]}')]:
+            run_command(f'sed -i "s/{field}/{val}/g" /opt/tak/certs/cert-metadata.sh', check=False)
+
+        run_command('chown -R tak:tak /opt/tak/certs/')
+
+        log_step(f"Creating Root CA: {root_ca}...")
+        run_command(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1')
+        log_step(f"Creating Intermediate CA: {int_ca}...")
+        run_command(f'cd /opt/tak/certs && echo -e "y\\n" | sudo -u tak ./makeCert.sh ca "{int_ca}" 2>&1')
+        log_step("Creating server certificate...")
+        run_command('cd /opt/tak/certs && sudo -u tak ./makeCert.sh server takserver 2>&1')
+        log_step("Creating admin certificate...")
+        run_command('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client admin 2>&1')
+        log_step("Creating user certificate...")
+        run_command('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1')
+        log_step("✓ All certificates created")
+
+        log_step("Restarting TAK Server...")
+        run_command('systemctl stop takserver')
+        time.sleep(10)
+        run_command('pkill -9 -f takserver 2>/dev/null; true')
+        time.sleep(5)
+        run_command('systemctl start takserver')
+        log_step("Waiting 90 seconds for initialization...")
+        time.sleep(90)
+
+        # Step 8: CoreConfig
+        log_step("")
+        log_step("━━━ Step 8/9: Configuring CoreConfig.xml ━━━")
+
+        run_command(
+            'sed -i \'s|<input auth="anonymous" _name="stdtcp" protocol="tcp" port="8087"/>|'
+            '<input auth="x509" _name="stdssl" protocol="tls" port="8089"/>|g\' /opt/tak/CoreConfig.xml',
+            "Enabling X.509 auth on 8089..."
+        )
+        run_command(
+            f'sed -i "s|truststoreFile=\\"certs/files/truststore-root.jks|truststoreFile=\\"certs/files/truststore-{int_ca}.jks|g" /opt/tak/CoreConfig.xml',
+            "Setting intermediate CA truststore..."
+        )
+
+        cert_org = config['cert_org']
+        cert_ou = config['cert_ou']
+        cert_block = (
+            f'<certificateSigning CA="TAKServer"><certificateConfig>\\n'
+            f'<nameEntries>\\n<nameEntry name="O" value="{cert_org}"/>\\n'
+            f'<nameEntry name="OU" value="{cert_ou}"/>\\n</nameEntries>\\n'
+            f'</certificateConfig>\\n<TAKServerCAConfig keystore="JKS" '
+            f'keystoreFile="certs/files/{int_ca}-signing.jks" keystorePass="atakatak" '
+            f'validityDays="3650" signatureAlg="SHA256WithRSA" />\\n'
+            f'</certificateSigning>\\n<vbm enabled="false"/>'
+        )
+        run_command(
+            f'sed -i \'s|<vbm enabled="false"/>|{cert_block}|g\' /opt/tak/CoreConfig.xml',
+            "Enabling certificate enrollment..."
+        )
+        run_command('sed -i \'s|<auth>|<auth x509useGroupCache="true">|g\' /opt/tak/CoreConfig.xml')
+
+        admin_ui = str(config.get('enable_admin_ui', False)).lower()
+        webtak_val = str(config.get('enable_webtak', False)).lower()
+        nonadmin_ui = str(config.get('enable_nonadmin_ui', False)).lower()
+        if config.get('enable_admin_ui') or config.get('enable_webtak') or config.get('enable_nonadmin_ui'):
+            log_step(f"WebTAK: AdminUI={admin_ui}, WebTAK={webtak_val}, NonAdminUI={nonadmin_ui}")
+            run_command(
+                f'sed -i \'s|"cert_https"/|"cert_https" enableAdminUI="{admin_ui}" '
+                f'enableWebtak="{webtak_val}" enableNonAdminUI="{nonadmin_ui}"/|g\' /opt/tak/CoreConfig.xml'
+            )
+
+        log_step("✓ CoreConfig.xml configured")
+
+        log_step("Final restart...")
+        run_command('systemctl stop takserver')
+        time.sleep(10)
+        run_command('pkill -9 -f takserver 2>/dev/null; true')
+        time.sleep(5)
+        run_command('systemctl start takserver')
+        log_step("Waiting 3 minutes for full initialization...")
+        time.sleep(180)
+
+        # Step 9: Promote Admin
+        log_step("")
+        log_step("━━━ Step 9/9: Promoting Admin ━━━")
+        run_command('java -jar /opt/tak/utils/UserManager.jar certmod -A /opt/tak/certs/files/admin.pem 2>&1',
+                    "Promoting admin certificate...", check=False)
+        run_command('systemctl restart takserver')
+        time.sleep(30)
+
+        server_ip = load_settings().get('server_ip', 'YOUR-IP')
+        log_step("")
+        log_step("=" * 50)
+        log_step("✓ DEPLOYMENT COMPLETE!")
+        log_step("=" * 50)
+        log_step(f"  WebGUI: https://{server_ip}:8443")
+        log_step(f"  Certificate Password: atakatak")
+        log_step(f"  Admin cert: /opt/tak/certs/files/admin.p12")
+
+        deploy_status['complete'] = True
+        deploy_status['running'] = False
+
+    except Exception as e:
+        log_step(f"✗ FATAL ERROR: {str(e)}")
+        deploy_status['error'] = True
+        deploy_status['running'] = False
+
+
+@app.route('/api/deploy/log')
+@login_required
+def deploy_log_stream():
+    last_index = int(request.args.get('after', 0))
+    return jsonify({
+        'entries': deploy_log[last_index:],
+        'total': len(deploy_log),
+        'running': deploy_status['running'],
+        'complete': deploy_status['complete'],
+        'error': deploy_status['error']
+    })
+
+
 # =============================================================================
 # HTML Templates
 # =============================================================================
@@ -1006,12 +1323,31 @@ DASHBOARD_TEMPLATE = '''
             <div class="upload-icon">📦</div>
             <div class="upload-text">Drop your TAK Server files here</div>
             <div class="upload-hint">
-                Required: .deb or .rpm package<br>
-                Optional: takserver-public-gpg.key + deb_policy.pol<br>
-                <span style="color: var(--text-dim); font-size: 11px;">Select all at once or add files one at a time</span>
+                {% if 'ubuntu' in settings.get('os_type', '') %}
+                <strong style="color: var(--text-secondary);">Ubuntu — upload these files from tak.gov:</strong><br>
+                Required: <span style="color: var(--cyan);">takserver_X.X_all.deb</span><br>
+                Optional: <span style="color: var(--text-secondary);">deb_policy.pol</span> +
+                <span style="color: var(--text-secondary);">takserver-public-gpg.key</span> (for signature verification)
+                {% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}
+                <strong style="color: var(--text-secondary);">Rocky/RHEL — upload these files from tak.gov:</strong><br>
+                Required: <span style="color: var(--cyan);">takserver-X.X.noarch.rpm</span><br>
+                Optional: <span style="color: var(--text-secondary);">takserver-public-gpg.key</span> (for signature verification)
+                {% else %}
+                Required: <span style="color: var(--cyan);">.deb</span> or <span style="color: var(--cyan);">.rpm</span> package<br>
+                Optional: GPG key + policy file (for signature verification)
+                {% endif %}
+                <br><span style="color: var(--text-dim); font-size: 11px;">Select all at once or add files one at a time</span>
             </div>
             <input type="file" id="file-input" style="display:none"
-                   multiple accept=".deb,.rpm,.key,.pol" onchange="handleFileSelect(event)">
+                   multiple
+                   {% if 'ubuntu' in settings.get('os_type', '') %}
+                   accept=".deb,.key,.pol"
+                   {% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}
+                   accept=".rpm,.key"
+                   {% else %}
+                   accept=".deb,.rpm,.key,.pol"
+                   {% endif %}
+                   onchange="handleFileSelect(event)">
         </div>
 
         <!-- Per-file progress bars -->
@@ -1031,7 +1367,15 @@ DASHBOARD_TEMPLATE = '''
                         font-size: 12px; cursor: pointer; transition: all 0.2s;
                     ">+ Add more files</button>
                     <input type="file" id="file-input-more" style="display:none"
-                           multiple accept=".deb,.rpm,.key,.pol" onchange="handleAddMore(event)">
+                           multiple
+                           {% if 'ubuntu' in settings.get('os_type', '') %}
+                           accept=".deb,.key,.pol"
+                           {% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}
+                           accept=".rpm,.key"
+                           {% else %}
+                           accept=".deb,.rpm,.key,.pol"
+                           {% endif %}
+                           onchange="handleAddMore(event)">
                 </div>
                 <div id="deploy-btn-area" style="margin-top: 20px; text-align: center; display: none;">
                     <button onclick="showDeployConfig()" style="
@@ -1242,8 +1586,244 @@ DASHBOARD_TEMPLATE = '''
         }
 
         function showDeployConfig() {
-            // TODO: Show the deploy configuration form
-            alert('Deploy configuration coming next!');
+            // Replace the upload results area with the config form
+            const main = document.querySelector('.main');
+
+            // Hide everything after metrics bar
+            const sections = main.querySelectorAll('.section-title, .modules-grid, #upload-area, #progress-area, #upload-results');
+            sections.forEach(el => el.style.display = 'none');
+
+            // Create deploy config form
+            const configDiv = document.createElement('div');
+            configDiv.innerHTML = `
+                <div class="section-title">Configure TAK Server Deployment</div>
+                <div style="background: var(--bg-card); border: 1px solid var(--border);
+                            border-radius: 12px; padding: 28px; margin-bottom: 20px;">
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px;
+                                color: var(--text-dim); margin-bottom: 20px; text-transform: uppercase;
+                                letter-spacing: 1px; font-weight: 600;">Certificate Information</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="form-field">
+                            <label>Country (2 letters)</label>
+                            <input type="text" id="cert_country" value="US" maxlength="2"
+                                   style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-field">
+                            <label>State/Province</label>
+                            <input type="text" id="cert_state" value="CA"
+                                   style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-field">
+                            <label>City</label>
+                            <input type="text" id="cert_city" value="SACRAMENTO"
+                                   style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-field">
+                            <label>Organization</label>
+                            <input type="text" id="cert_org" value="TAK"
+                                   style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-field">
+                            <label>Organizational Unit</label>
+                            <input type="text" id="cert_ou" value="TAK"
+                                   style="text-transform: uppercase;">
+                        </div>
+                    </div>
+
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px;
+                                color: var(--text-dim); margin: 24px 0 20px; text-transform: uppercase;
+                                letter-spacing: 1px; font-weight: 600;">Certificate Authority Names</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="form-field">
+                            <label>Root CA Name</label>
+                            <input type="text" id="root_ca_name" value="ROOT-CA-01"
+                                   style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-field">
+                            <label>Intermediate CA Name</label>
+                            <input type="text" id="intermediate_ca_name" value="INTERMEDIATE-CA-01"
+                                   style="text-transform: uppercase;">
+                        </div>
+                    </div>
+
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px;
+                                color: var(--text-dim); margin: 24px 0 20px; text-transform: uppercase;
+                                letter-spacing: 1px; font-weight: 600;">WebTAK Options (Port 8446)</div>
+                    <div style="display: flex; flex-direction: column; gap: 14px;">
+                        <label style="display: flex; align-items: center; gap: 10px;
+                                      color: var(--text-secondary); cursor: pointer; font-size: 14px;">
+                            <input type="checkbox" id="enable_admin_ui" style="width: 18px; height: 18px; accent-color: var(--accent);">
+                            Enable Admin UI <span style="color: var(--text-dim); font-size: 12px;">— Access admin console with username/password (no browser cert needed)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px;
+                                      color: var(--text-secondary); cursor: pointer; font-size: 14px;">
+                            <input type="checkbox" id="enable_webtak" style="width: 18px; height: 18px; accent-color: var(--accent);">
+                            Enable WebTAK <span style="color: var(--text-dim); font-size: 12px;">— Browser-based TAK client via credentials</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 10px;
+                                      color: var(--text-secondary); cursor: pointer; font-size: 14px;">
+                            <input type="checkbox" id="enable_nonadmin_ui" style="width: 18px; height: 18px; accent-color: var(--accent);">
+                            Enable Non-Admin UI <span style="color: var(--text-dim); font-size: 12px;">— Non-admin users can access management console</span>
+                        </label>
+                    </div>
+
+                    <div style="margin-top: 28px; text-align: center;">
+                        <button onclick="startDeploy()" id="deploy-btn" style="
+                            padding: 14px 48px;
+                            background: linear-gradient(135deg, #1e40af, #0e7490);
+                            color: #fff; border: none; border-radius: 10px;
+                            font-family: 'DM Sans', sans-serif; font-size: 16px;
+                            font-weight: 600; cursor: pointer; transition: all 0.2s;
+                            letter-spacing: 0.3px;
+                        ">🚀 Deploy TAK Server</button>
+                    </div>
+                </div>
+
+                <!-- Deploy log area (hidden until deploy starts) -->
+                <div id="deploy-log-area" style="display: none;">
+                    <div class="section-title">Deployment Log</div>
+                    <div id="deploy-log" style="
+                        background: #0c0f1a;
+                        border: 1px solid var(--border);
+                        border-radius: 12px;
+                        padding: 20px;
+                        font-family: 'JetBrains Mono', monospace;
+                        font-size: 12px;
+                        color: var(--text-secondary);
+                        max-height: 500px;
+                        overflow-y: auto;
+                        line-height: 1.7;
+                        white-space: pre-wrap;
+                    "></div>
+                </div>
+            `;
+            main.appendChild(configDiv);
+
+            // Add form field styles
+            const style = document.createElement('style');
+            style.textContent = `
+                .form-field label {
+                    display: block;
+                    font-size: 11px;
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                    color: var(--text-dim);
+                    font-weight: 600;
+                    margin-bottom: 6px;
+                }
+                .form-field input[type="text"] {
+                    width: 100%;
+                    padding: 10px 14px;
+                    background: rgba(15, 23, 42, 0.6);
+                    border: 1px solid rgba(59, 130, 246, 0.2);
+                    border-radius: 8px;
+                    color: var(--text-primary);
+                    font-family: 'JetBrains Mono', monospace;
+                    font-size: 14px;
+                }
+                .form-field input:focus {
+                    outline: none;
+                    border-color: var(--accent);
+                    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        async function startDeploy() {
+            const btn = document.getElementById('deploy-btn');
+            btn.disabled = true;
+            btn.textContent = 'Deploying...';
+            btn.style.opacity = '0.6';
+            btn.style.cursor = 'not-allowed';
+
+            // Disable all form inputs
+            document.querySelectorAll('.form-field input, input[type="checkbox"]').forEach(el => el.disabled = true);
+
+            const config = {
+                cert_country: document.getElementById('cert_country').value.toUpperCase(),
+                cert_state: document.getElementById('cert_state').value.toUpperCase(),
+                cert_city: document.getElementById('cert_city').value.toUpperCase(),
+                cert_org: document.getElementById('cert_org').value.toUpperCase(),
+                cert_ou: document.getElementById('cert_ou').value.toUpperCase(),
+                root_ca_name: document.getElementById('root_ca_name').value.toUpperCase(),
+                intermediate_ca_name: document.getElementById('intermediate_ca_name').value.toUpperCase(),
+                enable_admin_ui: document.getElementById('enable_admin_ui').checked,
+                enable_webtak: document.getElementById('enable_webtak').checked,
+                enable_nonadmin_ui: document.getElementById('enable_nonadmin_ui').checked,
+            };
+
+            // Show deploy log area
+            document.getElementById('deploy-log-area').style.display = 'block';
+
+            try {
+                const resp = await fetch('/api/deploy/takserver', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    // Start polling the log
+                    pollDeployLog();
+                } else {
+                    const logEl = document.getElementById('deploy-log');
+                    logEl.textContent = '✗ ' + data.error;
+                    logEl.style.color = 'var(--red)';
+                    btn.disabled = false;
+                    btn.textContent = '🚀 Deploy TAK Server';
+                    btn.style.opacity = '1';
+                    btn.style.cursor = 'pointer';
+                }
+            } catch(e) {
+                const logEl = document.getElementById('deploy-log');
+                logEl.textContent = '✗ Failed to start deployment: ' + e.message;
+                logEl.style.color = 'var(--red)';
+            }
+        }
+
+        let logIndex = 0;
+        function pollDeployLog() {
+            const logEl = document.getElementById('deploy-log');
+
+            const poll = async () => {
+                try {
+                    const resp = await fetch('/api/deploy/log?after=' + logIndex);
+                    const data = await resp.json();
+
+                    if (data.entries.length > 0) {
+                        data.entries.forEach(entry => {
+                            const line = document.createElement('div');
+                            // Color code lines
+                            if (entry.includes('✓')) line.style.color = 'var(--green)';
+                            else if (entry.includes('✗') || entry.includes('FATAL')) line.style.color = 'var(--red)';
+                            else if (entry.includes('━━━')) line.style.color = 'var(--cyan)';
+                            else if (entry.includes('⚠')) line.style.color = 'var(--yellow)';
+                            else if (entry.includes('===')) line.style.color = 'var(--accent)';
+                            line.textContent = entry;
+                            logEl.appendChild(line);
+                        });
+                        logIndex = data.total;
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+
+                    if (data.running) {
+                        setTimeout(poll, 1000);
+                    } else if (data.complete) {
+                        const btn = document.getElementById('deploy-btn');
+                        btn.textContent = '✓ Deployment Complete';
+                        btn.style.background = 'var(--green)';
+                    } else if (data.error) {
+                        const btn = document.getElementById('deploy-btn');
+                        btn.textContent = '✗ Deployment Failed';
+                        btn.style.background = 'var(--red)';
+                    }
+                } catch(e) {
+                    setTimeout(poll, 2000);
+                }
+            };
+            poll();
         }
     </script>
 </body>
