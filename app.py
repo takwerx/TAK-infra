@@ -269,7 +269,8 @@ def run_cmd(cmd, desc=None, check=True):
         return False
 
 def wait_for_package_lock():
-    """Wait for unattended-upgrades to finish (common on fresh VPS)
+    """Wait for unattended-upgrades to finish (common on fresh VPS).
+    NO TIMEOUT - waits as long as needed (can be 20-45 min on fresh images).
     Uses pgrep -f to match exact process, not the shutdown handler.
     Battle-tested from Ubuntu_22.04_TAK_Server_install.sh"""
     log_step("Checking for system upgrades in progress...")
@@ -278,21 +279,20 @@ def wait_for_package_lock():
         log_step("\u2713 No system upgrades in progress, continuing...")
         return True
     log_step("\u23f3 System is running unattended-upgrades, waiting for completion...")
-    max_wait = 600
+    log_step("  This can take 20-45 minutes on a fresh VPS. Do not cancel.")
     waited = 0
-    while waited < max_wait:
+    while True:
         time.sleep(10)
         waited += 10
         r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
         if r.stdout.strip() == '':
-            log_step(f"\u2713 System upgrades complete! (waited {waited}s)")
+            m, s = divmod(waited, 60)
+            log_step(f"\u2713 System upgrades complete! (waited {m}m {s}s)")
             time.sleep(5)
             return True
         if waited % 60 == 0:
             m = waited // 60
             log_step(f"  Still waiting... {m} minute{'s' if m != 1 else ''} elapsed")
-    log_step("\u26a0 Upgrade wait timeout (10 min) \u2014 attempting anyway")
-    return False
 
 def run_takserver_deploy(config):
     try:
