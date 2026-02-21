@@ -1252,10 +1252,7 @@ def run_takportal_deploy():
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
             plog(f"  \u2713 Caddy config updated for TAK Portal")
-            plog(f"")
-            plog(f"  \u23f3 NOTE: Wait ~60 seconds before opening TAK Portal.")
-            plog(f"  Authentik embedded outpost needs time to sync.")
-            plog(f"  Then open: https://takportal.{settings.get('fqdn')}")
+            plog(f"  Open: https://takportal.{settings.get('fqdn')}")
         plog("=" * 50)
         plog("")
         plog("  Waiting 2 minutes for Authentik to fully sync...")
@@ -1587,12 +1584,23 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(portal_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal :{{ portal_port }}</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik :9090</a>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
+{% if container_info.get('containers') %}
+<div class="section-title">Services</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div class="svc-grid">
+{% for c in container_info.containers %}
+<div class="svc-card" onclick="filterLogs('{{ c.name }}')" style="cursor:pointer;border-color:{{ 'var(--red)' if 'unhealthy' in c.status else 'var(--green)' if 'Up' in c.status else 'var(--border)' }}" id="svc-{{ c.name }}"><div class="svc-name">{{ c.name }}</div><div class="svc-status" style="color:{{ 'var(--red)' if 'unhealthy' in c.status else 'var(--green)' }}">● {{ c.status }}</div></div>
+{% endfor %}
+</div>
+</div>
+{% endif %}
+<div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
 <button class="control-btn btn-remove" onclick="uninstallPortal()">🗑 Remove TAK Portal</button>
@@ -1684,18 +1692,9 @@ function pollDeployLog(){
             var el=document.getElementById('deploy-log');
             var fqdn=window.location.hostname.replace(/^[^.]+\./,'');
             var portalUrl='https://takportal.'+fqdn;
-            var notice=document.createElement('div');
-            notice.style.cssText='margin-top:16px;padding:12px;background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;color:#fbbf24;font-size:13px;';
-            notice.textContent='\u23f3 Wait ~60 seconds before opening TAK Portal. Authentik embedded outpost needs time to sync.';
-            el.appendChild(notice);
-            var openBtn=document.createElement('button');
-            openBtn.textContent='Open TAK Portal: '+portalUrl;
-            openBtn.style.cssText='display:block;width:100%;padding:12px;margin-top:8px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
-            openBtn.onclick=function(){window.open(portalUrl,'_blank');};
-            el.appendChild(openBtn);
             var refreshBtn=document.createElement('button');
-            refreshBtn.textContent='\u21bb Refresh TAK Portal Page';
-            refreshBtn.style.cssText='display:block;width:100%;padding:10px;margin-top:8px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:13px;cursor:pointer;';
+            refreshBtn.textContent='\u21bb Refresh Page';
+            refreshBtn.style.cssText='display:block;width:100%;padding:12px;margin-top:16px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
             refreshBtn.onclick=function(){window.location.href='/takportal';};
             el.appendChild(refreshBtn);
             el.scrollTop=el.scrollHeight;
@@ -2982,7 +2981,7 @@ AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
 <a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik :{{ ak_port }}</a>
-<a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal :3000</a>
+<a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 </div>
@@ -3988,8 +3987,8 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
-<a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal :3000</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik :9090</a>
+<a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
 </div>
 </div>
 <div class="section-title">Services</div>
