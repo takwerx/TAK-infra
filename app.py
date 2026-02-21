@@ -965,7 +965,7 @@ def run_takportal_deploy():
                 # Insert healthcheck after 'restart: unless-stopped' inside the service block
                 healthcheck = (
                     "    healthcheck:\n"
-                    "      test: [\"CMD-SHELL\", \"wget -qO- http://localhost:3000 2>&1 | grep -q 'setup-my-device\\|authentik\\|TAK Portal' && exit 0 || exit 1\"]\n"
+                    "      test: [\"CMD-SHELL\", \"wget -qO- http://localhost:3000 2>&1 | grep -q setup-my-device && exit 0 || exit 1\"]\n"
                     "      interval: 30s\n"
                     "      timeout: 10s\n"
                     "      retries: 3\n"
