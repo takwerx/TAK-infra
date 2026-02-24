@@ -110,17 +110,22 @@ def detect_modules():
     modules['nodered'] = {'name': 'Node-RED', 'installed': nodered_installed, 'running': nodered_running,
         'description': 'Flow-based automation & integrations', 'icon': '🔴', 'route': '/nodered', 'priority': 6}
     # CloudTAK
-    cloudtak_installed = os.path.exists(os.path.expanduser('~/cloudtak')) or os.path.exists('/opt/cloudtak')
+    cloudtak_dir = os.path.expanduser('~/CloudTAK')
+    cloudtak_installed = os.path.exists(cloudtak_dir) and os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml'))
     cloudtak_running = False
     if cloudtak_installed:
-        r = subprocess.run('docker ps --filter name=cloudtak --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
-        if 'Up' in r.stdout:
-            cloudtak_running = True
-        else:
-            r = subprocess.run(['systemctl', 'is-active', 'cloudtak'], capture_output=True, text=True)
-            cloudtak_running = r.stdout.strip() == 'active'
+        r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+        cloudtak_running = 'Up' in r.stdout
     modules['cloudtak'] = {'name': 'CloudTAK', 'installed': cloudtak_installed, 'running': cloudtak_running,
         'description': 'Web-based TAK client — browser access to TAK', 'icon': '☁️', 'route': '/cloudtak', 'priority': 7}
+    # Email Relay (Postfix)
+    email_installed = subprocess.run(['which', 'postfix'], capture_output=True).returncode == 0
+    email_running = False
+    if email_installed:
+        r = subprocess.run(['systemctl', 'is-active', 'postfix'], capture_output=True, text=True)
+        email_running = r.stdout.strip() == 'active'
+    modules['emailrelay'] = {'name': 'Email Relay', 'installed': email_installed, 'running': email_running,
+        'description': 'Postfix relay — notifications for TAK Portal & MediaMTX', 'icon': '📧', 'route': '/emailrelay', 'priority': 8}
     return dict(sorted(modules.items(), key=lambda x: x[1].get('priority', 99)))
 
 def get_system_metrics():
@@ -203,7 +208,7 @@ def update_check():
 @app.route('/api/update/apply', methods=['POST'])
 @login_required
 def update_apply():
-    console_dir = BASE_DIR
+    console_dir = os.path.expanduser('~/takwerx-console')
     try:
         r = subprocess.run(f'cd {console_dir} && git pull --rebase --autostash 2>&1', shell=True, capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
@@ -230,7 +235,15 @@ def takserver_page():
 @app.route('/mediamtx')
 @login_required
 def mediamtx_page():
-    return redirect(url_for('dashboard'))
+    settings = load_settings()
+    modules = detect_modules()
+    mtx = modules.get('mediamtx', {})
+    cloudtak_installed = modules.get('cloudtak', {}).get('installed', False)
+    return render_template_string(MEDIAMTX_TEMPLATE,
+        settings=settings, mtx=mtx, version=VERSION,
+        cloudtak_installed=cloudtak_installed,
+        deploying=mediamtx_deploy_status.get('running', False),
+        deploy_done=mediamtx_deploy_status.get('complete', False))
 
 @app.route('/guarddog')
 @login_required
@@ -245,7 +258,13 @@ def nodered_page():
 @app.route('/cloudtak')
 @login_required
 def cloudtak_page():
-    return redirect(url_for('dashboard'))
+    settings = load_settings()
+    cloudtak = detect_modules().get('cloudtak', {})
+    return render_template_string(CLOUDTAK_TEMPLATE,
+        settings=settings, cloudtak=cloudtak,
+        version=VERSION,
+        deploying=cloudtak_deploy_status.get('running', False),
+        deploy_done=cloudtak_deploy_status.get('complete', False))
 
 @app.route('/caddy')
 @login_required
@@ -448,22 +467,33 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # CloudTAK — cloudtak.domain
+    # CloudTAK — map.domain, tiles.map.domain, video.domain
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
-        lines.append(f"# CloudTAK")
-        lines.append(f"cloudtak.{domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:5173")
+        lines.append(f"# CloudTAK Web UI")
+        lines.append(f"map.{domain} {{")
+        lines.append(f"    reverse_proxy 127.0.0.1:5000")
+        lines.append(f"}}")
+        lines.append("")
+        lines.append(f"# CloudTAK Tile Server")
+        lines.append(f"tiles.map.{domain} {{")
+        lines.append(f"    reverse_proxy 127.0.0.1:5002")
+        lines.append(f"}}")
+        lines.append("")
+        lines.append(f"# CloudTAK Media (video)")
+        lines.append(f"video.{domain} {{")
+        lines.append(f"    reverse_proxy 127.0.0.1:18888")
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — separate domain (user-configured)
-    mtx_domain = settings.get('mediamtx_domain', '')
+    # MediaMTX — stream.domain (when CloudTAK installed) or video.domain (standalone)
     mtx = modules.get('mediamtx', {})
-    if mtx_domain and mtx.get('installed'):
-        lines.append(f"# MediaMTX Streaming")
+    if mtx.get('installed'):
+        cloudtak_installed = modules.get('cloudtak', {}).get('installed')
+        mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}' if cloudtak_installed else f'video.{domain}')
+        lines.append(f"# MediaMTX Web Console")
         lines.append(f"{mtx_domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:8888")
+        lines.append(f"    reverse_proxy 127.0.0.1:5080")
         lines.append(f"}}")
         lines.append("")
 
@@ -1314,6 +1344,1718 @@ def certs_page():
                 files.append({'name': fn, 'size': sz_d, 'icon': icon, 'ext': ext})
     return render_template_string(CERTS_TEMPLATE, settings=settings, files=files, version=VERSION)
 
+# === Email Relay (Postfix) ===
+
+# ── MediaMTX ──────────────────────────────────────────────────────────────────
+mediamtx_deploy_log = []
+mediamtx_deploy_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/mediamtx/deploy', methods=['POST'])
+@login_required
+def mediamtx_deploy_api():
+    if mediamtx_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    mediamtx_deploy_log.clear()
+    mediamtx_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_mediamtx_deploy, daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/mediamtx/deploy/log')
+@login_required
+def mediamtx_deploy_log_api():
+    idx = request.args.get('index', 0, type=int)
+    return jsonify({'entries': mediamtx_deploy_log[idx:], 'total': len(mediamtx_deploy_log),
+        'running': mediamtx_deploy_status['running'], 'complete': mediamtx_deploy_status['complete'],
+        'error': mediamtx_deploy_status['error']})
+
+@app.route('/api/mediamtx/control', methods=['POST'])
+@login_required
+def mediamtx_control():
+    action = (request.json or {}).get('action', '')
+    if action == 'start':
+        subprocess.run('systemctl start mediamtx mediamtx-webeditor 2>&1', shell=True, capture_output=True)
+    elif action == 'stop':
+        subprocess.run('systemctl stop mediamtx mediamtx-webeditor 2>&1', shell=True, capture_output=True)
+    elif action == 'restart':
+        subprocess.run('systemctl restart mediamtx mediamtx-webeditor 2>&1', shell=True, capture_output=True)
+    else:
+        return jsonify({'error': 'Invalid action'}), 400
+    time.sleep(2)
+    r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
+    running = r.stdout.strip() == 'active'
+    return jsonify({'success': True, 'running': running})
+
+@app.route('/api/mediamtx/logs')
+@login_required
+def mediamtx_logs():
+    lines = request.args.get('lines', 60, type=int)
+    r = subprocess.run(f'journalctl -u mediamtx --no-pager -n {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+    entries = [l for l in (r.stdout.strip().split('\n') if r.stdout.strip() else []) if l.strip()]
+    return jsonify({'entries': entries})
+
+@app.route('/api/mediamtx/uninstall', methods=['POST'])
+@login_required
+def mediamtx_uninstall():
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    steps = []
+    subprocess.run('systemctl stop mediamtx mediamtx-webeditor 2>/dev/null; true', shell=True, capture_output=True)
+    subprocess.run('systemctl disable mediamtx mediamtx-webeditor 2>/dev/null; true', shell=True, capture_output=True)
+    for f in ['/etc/systemd/system/mediamtx.service', '/etc/systemd/system/mediamtx-webeditor.service',
+              '/usr/local/bin/mediamtx', '/usr/local/etc/mediamtx.yml']:
+        if os.path.exists(f):
+            os.remove(f)
+    if os.path.exists('/opt/mediamtx-webeditor'):
+        subprocess.run('rm -rf /opt/mediamtx-webeditor', shell=True, capture_output=True)
+    subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
+    steps.append('Stopped and disabled mediamtx and mediamtx-webeditor services')
+    steps.append('Removed binary, config, and web editor files')
+    mediamtx_deploy_log.clear()
+    mediamtx_deploy_status.update({'running': False, 'complete': False, 'error': False})
+    generate_caddyfile()
+    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+    steps.append('Updated Caddyfile')
+    return jsonify({'success': True, 'steps': steps})
+
+def run_mediamtx_deploy():
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        mediamtx_deploy_log.append(entry)
+        print(entry, flush=True)
+    try:
+        settings = load_settings()
+        domain = settings.get('fqdn', '')
+
+        # Step 1: Wait for apt lock / install deps
+        plog("━━━ Step 1/7: Installing Dependencies ━━━")
+        wait_for_apt_lock(plog, mediamtx_deploy_log)
+        r = subprocess.run('apt-get update -qq && apt-get install -y wget tar curl ffmpeg openssl python3 python3-pip 2>&1',
+            shell=True, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            plog(f"✗ apt install failed: {r.stdout[-200:]}")
+            mediamtx_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Dependencies installed (wget, ffmpeg, python3)")
+
+        # Install Python packages
+        plog("  Installing Python packages...")
+        subprocess.run('pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
+            shell=True, capture_output=True, text=True, timeout=120)
+        plog("✓ Python packages installed")
+
+        # Step 2: Detect architecture and latest version
+        plog("")
+        plog("━━━ Step 2/7: Detecting MediaMTX Version ━━━")
+        arch_map = {'x86_64': 'amd64', 'aarch64': 'arm64v8', 'armv7l': 'armv7'}
+        arch_raw = subprocess.run('uname -m', shell=True, capture_output=True, text=True).stdout.strip()
+        mtx_arch = arch_map.get(arch_raw, 'amd64')
+        plog(f"  Architecture: {arch_raw} → {mtx_arch}")
+
+        r = subprocess.run('curl -s https://api.github.com/repos/bluenviron/mediamtx/releases/latest',
+            shell=True, capture_output=True, text=True, timeout=30)
+        import re as _re
+        m = _re.search(r'"tag_name":\s*"v([^"]+)"', r.stdout)
+        if not m:
+            plog("✗ Could not detect latest MediaMTX version")
+            mediamtx_deploy_status.update({'running': False, 'error': True})
+            return
+        version = m.group(1)
+        plog(f"✓ Latest version: {version}")
+
+        # Step 3: Download and install binary
+        plog("")
+        plog("━━━ Step 3/7: Downloading & Installing MediaMTX ━━━")
+        url = f"https://github.com/bluenviron/mediamtx/releases/download/v{version}/mediamtx_v{version}_linux_{mtx_arch}.tar.gz"
+        tmp = '/tmp/mediamtx_install'
+        os.makedirs(tmp, exist_ok=True)
+        r = subprocess.run(f'wget -q -O {tmp}/mediamtx.tar.gz "{url}"', shell=True, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            plog(f"✗ Download failed")
+            mediamtx_deploy_status.update({'running': False, 'error': True})
+            return
+        subprocess.run(f'tar -xzf {tmp}/mediamtx.tar.gz -C {tmp}', shell=True, capture_output=True)
+        subprocess.run(f'mv -f {tmp}/mediamtx /usr/local/bin/mediamtx && chmod +x /usr/local/bin/mediamtx', shell=True, capture_output=True)
+        subprocess.run(f'rm -rf {tmp}', shell=True, capture_output=True)
+        plog(f"✓ MediaMTX v{version} installed to /usr/local/bin/mediamtx")
+
+        # Step 4: Write config
+        plog("")
+        plog("━━━ Step 4/7: Writing Configuration ━━━")
+        os.makedirs('/usr/local/etc', exist_ok=True)
+        import secrets as _sec
+        hls_pass = _sec.token_hex(8)
+
+        mediamtx_yml = f"""# MediaMTX Configuration - Generated by TAKWERX Console
+logLevel: info
+logDestinations: [stdout]
+logStructured: no
+logFile: mediamtx.log
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+udpMaxPayloadSize: 1472
+
+authMethod: internal
+authInternalUsers:
+- user: any
+  ips: ['127.0.0.1', '::1']
+  permissions:
+  - action: read
+  - action: publish
+  - action: api
+- user: hlsviewer
+  pass: {hls_pass}
+  ips: []
+  permissions:
+  - action: read
+- user: any
+  pass: ''
+  ips: []
+  permissions:
+  - action: read
+    path: teststream
+authHTTPAddress:
+authHTTPExclude:
+- action: api
+- action: metrics
+- action: pprof
+
+api: yes
+apiAddress: :9898  # moved from 9997 — CloudTAK media container owns port 9997 (hardcoded in video-service.ts)
+apiEncryption: no
+apiAllowOrigins: ['*']
+apiTrustedProxies: []
+
+metrics: no
+metricsAddress: :9998
+pprof: no
+pprofAddress: :9999
+playback: no
+playbackAddress: :9996
+
+rtsp: yes
+rtspTransports: [tcp]
+rtspEncryption: "no"
+rtspAddress: :8554
+rtspsAddress: :8322
+rtpAddress: :8000
+rtcpAddress: :8001
+rtspServerKey:
+rtspServerCert:
+rtspAuthMethods: [basic]
+
+rtmp: no
+rtmpAddress: :1935
+rtmpEncryption: "no"
+rtmpsAddress: :1936
+rtmpServerKey:
+rtmpServerCert:
+
+hls: yes
+hlsAddress: :8888
+hlsEncryption: no
+hlsServerKey:
+hlsServerCert:
+hlsAllowOrigins: ['*']
+hlsTrustedProxies: ['127.0.0.1']
+hlsAlwaysRemux: no
+hlsVariant: mpegts
+hlsSegmentCount: 3
+hlsSegmentDuration: 500ms
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsDirectory: ''
+hlsMuxerCloseAfter: 60s
+
+webrtc: no
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcAllowOrigins: ['*']
+
+srt: yes
+srtAddress: :8890
+
+paths:
+  teststream:
+    record: no
+  all_others:
+  ~^live/(.+)$:
+    runOnReady: ffmpeg -i rtsp://localhost:8554/live/$G1 -c copy -f rtsp rtsp://localhost:8554/$G1
+    runOnReadyRestart: true
+"""
+        with open('/usr/local/etc/mediamtx.yml', 'w') as f:
+            f.write(mediamtx_yml)
+        plog("✓ Configuration written to /usr/local/etc/mediamtx.yml")
+        plog(f"  HLS viewer password: {hls_pass}")
+
+        # Step 5: Create mediamtx systemd service
+        plog("")
+        plog("━━━ Step 5/7: Creating systemd Services ━━━")
+        mediamtx_svc = """[Unit]
+Description=MediaMTX RTSP/HLS/SRT Streaming Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mediamtx /usr/local/etc/mediamtx.yml
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"""
+        with open('/etc/systemd/system/mediamtx.service', 'w') as f:
+            f.write(mediamtx_svc)
+        plog("✓ mediamtx.service created")
+
+        # Write web editor Python app
+        webeditor_dir = '/opt/mediamtx-webeditor'
+        os.makedirs(webeditor_dir, exist_ok=True)
+        os.makedirs(f'{webeditor_dir}/backups', exist_ok=True)
+        os.makedirs(f'{webeditor_dir}/recordings', exist_ok=True)
+
+        # Write the web editor — look next to app.py first, then common locations
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        webeditor_candidates = [
+            os.path.join(app_dir, 'mediamtx_config_editor.py'),
+            os.path.join(app_dir, 'config-editor', 'mediamtx_config_editor.py'),
+            '/opt/takwerx/mediamtx_config_editor.py',
+        ]
+        webeditor_src = next((p for p in webeditor_candidates if os.path.exists(p)), None)
+        if webeditor_src:
+            subprocess.run(f'cp "{webeditor_src}" {webeditor_dir}/mediamtx_config_editor.py', shell=True)
+            # Patch port to read from PORT env var instead of hardcoded 5000
+            subprocess.run(
+                f"sed -i 's/app.run(host=.0.0.0.0., port=5000/app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5080))/' {webeditor_dir}/mediamtx_config_editor.py",
+                shell=True)
+            plog(f"✓ Web editor installed from {webeditor_src} (port 5080)")
+        else:
+            plog("⚠ mediamtx_config_editor.py not found alongside app.py")
+            plog("  Place it next to app.py and redeploy, or install manually")
+            plog("  MediaMTX streaming will work — web editor unavailable until then")
+
+        # Download test video
+        test_video_dir = f'{webeditor_dir}/test_videos'
+        os.makedirs(test_video_dir, exist_ok=True)
+        test_video_url = 'https://raw.githubusercontent.com/takwerx/mediamtx-installer/main/config-editor/truck_60.ts'
+        plog("  Downloading test video (truck_60.ts)...")
+        r = subprocess.run(f'wget -q -O {test_video_dir}/truck_60.ts "{test_video_url}"',
+            shell=True, capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            plog("✓ Test video installed")
+        else:
+            plog("⚠ Test video download failed — you can upload it manually via the web console")
+
+        # Web editor systemd service
+        webeditor_svc = """[Unit]
+Description=MediaMTX Web Configuration Editor
+After=network.target mediamtx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
+WorkingDirectory=/opt/mediamtx-webeditor
+Environment=PORT=5080
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"""
+        with open('/etc/systemd/system/mediamtx-webeditor.service', 'w') as f:
+            f.write(webeditor_svc)
+        plog("✓ mediamtx-webeditor.service created")
+
+        subprocess.run('systemctl daemon-reload', shell=True, capture_output=True)
+        subprocess.run('systemctl enable mediamtx mediamtx-webeditor', shell=True, capture_output=True)
+        subprocess.run('systemctl start mediamtx', shell=True, capture_output=True)
+        if os.path.exists(f'{webeditor_dir}/mediamtx_config_editor.py'):
+            subprocess.run('systemctl start mediamtx-webeditor', shell=True, capture_output=True)
+        plog("✓ Services enabled and started")
+
+        # Step 6: Firewall
+        plog("")
+        plog("━━━ Step 6/7: Configuring Firewall ━━━")
+        for port_proto in ['8554/tcp', '8322/tcp', '8888/tcp', '8890/udp', '8000/udp', '8001/udp', '5080/tcp']:
+            subprocess.run(f'ufw allow {port_proto} 2>/dev/null; true', shell=True, capture_output=True)
+        plog("✓ Ports opened: 8554 (RTSP), 8322 (RTSPS), 8888 (HLS), 8890 (SRT), 5080 (Web Editor)")
+
+        # Step 7: Caddy integration
+        plog("")
+        plog("━━━ Step 7/7: Caddy Integration ━━━")
+        caddy_running = subprocess.run(['systemctl', 'is-active', 'caddy'], capture_output=True, text=True).stdout.strip() == 'active'
+        if caddy_running and domain:
+            # Update Caddyfile first so Caddy issues the cert
+            generate_caddyfile(settings)
+            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+            plog(f"✓ Caddyfile updated — video.{domain}")
+
+            # Wait up to 60s for cert
+            cert_base = '/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory'
+            mtx_domain = settings.get('mediamtx_domain', f'video.{domain}')
+            cert_file = f'{cert_base}/{mtx_domain}/{mtx_domain}.crt'
+            key_file  = f'{cert_base}/{mtx_domain}/{mtx_domain}.key'
+            plog(f"  Waiting for Caddy to issue cert for {mtx_domain}...")
+            for i in range(30):
+                if os.path.exists(cert_file) and os.path.exists(key_file):
+                    break
+                if i % 5 == 0:
+                    plog(f"  ⏳ {i * 2}s...")
+                time.sleep(2)
+
+            if os.path.exists(cert_file):
+                yml = '/usr/local/etc/mediamtx.yml'
+                # Wire cert paths — strip continuation lines first then replace
+                for key in ['rtspServerKey', 'rtspServerCert', 'hlsServerKey', 'hlsServerCert', 'rtmpServerKey', 'rtmpServerCert']:
+                    subprocess.run(f"sed -i '/^{key}:/{{ n; /^  /d }}' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^rtspServerKey:.*|rtspServerKey: {key_file}|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^rtspServerCert:.*|rtspServerCert: {cert_file}|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^hlsServerKey:.*|hlsServerKey: {key_file}|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^hlsServerCert:.*|hlsServerCert: {cert_file}|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^rtmpServerKey:.*|rtmpServerKey: {key_file}|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^rtmpServerCert:.*|rtmpServerCert: {cert_file}|' {yml}", shell=True)
+                # Enable encryption
+                subprocess.run(f"sed -i 's|^rtspEncryption:.*|rtspEncryption: \"optional\"|' {yml}", shell=True)
+                subprocess.run(f"sed -i 's|^hlsEncryption:.*|hlsEncryption: yes|' {yml}", shell=True)
+                plog(f"✓ SSL certificates wired — RTSPS and HTTPS HLS enabled")
+                plog(f"  Cert: {cert_file}")
+                subprocess.run('systemctl restart mediamtx', shell=True, capture_output=True)
+                time.sleep(2)
+            else:
+                plog(f"  ⚠ Cert not found after 60s — SSL not wired")
+                plog(f"  Go to Caddy page, reload, then restart MediaMTX to retry")
+        elif not domain:
+            plog("  No domain configured — skipping Caddy (access via port 5080 directly)")
+        else:
+            plog("  Caddy not running — skipping SSL integration")
+
+        # Verify MediaMTX is up
+        time.sleep(3)
+        r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
+        if r.stdout.strip() == 'active':
+            plog("")
+            plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            plog(f"🎉 MediaMTX v{version} deployed successfully!")
+            if domain:
+                cloudtak_installed = detect_modules().get('cloudtak', {}).get('installed', False)
+                mtx_display_domain = f"stream.{domain}" if cloudtak_installed else f"video.{domain}"
+                plog(f"   Web Console: https://{mtx_display_domain}")
+                plog(f"   HLS streams: https://{mtx_display_domain}/[stream]/index.m3u8")
+            else:
+                plog(f"   Web Editor: http://{settings.get('server_ip','server')}:5080")
+            plog(f"   RTSP: rtsp://[server]:8554/[stream]")
+            plog(f"   SRT:  srt://[server]:8890?streamid=[stream]")
+            plog(f"   HLS viewer password: {hls_pass}")
+            plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            mediamtx_deploy_status.update({'running': False, 'complete': True, 'error': False})
+        else:
+            plog("✗ MediaMTX service not active after deploy — check logs")
+            mediamtx_deploy_status.update({'running': False, 'error': True})
+
+    except Exception as e:
+        plog(f"✗ Unexpected error: {str(e)}")
+        mediamtx_deploy_status.update({'running': False, 'error': True})
+
+# ── CloudTAK ──────────────────────────────────────────────────────────────────
+cloudtak_deploy_log = []
+cloudtak_deploy_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/cloudtak/deploy', methods=['POST'])
+@login_required
+def cloudtak_deploy_api():
+    if cloudtak_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    cloudtak_deploy_log.clear()
+    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/cloudtak/deploy/log')
+@login_required
+def cloudtak_deploy_log_api():
+    idx = request.args.get('index', 0, type=int)
+    return jsonify({'entries': cloudtak_deploy_log[idx:], 'total': len(cloudtak_deploy_log),
+        'running': cloudtak_deploy_status['running'], 'complete': cloudtak_deploy_status['complete'],
+        'error': cloudtak_deploy_status['error']})
+
+@app.route('/api/cloudtak/control', methods=['POST'])
+@login_required
+def cloudtak_control():
+    action = (request.json or {}).get('action', '')
+    cloudtak_dir = os.path.expanduser('~/CloudTAK')
+    if action == 'start':
+        subprocess.run(f'cd {cloudtak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, timeout=60)
+    elif action == 'stop':
+        subprocess.run(f'cd {cloudtak_dir} && docker compose stop 2>&1', shell=True, capture_output=True, timeout=60)
+    elif action == 'restart':
+        subprocess.run(f'cd {cloudtak_dir} && docker compose restart 2>&1', shell=True, capture_output=True, timeout=60)
+    elif action == 'update':
+        subprocess.run(f'cd {cloudtak_dir} && ./cloudtak.sh update 2>&1', shell=True, capture_output=True, timeout=600)
+    else:
+        return jsonify({'error': 'Invalid action'}), 400
+    time.sleep(3)
+    r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+    running = 'Up' in r.stdout
+    return jsonify({'success': True, 'running': running})
+
+@app.route('/api/cloudtak/logs')
+@login_required
+def cloudtak_container_logs():
+    lines = request.args.get('lines', 50, type=int)
+    r = subprocess.run('docker logs cloudtak-api-1 --tail {} 2>&1'.format(lines), shell=True, capture_output=True, text=True, timeout=10)
+    entries = [l for l in (r.stdout.strip().split('\n') if r.stdout.strip() else []) if l.strip()]
+    return jsonify({'entries': entries})
+
+@app.route('/api/cloudtak/uninstall', methods=['POST'])
+@login_required
+def cloudtak_uninstall():
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    cloudtak_dir = os.path.expanduser('~/CloudTAK')
+    subprocess.run(f'cd {cloudtak_dir} && docker compose down -v --rmi local 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+    if os.path.exists(cloudtak_dir):
+        subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True)
+    cloudtak_deploy_log.clear()
+    cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
+    generate_caddyfile()
+    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+    return jsonify({'success': True, 'steps': ['Stopped and removed Docker containers/volumes', 'Removed ~/CloudTAK', 'Updated Caddyfile']})
+
+def run_cloudtak_deploy():
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        cloudtak_deploy_log.append(entry)
+        print(entry, flush=True)
+    try:
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        settings = load_settings()
+        domain = settings.get('fqdn', '')
+
+        # Step 1: Check Docker
+        plog("━━━ Step 1/7: Checking Docker ━━━")
+        r = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+        if r.returncode != 0:
+            plog("  Docker not found — installing...")
+            subprocess.run('curl -fsSL https://get.docker.com | sh', shell=True, capture_output=True, text=True, timeout=300)
+            r2 = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+            if r2.returncode != 0:
+                plog("✗ Failed to install Docker")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog(f"  {r2.stdout.strip()}")
+        else:
+            plog(f"  {r.stdout.strip()}")
+        plog("✓ Docker available")
+
+        # Step 2: Clone or update repo
+        plog("")
+        plog("━━━ Step 2/7: Cloning CloudTAK ━━━")
+        if os.path.exists(cloudtak_dir):
+            plog("  ~/CloudTAK exists — pulling latest...")
+            r = subprocess.run(f'cd {cloudtak_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                plog(f"  ⚠ git pull warning: {r.stderr.strip()[:100]}")
+        else:
+            plog("  Cloning from GitHub...")
+            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                plog(f"✗ Clone failed: {r.stderr.strip()[:200]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+        plog("✓ Repository ready")
+
+        # Step 3: Generate .env and docker-compose.override.yml
+        plog("")
+        plog("━━━ Step 3/7: Configuring .env ━━━")
+        env_path = os.path.join(cloudtak_dir, '.env')
+        import secrets as _secrets
+        signing_secret = _secrets.token_hex(32)
+        minio_pass = _secrets.token_hex(16)
+
+        # Build URLs
+        # CRITICAL: API_URL must use Docker bridge gateway (172.20.0.1) NOT the public domain.
+        # CloudTAK media container calls back to the API internally. Using the public domain
+        # causes a loopback failure — Docker containers cannot reach their own host via external HTTPS.
+        # 172.20.0.1 is the Docker bridge gateway, always reachable from all containers.
+        docker_gateway = "172.20.0.1"
+        if domain:
+            pmtiles_url = f"https://tiles.map.{domain}"
+        else:
+            pmtiles_url = f"http://{settings.get('server_ip', '127.0.0.1')}:5002"
+
+        api_url = f"http://{docker_gateway}:5000"   # Always use internal Docker gateway
+
+        # CRITICAL: CloudTAK media container's video-service.ts HARDCODES port 9997 for ALL
+        # MediaMTX API calls. It takes the hostname from CLOUDTAK_Config_media_url and then
+        # forces port 9997, completely ignoring whatever port is in the URL.
+        # Therefore: CloudTAK media container MUST map to host port 9997.
+        # Standalone MediaMTX API is moved to port 9898 to free up 9997.
+        media_url = "http://localhost:9997"   # port 9997 hardcoded in CloudTAK video-service.ts
+
+        env_content = f"""CLOUDTAK_Mode=docker-compose
+CLOUDTAK_Config_media_url={media_url}
+
+SigningSecret={signing_secret}
+
+ASSET_BUCKET=cloudtak
+AWS_S3_Endpoint=http://store:9000
+AWS_S3_AccessKeyId=cloudtakminioadmin
+AWS_S3_SecretAccessKey={minio_pass}
+MINIO_ROOT_USER=cloudtakminioadmin
+MINIO_ROOT_PASSWORD={minio_pass}
+
+POSTGRES=postgres://docker:docker@postgis:5432/gis
+
+# API_URL uses Docker bridge gateway so containers can call back to the API internally.
+# DO NOT use the public domain — Docker containers cannot loopback through external HTTPS.
+API_URL={api_url}
+PMTILES_URL={pmtiles_url}
+
+# Port remapping — avoids conflicts with standalone MediaMTX which owns the original ports.
+# CloudTAK's docker-compose.yml supports these env vars natively (no override file needed).
+# MEDIA_PORT_API=9997 because video-service.ts hardcodes port 9997 for all MediaMTX API calls.
+# Standalone MediaMTX API moved to 9898 to free up 9997 for CloudTAK media container.
+MEDIA_PORT_API=9997
+MEDIA_PORT_RTSP=18554
+MEDIA_PORT_RTMP=11935
+MEDIA_PORT_HLS=18888
+MEDIA_PORT_SRT=18890
+"""
+        with open(env_path, 'w') as f:
+            f.write(env_content)
+
+        plog(f"✓ .env written")
+        plog(f"  API URL: {api_url} (Docker bridge gateway — internal)")
+        plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
+
+        # Step 4: Build Docker images
+        plog("")
+        plog("━━━ Step 4/7: Building Docker Images ━━━")
+        plog("  This may take 5-10 minutes on first run...")
+        r = subprocess.run(f'cd {cloudtak_dir} && docker compose build 2>&1', shell=True, capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0:
+            plog(f"✗ Docker build failed")
+            for line in r.stdout.strip().split('\n')[-20:]:
+                if line.strip():
+                    plog(f"  {line}")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Images built")
+
+        # Step 5: Start containers including media on remapped ports
+        plog("")
+        plog("━━━ Step 5/7: Starting Containers ━━━")
+        plog("  Starting all containers including media (remapped ports)...")
+        plog("  Standalone MediaMTX stays on original ports — no conflict")
+        r = subprocess.run(
+            f'cd {cloudtak_dir} && docker compose up -d 2>&1',
+            shell=True, capture_output=True, text=True, timeout=120
+        )
+        if r.returncode != 0:
+            plog(f"✗ docker compose up failed")
+            for line in r.stdout.strip().split('\n')[-10:]:
+                if line.strip():
+                    plog(f"  {line}")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Containers started")
+
+        # Step 6: Wait for API to be ready
+        plog("")
+        plog("━━━ Step 6/7: Waiting for CloudTAK API ━━━")
+        import urllib.request as _urlreq
+        for attempt in range(30):
+            try:
+                _urlreq.urlopen('http://localhost:5000/', timeout=3)
+                plog("✓ CloudTAK API is responding")
+                break
+            except Exception:
+                if attempt % 5 == 0:
+                    plog(f"  ⏳ Waiting... ({attempt * 2}s)")
+                time.sleep(2)
+        else:
+            plog("⚠ CloudTAK API did not respond in time — check container logs")
+
+        # Step 7: Update Caddyfile
+        plog("")
+        plog("━━━ Step 7/7: Updating Caddy ━━━")
+        if domain:
+            generate_caddyfile(settings)
+            r = subprocess.run('systemctl reload caddy 2>&1', shell=True, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                plog(f"✓ Caddy updated — map.{domain} and tiles.map.{domain} live")
+            else:
+                plog(f"⚠ Caddy reload: {r.stdout.strip()[:100]}")
+        else:
+            plog("  No domain configured — skipping Caddy (access via port 5000)")
+
+        plog("")
+        plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        if domain:
+            plog(f"🎉 CloudTAK deployed! Open https://map.{domain} in your browser")
+            plog(f"   Tiles: https://tiles.map.{domain}")
+            plog(f"   Video: https://video.{domain} (via standalone MediaMTX)")
+        else:
+            server_ip = settings.get('server_ip', 'your-server-ip')
+            plog(f"🎉 CloudTAK deployed! Open http://{server_ip}:5000 in your browser")
+        plog(f"   Log in and go to Admin → Connections to configure your TAK Server")
+        plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
+
+    except Exception as e:
+        plog(f"✗ Unexpected error: {str(e)}")
+        cloudtak_deploy_status.update({'running': False, 'error': True})
+
+# ── Email Relay ────────────────────────────────────────────────────────────────
+email_deploy_log = []
+email_deploy_status = {'running': False, 'complete': False, 'error': False}
+
+PROVIDERS = {
+    'brevo':   {'name': 'Brevo',   'host': 'smtp-relay.brevo.com', 'port': '587', 'url': 'https://app.brevo.com/settings/keys/smtp'},
+    'smtp2go': {'name': 'SMTP2GO', 'host': 'mail.smtp2go.com',     'port': '587', 'url': 'https://app.smtp2go.com/settings/users/smtp'},
+    'mailgun': {'name': 'Mailgun', 'host': 'smtp.mailgun.org',      'port': '587', 'url': 'https://app.mailgun.com/mg/sending/domains'},
+    'custom':  {'name': 'Custom',  'host': '',                      'port': '587', 'url': ''},
+}
+
+def run_email_deploy(provider_key, smtp_user, smtp_pass, from_addr, from_name):
+    log = email_deploy_log
+    status = email_deploy_status
+
+    def plog(msg):
+        log.append(msg)
+
+    try:
+        settings = load_settings()
+        pkg_mgr = settings.get('pkg_mgr', 'apt')
+        provider = PROVIDERS.get(provider_key, PROVIDERS['brevo'])
+
+        plog(f"📧 Step 1/5 — Installing Postfix...")
+        if pkg_mgr == 'apt':
+            wait_for_apt_lock(plog, log)
+            r = subprocess.run(
+                'DEBIAN_FRONTEND=noninteractive apt-get install -y postfix libsasl2-modules 2>&1',
+                shell=True, capture_output=True, text=True, timeout=300)
+        else:
+            r = subprocess.run('dnf install -y postfix cyrus-sasl-plain 2>&1',
+                shell=True, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            plog(f"✗ Postfix install failed: {r.stdout[-500:]}")
+            status.update({'running': False, 'error': True})
+            return
+        plog("✓ Postfix installed")
+
+        plog(f"📧 Step 2/5 — Configuring main.cf...")
+        relay_host = provider['host']
+        relay_port = provider['port']
+        main_cf_additions = f"""
+# TAKWERX Email Relay — managed by TAK-infra
+relayhost = [{relay_host}]:{relay_port}
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = may
+smtp_use_tls = yes
+header_size_limit = 4096000
+smtp_generic_maps = hash:/etc/postfix/generic
+"""
+        # Read existing main.cf and strip any previous TAKWERX block
+        main_cf_path = '/etc/postfix/main.cf'
+        if os.path.exists(main_cf_path):
+            with open(main_cf_path) as f:
+                existing = f.read()
+            # Remove previous TAKWERX block if present
+            import re
+            existing = re.sub(r'\n# TAKWERX Email Relay.*', '', existing, flags=re.DOTALL)
+            # Remove any existing relayhost line (Ubuntu default has a blank one)
+            existing = re.sub(r'^\s*relayhost\s*=.*$', '', existing, flags=re.MULTILINE)
+            existing = existing.rstrip()
+        else:
+            existing = ''
+        with open(main_cf_path, 'w') as f:
+            f.write(existing + '\n' + main_cf_additions)
+        plog("✓ main.cf configured")
+
+        plog(f"📧 Step 3/5 — Writing credentials...")
+        sasl_line = f"[{relay_host}]:{relay_port}    {smtp_user}:{smtp_pass}"
+        with open('/etc/postfix/sasl_passwd', 'w') as f:
+            f.write(sasl_line + '\n')
+        subprocess.run('postmap /etc/postfix/sasl_passwd', shell=True, capture_output=True)
+        subprocess.run('chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db', shell=True, capture_output=True)
+
+        # Generic map for from address rewriting
+        hostname = subprocess.run('hostname -f', shell=True, capture_output=True, text=True).stdout.strip()
+        generic_line = f"root@{hostname}    {from_addr}"
+        with open('/etc/postfix/generic', 'w') as f:
+            f.write(generic_line + '\n')
+        subprocess.run('postmap /etc/postfix/generic', shell=True, capture_output=True)
+        plog("✓ Credentials written and hashed")
+
+        plog(f"📧 Step 4/5 — Enabling and starting Postfix...")
+        subprocess.run('systemctl enable postfix 2>&1', shell=True, capture_output=True, text=True)
+        r = subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            plog(f"✗ Postfix restart failed: {r.stdout}")
+            status.update({'running': False, 'error': True})
+            return
+        plog("✓ Postfix running")
+
+        plog(f"📧 Step 5/5 — Saving configuration...")
+        settings['email_relay'] = {
+            'provider': provider_key,
+            'relay_host': relay_host,
+            'relay_port': relay_port,
+            'smtp_user': smtp_user,
+            'from_addr': from_addr,
+            'from_name': from_name,
+        }
+        # Store password separately (still in settings.json, local only)
+        settings['email_relay']['smtp_pass'] = smtp_pass
+        save_settings(settings)
+        plog("✓ Configuration saved")
+        plog("")
+        plog("✅ Email Relay deployed successfully!")
+        plog(f"   Provider: {provider['name']}")
+        plog(f"   Relay:    {relay_host}:{relay_port}")
+        plog(f"   From:     {from_name} <{from_addr}>")
+        plog("")
+        plog("📋 Configure apps to use SMTP:")
+        plog("   Host: localhost   Port: 25   No auth required")
+        status.update({'running': False, 'complete': True, 'error': False})
+
+    except Exception as e:
+        plog(f"✗ Deploy failed: {str(e)}")
+        status.update({'running': False, 'error': True})
+
+
+@app.route('/emailrelay')
+@login_required
+def emailrelay_page():
+    modules = detect_modules()
+    email = modules.get('emailrelay', {})
+    settings = load_settings()
+    relay_config = settings.get('email_relay', {})
+    return render_template_string(EMAIL_RELAY_TEMPLATE,
+        settings=settings, modules=modules, email=email,
+        relay_config=relay_config, providers=PROVIDERS,
+        metrics=get_system_metrics(), version=VERSION,
+        deploying=email_deploy_status.get('running', False),
+        deploy_done=email_deploy_status.get('complete', False),
+        deploy_error=email_deploy_status.get('error', False))
+
+@app.route('/api/emailrelay/deploy', methods=['POST'])
+@login_required
+def emailrelay_deploy():
+    if email_deploy_status['running']:
+        return jsonify({'success': False, 'error': 'Deployment already in progress'})
+    data = request.get_json()
+    provider = data.get('provider', 'brevo')
+    smtp_user = data.get('smtp_user', '').strip()
+    smtp_pass = data.get('smtp_pass', '').strip()
+    from_addr = data.get('from_addr', '').strip()
+    from_name = data.get('from_name', '').strip()
+    if not smtp_user or not smtp_pass or not from_addr:
+        return jsonify({'success': False, 'error': 'SMTP username, password, and from address are required'})
+    if provider == 'custom':
+        custom_host = data.get('custom_host', '').strip()
+        custom_port = data.get('custom_port', '587').strip()
+        if not custom_host:
+            return jsonify({'success': False, 'error': 'Custom host is required'})
+        PROVIDERS['custom']['host'] = custom_host
+        PROVIDERS['custom']['port'] = custom_port
+    email_deploy_log.clear()
+    email_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_email_deploy,
+        args=(provider, smtp_user, smtp_pass, from_addr, from_name), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/emailrelay/log')
+@login_required
+def emailrelay_log():
+    return jsonify({
+        'running': email_deploy_status['running'],
+        'complete': email_deploy_status['complete'],
+        'error': email_deploy_status['error'],
+        'entries': list(email_deploy_log)})
+
+@app.route('/api/emailrelay/test', methods=['POST'])
+@login_required
+def emailrelay_test():
+    data = request.get_json()
+    to_addr = data.get('to', '').strip()
+    if not to_addr:
+        return jsonify({'success': False, 'error': 'Recipient address required'})
+    settings = load_settings()
+    relay_config = settings.get('email_relay', {})
+    from_addr = relay_config.get('from_addr', 'noreply@localhost')
+    from_name = relay_config.get('from_name', 'TAK-infra')
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        msg = MIMEMultipart()
+        msg['From'] = f'{from_name} <{from_addr}>'
+        msg['To'] = to_addr
+        msg['Subject'] = 'TAK-infra Test Email'
+        msg.attach(MIMEText('Test email from TAK-infra Email Relay.\n\nIf you received this, your email relay is working correctly.', 'plain'))
+        with smtplib.SMTP('localhost', 25, timeout=15) as s:
+            s.sendmail(from_addr, [to_addr], msg.as_string())
+        return jsonify({'success': True, 'output': f'Test email sent to {to_addr}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/emailrelay/swap', methods=['POST'])
+@login_required
+def emailrelay_swap():
+    """Swap provider — reconfigure Postfix with new credentials"""
+    if email_deploy_status['running']:
+        return jsonify({'success': False, 'error': 'Deployment already in progress'})
+    data = request.get_json()
+    provider = data.get('provider', 'brevo')
+    smtp_user = data.get('smtp_user', '').strip()
+    smtp_pass = data.get('smtp_pass', '').strip()
+    from_addr = data.get('from_addr', '').strip()
+    from_name = data.get('from_name', '').strip()
+    if not smtp_user or not smtp_pass or not from_addr:
+        return jsonify({'success': False, 'error': 'All fields required'})
+    if provider == 'custom':
+        custom_host = data.get('custom_host', '').strip()
+        custom_port = data.get('custom_port', '587').strip()
+        if not custom_host:
+            return jsonify({'success': False, 'error': 'Custom host is required'})
+        PROVIDERS['custom']['host'] = custom_host
+        PROVIDERS['custom']['port'] = custom_port
+    email_deploy_log.clear()
+    email_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_email_deploy,
+        args=(provider, smtp_user, smtp_pass, from_addr, from_name), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/emailrelay/control', methods=['POST'])
+@login_required
+def emailrelay_control():
+    data = request.get_json()
+    action = data.get('action', '')
+    if action == 'restart':
+        r = subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+    elif action == 'stop':
+        r = subprocess.run('systemctl stop postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+    elif action == 'start':
+        r = subprocess.run('systemctl start postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+    else:
+        return jsonify({'success': False, 'error': 'Unknown action'})
+    return jsonify({'success': r.returncode == 0, 'output': r.stdout.strip()})
+
+@app.route('/api/emailrelay/uninstall', methods=['POST'])
+@login_required
+def emailrelay_uninstall():
+    subprocess.run('systemctl stop postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
+    subprocess.run('systemctl disable postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
+    settings = load_settings()
+    pkg_mgr = settings.get('pkg_mgr', 'apt')
+    if pkg_mgr == 'apt':
+        subprocess.run('apt-get remove -y postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+    else:
+        subprocess.run('dnf remove -y postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+    settings.pop('email_relay', None)
+    save_settings(settings)
+    email_deploy_log.clear()
+    email_deploy_status.update({'running': False, 'complete': False, 'error': False})
+    return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
+
+
+MEDIAMTX_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MediaMTX — TAKWERX Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex}
+.sidebar{width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03);border-left-color:var(--border-hover)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;overflow-y:auto;padding:32px}
+.page-header{margin-bottom:28px}
+.page-header h1{font-size:22px;font-weight:700}
+.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+.status-banner{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-size:13px;font-weight:500}
+.status-banner.running{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:var(--green)}
+.status-banner.stopped{background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);color:var(--yellow)}
+.status-banner.not-installed{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#2563eb}
+.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border)}.btn-ghost:hover{color:var(--text-primary);border-color:var(--border-hover)}
+.btn-danger{background:var(--red);color:#fff}.btn-danger:hover{background:#dc2626}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.controls{display:flex;gap:10px;flex-wrap:wrap}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.info-item{background:#0a0e1a;border-radius:8px;padding:12px 14px}
+.info-label{font-size:11px;color:var(--text-dim);margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em}
+.info-value{font-size:13px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;word-break:break-all}
+.log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:360px;overflow-y:auto;line-height:1.7;white-space:pre-wrap}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.form-group{margin-bottom:0}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+.form-input{width:100%;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px;font-family:'DM Sans',sans-serif;outline:none;transition:border-color .15s}
+.form-input:focus{border-color:var(--accent)}
+.proto-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:4px}
+.proto-item{background:#0a0e1a;border-radius:8px;padding:10px 12px;text-align:center}
+.proto-name{font-size:11px;font-weight:700;color:var(--cyan);margin-bottom:2px}
+.proto-port{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+</style></head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo"><span>TAKWERX</span><small>Console v{{ version }}</small></div>
+  <a href="/" class="nav-item"><span class="nav-icon">⚡</span>Dashboard</a>
+  <a href="/caddy" class="nav-item"><span class="nav-icon">🔒</span>Caddy SSL</a>
+  <a href="/takserver" class="nav-item"><span class="nav-icon">📡</span>TAK Server</a>
+  <a href="/authentik" class="nav-item"><span class="nav-icon">🔐</span>Authentik</a>
+  <a href="/takportal" class="nav-item"><span class="nav-icon">🌐</span>TAK Portal</a>
+  <a href="/cloudtak" class="nav-item"><span class="nav-icon">☁️</span>CloudTAK</a>
+  <a href="/mediamtx" class="nav-item active"><span class="nav-icon">📹</span>MediaMTX</a>
+  <a href="/emailrelay" class="nav-item"><span class="nav-icon">📧</span>Email Relay</a>
+</nav>
+<div class="main">
+  <div class="page-header">
+    <h1>📹 MediaMTX</h1>
+    <p>Drone video streaming server — RTSP, SRT, and HLS for browser and ATAK playback</p>
+  </div>
+
+  {% if mtx.running %}
+  <div class="status-banner running"><div class="dot"></div>MediaMTX is running</div>
+  {% elif mtx.installed %}
+  <div class="status-banner stopped"><div class="dot"></div>MediaMTX is installed but stopped</div>
+  {% else %}
+  <div class="status-banner not-installed"><div class="dot"></div>MediaMTX is not installed</div>
+  {% endif %}
+
+  {% if mtx.installed %}
+
+  <!-- Access info -->
+  <div class="card">
+    <div class="card-title">Access</div>
+    <div class="info-grid">
+      {% if settings.fqdn %}
+      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value">https://{% if cloudtak_installed %}stream{% else %}video{% endif %}.{{ settings.fqdn }}</div></div>
+      <div class="info-item"><div class="info-label">HLS Streams</div><div class="info-value">https://{% if cloudtak_installed %}stream{% else %}video{% endif %}.{{ settings.fqdn }}/[stream]/</div></div>
+      {% else %}
+      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value">http://{{ settings.server_ip }}:5080</div></div>
+      <div class="info-item"><div class="info-label">HLS Streams</div><div class="info-value">http://{{ settings.server_ip }}:8888/[stream]/</div></div>
+      {% endif %}
+      <div class="info-item"><div class="info-label">RTSP</div><div class="info-value">rtsp://[server]:8554/[stream]</div></div>
+      <div class="info-item"><div class="info-label">SRT</div><div class="info-value">srt://[server]:8890?streamid=[stream]</div></div>
+    </div>
+  </div>
+
+  <!-- Protocol ports -->
+  <div class="card">
+    <div class="card-title">Protocol Ports</div>
+    <div class="proto-grid">
+      <div class="proto-item"><div class="proto-name">RTSP</div><div class="proto-port">8554/tcp</div></div>
+      <div class="proto-item"><div class="proto-name">RTSPS</div><div class="proto-port">8322/tcp</div></div>
+      <div class="proto-item"><div class="proto-name">HLS</div><div class="proto-port">8888/tcp</div></div>
+      <div class="proto-item"><div class="proto-name">SRT</div><div class="proto-port">8890/udp</div></div>
+      <div class="proto-item"><div class="proto-name">API</div><div class="proto-port">9997/tcp</div></div>
+      <div class="proto-item"><div class="proto-name">Web Editor</div><div class="proto-port">5000/tcp</div></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card">
+    <div class="card-title">Controls</div>
+    <div class="controls">
+      <button class="btn btn-ghost" onclick="control('start')">▶ Start</button>
+      <button class="btn btn-ghost" onclick="control('stop')">⏹ Stop</button>
+      <button class="btn btn-ghost" onclick="control('restart')">↺ Restart</button>
+      <button class="btn btn-ghost" onclick="loadLogs()">📋 Logs</button>
+      <button class="btn btn-danger" onclick="document.getElementById('uninstall-modal').classList.add('open')">🗑 Uninstall</button>
+    </div>
+    <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
+  </div>
+
+  <!-- Container logs -->
+  <div class="card" id="logs-card" style="display:none">
+    <div class="card-title">Service Logs</div>
+    <div class="log-box" id="service-logs">Loading...</div>
+  </div>
+
+  {% else %}
+  <!-- Deploy -->
+  <div class="card">
+    <div class="card-title">Deploy MediaMTX</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">
+      Installs MediaMTX streaming server with FFmpeg for drone video (MPEG-TS to RTSP to HLS),
+      the web configuration editor, and wires SSL certificates from Caddy automatically.
+    </p>
+    {% if settings.fqdn %}
+    <div style="background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.15);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:var(--text-secondary)">
+      Caddy domain detected — <span style="color:var(--green)">SSL will be configured automatically</span><br>
+      Web editor will be available at <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">https://video.{{ settings.fqdn }}</span>
+    </div>
+    {% endif %}
+    <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">🚀 Deploy MediaMTX</button>
+  </div>
+  {% endif %}
+
+  <!-- Deploy log -->
+  <div class="card" id="log-card" style="display:{% if deploying or deploy_done %}block{% else %}none{% endif %}">
+    <div class="card-title">Deploy Log</div>
+    <div class="log-box" id="deploy-log">{% if deploying %}Starting...{% elif deploy_done %}Deploy complete.{% endif %}</div>
+  </div>
+</div>
+
+<!-- Uninstall modal -->
+<div class="modal-overlay" id="uninstall-modal">
+  <div class="modal">
+    <h3>⚠ Uninstall MediaMTX?</h3>
+    <p>This will stop and remove MediaMTX, the web editor, all systemd services, and the binary. Config and recordings will be removed.</p>
+    <div class="form-group" style="margin-bottom:16px">
+      <label class="form-label">Admin Password</label>
+      <input class="form-input" id="uninstall-password" type="password" placeholder="Confirm your password">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-danger" onclick="doUninstall()">Uninstall</button>
+    </div>
+    <div id="uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+  </div>
+</div>
+
+<script>
+let logIndex = 0;
+let logInterval = null;
+
+function startDeploy() {
+  document.getElementById('deploy-btn').disabled = true;
+  document.getElementById('log-card').style.display = 'block';
+  document.getElementById('deploy-log').textContent = 'Starting deployment...';
+  logIndex = 0;
+  fetch('/api/mediamtx/deploy', {method:'POST', headers:{'Content-Type':'application/json'}})
+    .then(r => r.json()).then(d => {
+      if (d.error) {
+        document.getElementById('deploy-log').textContent = 'Error: ' + d.error;
+        document.getElementById('deploy-btn').disabled = false;
+      } else {
+        pollLog();
+      }
+    });
+}
+
+function pollLog() {
+  logInterval = setInterval(() => {
+    fetch('/api/mediamtx/deploy/log?index=' + logIndex)
+      .then(r => r.json()).then(d => {
+        if (d.entries && d.entries.length) {
+          const box = document.getElementById('deploy-log');
+          if (logIndex === 0) box.textContent = '';
+          box.textContent += d.entries.join(String.fromCharCode(10)) + String.fromCharCode(10);
+          box.scrollTop = box.scrollHeight;
+          logIndex += d.entries.length;
+        }
+        if (!d.running) {
+          clearInterval(logInterval);
+          if (d.complete) setTimeout(() => location.reload(), 1500);
+        }
+      });
+  }, 800);
+}
+
+function control(action) {
+  document.getElementById('control-status').textContent = action + '...';
+  fetch('/api/mediamtx/control', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action})
+  }).then(r => r.json()).then(d => {
+    document.getElementById('control-status').textContent = d.running ? '✓ Running' : '○ Stopped';
+    setTimeout(() => document.getElementById('control-status').textContent = '', 3000);
+  });
+}
+
+function loadLogs() {
+  const card = document.getElementById('logs-card');
+  card.style.display = 'block';
+  fetch('/api/mediamtx/logs?lines=80').then(r => r.json()).then(d => {
+    document.getElementById('service-logs').textContent = d.entries.join(String.fromCharCode(10)) || '(no output)';
+  });
+}
+
+function doUninstall() {
+  const password = document.getElementById('uninstall-password').value;
+  fetch('/api/mediamtx/uninstall', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({password})
+  }).then(r => r.json()).then(d => {
+    if (d.error) document.getElementById('uninstall-msg').textContent = d.error;
+    else location.reload();
+  });
+}
+
+{% if deploying %}
+document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
+{% endif %}
+</script>
+</body></html>'''
+
+CLOUDTAK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>CloudTAK — TAKWERX Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex}
+.sidebar{width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03);border-left-color:var(--border-hover)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;overflow-y:auto;padding:32px}
+.page-header{margin-bottom:28px}
+.page-header h1{font-size:22px;font-weight:700;color:var(--text-primary)}
+.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+.status-banner{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-size:13px;font-weight:500}
+.status-banner.running{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:var(--green)}
+.status-banner.stopped{background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);color:var(--yellow)}
+.status-banner.not-installed{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0}
+.form-group{margin-bottom:16px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+.form-input{width:100%;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px;font-family:'DM Sans',sans-serif;transition:border-color .15s;outline:none}
+.form-input:focus{border-color:var(--accent)}
+.form-hint{font-size:11px;color:var(--text-dim);margin-top:4px}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#2563eb}
+.btn-success{background:var(--green);color:#fff}.btn-success:hover{background:#059669}
+.btn-danger{background:var(--red);color:#fff}.btn-danger:hover{background:#dc2626}
+.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border)}.btn-ghost:hover{color:var(--text-primary);border-color:var(--border-hover)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.info-item{background:#0a0e1a;border-radius:8px;padding:12px 14px}
+.info-label{font-size:11px;color:var(--text-dim);margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em}
+.info-value{font-size:13px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;word-break:break-all}
+.log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;line-height:1.7;white-space:pre-wrap}
+.controls{display:flex;gap:10px;flex-wrap:wrap}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.tab-bar{display:flex;gap:4px;margin-bottom:20px;background:var(--bg-surface);padding:4px;border-radius:10px;width:fit-content}
+.tab{padding:7px 16px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text-dim);transition:all .15s}
+.tab.active{background:var(--bg-card);color:var(--text-primary)}
+.tab-panel{display:none}.tab-panel.active{display:block}
+</style></head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-logo"><span>TAKWERX</span><small>Console v{{ version }}</small></div>
+  <a href="/" class="nav-item"><span class="nav-icon">⚡</span>Dashboard</a>
+  <a href="/caddy" class="nav-item"><span class="nav-icon">🔒</span>Caddy SSL</a>
+  <a href="/takserver" class="nav-item"><span class="nav-icon">📡</span>TAK Server</a>
+  <a href="/authentik" class="nav-item"><span class="nav-icon">🔐</span>Authentik</a>
+  <a href="/takportal" class="nav-item"><span class="nav-icon">🌐</span>TAK Portal</a>
+  <a href="/cloudtak" class="nav-item active"><span class="nav-icon">☁️</span>CloudTAK</a>
+  <a href="/emailrelay" class="nav-item"><span class="nav-icon">📧</span>Email Relay</a>
+</nav>
+<div class="main">
+  <div class="page-header">
+    <h1>☁️ CloudTAK</h1>
+    <p>Browser-based TAK client — in-browser map and situational awareness via TAK Server</p>
+  </div>
+
+  {% if cloudtak.running %}
+  <div class="status-banner running"><div class="dot"></div>CloudTAK is running</div>
+  {% elif cloudtak.installed %}
+  <div class="status-banner stopped"><div class="dot"></div>CloudTAK is installed but stopped</div>
+  {% else %}
+  <div class="status-banner not-installed"><div class="dot"></div>CloudTAK is not installed</div>
+  {% endif %}
+
+  {% if cloudtak.installed %}
+  <!-- Running info -->
+  <div class="card">
+    <div class="card-title">Access</div>
+    <div class="info-grid">
+      {% if settings.fqdn %}
+      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value">https://map.{{ settings.fqdn }}</div></div>
+      <div class="info-item"><div class="info-label">Tile Server</div><div class="info-value">https://tiles.map.{{ settings.fqdn }}</div></div>
+      <div class="info-item"><div class="info-label">Video (MediaMTX)</div><div class="info-value">https://video.{{ settings.fqdn }}</div></div>
+      {% else %}
+      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value">http://{{ settings.server_ip }}:5000</div></div>
+      <div class="info-item"><div class="info-label">Tile Server</div><div class="info-value">http://{{ settings.server_ip }}:5002</div></div>
+      {% endif %}
+      <div class="info-item"><div class="info-label">Install Dir</div><div class="info-value">~/CloudTAK</div></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="card">
+    <div class="card-title">Controls</div>
+    <div class="controls">
+      <button class="btn btn-success" onclick="control('start')">▶ Start</button>
+      <button class="btn btn-ghost" onclick="control('stop')">⏹ Stop</button>
+      <button class="btn btn-ghost" onclick="control('restart')">↺ Restart</button>
+      <button class="btn btn-ghost" onclick="loadLogs()">📋 Logs</button>
+      <button class="btn btn-danger" onclick="document.getElementById('uninstall-modal').classList.add('open')">🗑 Uninstall</button>
+    </div>
+    <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
+  </div>
+
+  <!-- Container logs -->
+  <div class="card" id="logs-card" style="display:none">
+    <div class="card-title">Container Logs</div>
+    <div class="log-box" id="container-logs">Loading...</div>
+  </div>
+
+  {% else %}
+  <!-- Deploy form -->
+  <div class="card">
+    <div class="card-title">Deploy CloudTAK</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">
+      CloudTAK is a browser-based TAK client built by the Colorado DFPC Center of Excellence.
+      It connects to your TAK Server and provides a full map interface in any web browser.
+      Video streams from your standalone MediaMTX install will be used automatically.
+    </p>
+
+    {% if not settings.fqdn %}
+    <div style="background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:var(--yellow)">
+      ⚠ No domain configured. Deploy Caddy SSL first for HTTPS access.
+    </div>
+    {% endif %}
+
+    <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">🚀 Deploy CloudTAK</button>
+    {% if not settings.fqdn %}
+    <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:12px 16px;margin-top:16px;font-size:12px;color:#f87171">
+      🔒 <strong>SSL Required</strong> — CloudTAK requires a domain with SSL configured.<br>
+      <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Deploy log -->
+  {% if deploying or deploy_done %}
+  <div class="card">
+    <div class="card-title">Deploy Log</div>
+    <div class="log-box" id="deploy-log">Initializing...</div>
+  </div>
+  {% endif %}
+
+  <div id="log-card" class="card" style="display:none">
+    <div class="card-title">Deploy Log</div>
+    <div class="log-box" id="deploy-log-dyn">Waiting...</div>
+  </div>
+</div>
+
+<!-- Uninstall modal -->
+<div class="modal-overlay" id="uninstall-modal">
+  <div class="modal">
+    <h3>⚠ Uninstall CloudTAK?</h3>
+    <p>This will stop and remove all CloudTAK Docker containers, volumes, and the ~/CloudTAK directory. This cannot be undone.</p>
+    <div class="form-group">
+      <label class="form-label">Admin Password</label>
+      <input class="form-input" id="uninstall-password" type="password" placeholder="Confirm your password">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-danger" onclick="doUninstall()">Uninstall</button>
+    </div>
+    <div id="uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+  </div>
+</div>
+
+<script>
+let logIndex = 0;
+let logInterval = null;
+
+function startDeploy() {
+  document.getElementById('deploy-btn').disabled = true;
+  document.getElementById('log-card').style.display = 'block';
+  document.getElementById('deploy-log-dyn').textContent = 'Starting deployment...';
+  logIndex = 0;
+  fetch('/api/cloudtak/deploy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({})
+  }).then(r => r.json()).then(d => {
+    if (d.error) {
+      document.getElementById('deploy-log-dyn').textContent = 'Error: ' + d.error;
+      document.getElementById('deploy-btn').disabled = false;
+    } else {
+      pollLog();
+    }
+  });
+}
+
+function pollLog() {
+  logInterval = setInterval(() => {
+    fetch('/api/cloudtak/deploy/log?index=' + logIndex)
+      .then(r => r.json()).then(d => {
+        if (d.entries && d.entries.length) {
+          const box = document.getElementById('deploy-log-dyn') || document.getElementById('deploy-log');
+          if (box) {
+            if (logIndex === 0) box.textContent = '';
+            box.textContent += d.entries.join(String.fromCharCode(10)) + String.fromCharCode(10);
+            box.scrollTop = box.scrollHeight;
+          }
+          logIndex += d.entries.length;
+        }
+        if (!d.running) {
+          clearInterval(logInterval);
+          if (d.complete) setTimeout(() => location.reload(), 1500);
+        }
+      });
+  }, 800);
+}
+
+function control(action) {
+  document.getElementById('control-status').textContent = action + '...';
+  fetch('/api/cloudtak/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action})
+  }).then(r => r.json()).then(d => {
+    document.getElementById('control-status').textContent = d.running ? '✓ Running' : '○ Stopped';
+    setTimeout(() => document.getElementById('control-status').textContent = '', 3000);
+  });
+}
+
+function loadLogs() {
+  const card = document.getElementById('logs-card');
+  card.style.display = 'block';
+  fetch('/api/cloudtak/logs?lines=80').then(r => r.json()).then(d => {
+    document.getElementById('container-logs').textContent = d.entries.join(String.fromCharCode(10)) || '(no log output)';
+  });
+}
+
+function doUninstall() {
+  const password = document.getElementById('uninstall-password').value;
+  fetch('/api/cloudtak/uninstall', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password})
+  }).then(r => r.json()).then(d => {
+    if (d.error) {
+      document.getElementById('uninstall-msg').textContent = d.error;
+    } else {
+      location.reload();
+    }
+  });
+}
+
+// Auto-poll if deploy is in progress
+{% if deploying %}
+document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
+{% endif %}
+</script>
+</body></html>'''
+
+EMAIL_RELAY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Email Relay — TAKWERX Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
+.top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
+.header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
+.header-left{display:flex;align-items:center;gap:16px}.header-icon{font-size:28px}.header-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.5px}.header-subtitle{font-size:13px;color:var(--text-dim)}
+.header-right{display:flex;align-items:center;gap:12px}
+.btn-back{color:var(--text-dim);text-decoration:none;font-size:13px;padding:6px 14px;border:1px solid var(--border);border-radius:6px;transition:all 0.2s}.btn-back:hover{color:var(--text-secondary);border-color:var(--border-hover)}
+.btn-logout{color:var(--text-dim);text-decoration:none;font-size:13px;padding:6px 14px;border:1px solid var(--border);border-radius:6px;transition:all 0.2s}.btn-logout:hover{color:var(--red);border-color:rgba(239,68,68,0.3)}
+.os-badge{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);padding:4px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px}
+.main{max-width:1000px;margin:0 auto;padding:32px 40px}
+.section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;margin-top:24px}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-info{display:flex;align-items:center;gap:16px}
+.status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
+.status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
+.status-text{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600}
+.status-detail{font-size:13px;color:var(--text-dim);margin-top:4px}
+.controls{display:flex;gap:10px}
+.control-btn{padding:8px 16px;border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;transition:all 0.2s}
+.control-btn:hover{border-color:var(--border-hover);background:var(--bg-surface)}
+.control-btn.btn-stop{color:var(--red)}.control-btn.btn-stop:hover{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.05)}
+.control-btn.btn-start{color:var(--green)}.control-btn.btn-start:hover{border-color:rgba(16,185,129,0.3);background:rgba(16,185,129,0.05)}
+.deploy-log{background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;margin-top:16px}
+.input-field{width:100%;padding:12px 16px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;transition:border-color 0.2s}
+.input-field:focus{border-color:var(--accent)}
+select.input-field{cursor:pointer}
+.input-label{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:8px;display:block}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.form-group{display:flex;flex-direction:column}
+.form-group.full{grid-column:1/-1}
+.provider-link{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);margin-top:8px;display:block}
+.info-box{background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2);border-radius:10px;padding:16px;font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:16px}
+.info-box code{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);background:rgba(6,182,212,0.1);padding:2px 6px;border-radius:4px}
+.config-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+.config-table td{padding:10px 14px;border-bottom:1px solid var(--border)}
+.config-table td:first-child{color:var(--text-dim);width:140px}
+.config-table td:last-child{color:var(--cyan)}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.tag{display:inline-block;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600}
+.tag-green{background:rgba(16,185,129,0.1);color:var(--green);border:1px solid rgba(16,185,129,0.2)}
+.tag-blue{background:rgba(59,130,246,0.1);color:var(--accent);border:1px solid rgba(59,130,246,0.2)}
+</style></head><body>
+<div class="top-bar"></div>
+<header class="header">
+<div class="header-left"><div class="header-icon">📧</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Email Relay</div></div></div>
+<div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name','Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div>
+</header>
+<main class="main">
+
+<!-- Status Banner -->
+<div class="status-banner">
+{% if email.installed and email.running %}
+<div class="status-info"><div class="status-icon running">📧</div><div>
+<div class="status-text" style="color:var(--green)">Running</div>
+<div class="status-detail">Postfix relay active{% if relay_config.get('provider') %} · {{ providers.get(relay_config.provider,{}).get('name', relay_config.provider) }}{% endif %}{% if relay_config.get('from_addr') %} · {{ relay_config.from_addr }}{% endif %}</div>
+</div></div>
+<div class="controls">
+<button class="control-btn" onclick="emailControl('restart')">↻ Restart</button>
+<button class="control-btn btn-stop" onclick="emailControl('stop')">■ Stop</button>
+<button class="control-btn btn-stop" onclick="emailUninstall()" style="margin-left:8px">🗑 Remove</button>
+</div>
+{% elif email.installed %}
+<div class="status-info"><div class="status-icon stopped">📧</div><div>
+<div class="status-text" style="color:var(--red)">Stopped</div>
+<div class="status-detail">Postfix is installed but not running</div>
+</div></div>
+<div class="controls"><button class="control-btn btn-start" onclick="emailControl('start')">▶ Start</button></div>
+{% else %}
+<div class="status-info"><div class="status-icon not-installed">📧</div><div>
+<div class="status-text" style="color:var(--text-dim)">Not Installed</div>
+<div class="status-detail">Postfix email relay — apps use localhost, provider handles delivery</div>
+</div></div>
+{% endif %}
+</div>
+
+{% if deploying %}
+<!-- Deploy Log -->
+<div class="section-title">Deployment Log</div>
+<div class="deploy-log" id="deploy-log">Starting deployment...</div>
+<script>
+(function pollLog(){
+    var el=document.getElementById('deploy-log');
+    var last=0;
+    var iv=setInterval(async()=>{
+        var r=await fetch('/api/emailrelay/log');var d=await r.json();
+        if(d.entries&&d.entries.length>last){el.textContent=d.entries.join('\\n');el.scrollTop=el.scrollHeight;last=d.entries.length}
+        if(!d.running){clearInterval(iv);setTimeout(()=>location.reload(),1500)}
+    },1500);
+})();
+</script>
+
+{% elif email.installed and email.running %}
+<!-- Running State -->
+<div class="section-title">Current Configuration</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<table class="config-table">
+<tr><td>Provider</td><td>{{ providers.get(relay_config.get('provider',''),{}).get('name', relay_config.get('provider','—')) }}</td></tr>
+<tr><td>Relay Host</td><td>{{ relay_config.get('relay_host','—') }}:{{ relay_config.get('relay_port','587') }}</td></tr>
+<tr><td>SMTP Login</td><td>{{ relay_config.get('smtp_user','—') }}</td></tr>
+<tr><td>From Address</td><td>{{ relay_config.get('from_addr','—') }}</td></tr>
+<tr><td>From Name</td><td>{{ relay_config.get('from_name','—') }}</td></tr>
+</table>
+</div>
+
+<div class="section-title">App SMTP Settings</div>
+<div class="info-box">
+Configure TAK Portal and MediaMTX to use the local relay:<br><br>
+<strong>SMTP Host:</strong> <code>localhost</code> &nbsp;&nbsp;
+<strong>Port:</strong> <code>25</code> &nbsp;&nbsp;
+<strong>Username:</strong> <code>blank</code> &nbsp;&nbsp;
+<strong>Password:</strong> <code>blank</code> &nbsp;&nbsp;
+<strong>TLS:</strong> <code>off</code>
+</div>
+
+<div class="section-title">Send Test Email</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div style="display:flex;gap:12px;align-items:end">
+<div style="flex:1"><label class="input-label">Send test to</label>
+<input type="email" id="test-addr" class="input-field" placeholder="you@example.com"></div>
+<button onclick="sendTest()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap">Send Test</button>
+</div>
+<div id="test-result" style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;display:none"></div>
+</div>
+
+<div class="section-title">Switch Provider</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div id="swap-form">
+<div class="form-grid">
+<div class="form-group full">
+<label class="input-label">Email Provider</label>
+<select class="input-field" id="swap-provider" onchange="updateProviderUI('swap-')">
+{% for key, p in providers.items() %}<option value="{{ key }}"{% if relay_config.get("provider")==key %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+</select>
+<a id="swap-provider-link" href="#" target="_blank" class="provider-link" style="display:none">→ Get credentials from provider ↗</a>
+</div>
+<div class="form-group"><label class="input-label">SMTP Username / Login</label>
+<input type="text" id="swap-smtp_user" class="input-field" placeholder="user@smtp-brevo.com" value="{{ relay_config.get('smtp_user','') }}"></div>
+<div class="form-group"><label class="input-label">SMTP Password / API Key</label>
+<input type="password" id="swap-smtp_pass" class="input-field" placeholder="••••••••••••"></div>
+<div class="form-group"><label class="input-label">From Address</label>
+<input type="email" id="swap-from_addr" class="input-field" placeholder="noreply@yourdomain.com" value="{{ relay_config.get('from_addr','') }}"></div>
+<div class="form-group"><label class="input-label">From Name</label>
+<input type="text" id="swap-from_name" class="input-field" placeholder="TAK Operations" value="{{ relay_config.get('from_name','') }}"></div>
+<div class="form-group full" id="swap-custom-fields" style="display:none;grid-template-columns:1fr 120px;gap:12px">
+<div><label class="input-label">Custom SMTP Host</label><input type="text" id="swap-custom_host" class="input-field" placeholder="smtp.yourdomain.com"></div>
+<div><label class="input-label">Port</label><input type="text" id="swap-custom_port" class="input-field" placeholder="587" value="587"></div>
+</div></div>
+<div style="margin-top:20px;text-align:center">
+<button onclick="swapProvider()" style="padding:12px 32px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;cursor:pointer">↔ Switch Provider</button>
+</div>
+</div>
+</div>
+
+{% elif not email.installed %}
+<!-- Not Installed -->
+<div class="section-title">How It Works</div>
+<div class="info-box">
+The Email Relay installs <strong>Postfix</strong> as a local mail relay on this server. Your apps (TAK Portal, MediaMTX) send to <code>localhost:25</code> with no credentials — Postfix handles authentication and delivery through your chosen provider.<br><br>
+Switching providers later requires only updating Postfix credentials — no changes to your apps.
+</div>
+
+<div class="section-title">Deploy Email Relay</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div class="form-grid">
+<div class="form-group full">
+<label class="input-label">Email Provider</label>
+<select class="input-field" id="deploy-provider" onchange="updateProviderUI('deploy-')">
+{% for key, p in providers.items() %}<option value="{{ key }}">{{ p.name }}</option>{% endfor %}
+</select>
+<a id="deploy-provider-link" href="#" target="_blank" class="provider-link" style="display:none">→ Get credentials from provider ↗</a>
+</div>
+<div class="form-group"><label class="input-label">SMTP Username / Login</label>
+<input type="text" id="deploy-smtp_user" class="input-field" placeholder="user@smtp-brevo.com"></div>
+<div class="form-group"><label class="input-label">SMTP Password / API Key</label>
+<input type="password" id="deploy-smtp_pass" class="input-field" placeholder="••••••••••••"></div>
+<div class="form-group"><label class="input-label">From Address</label>
+<input type="email" id="deploy-from_addr" class="input-field" placeholder="noreply@yourdomain.com"></div>
+<div class="form-group"><label class="input-label">From Name</label>
+<input type="text" id="deploy-from_name" class="input-field" placeholder="TAK Operations"></div>
+<div class="form-group full" id="deploy-custom-fields" style="display:none;grid-template-columns:1fr 120px;gap:12px">
+<div><label class="input-label">Custom SMTP Host</label><input type="text" id="deploy-custom_host" class="input-field" placeholder="smtp.yourdomain.com"></div>
+<div><label class="input-label">Port</label><input type="text" id="deploy-custom_port" class="input-field" placeholder="587" value="587"></div>
+</div></div>
+<div style="margin-top:20px;text-align:center">
+<button onclick="deployRelay()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">📧 Deploy Email Relay</button>
+</div>
+</div>
+{% endif %}
+
+</main>
+<footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type','') }} · {{ settings.get('server_ip','') }}</footer>
+
+<script>
+var PROVIDERS = {{ providers | tojson }};
+
+function updateProviderUI(prefix){
+    var sel = document.getElementById(prefix+'provider');
+    if(!sel) return;
+    var key = sel.value;
+    var p = PROVIDERS[key] || {};
+    var linkEl = document.getElementById(prefix+'provider-link');
+    if(linkEl){
+        if(p.url){ linkEl.href=p.url; linkEl.style.display='inline'; }
+        else { linkEl.style.display='none'; }
+    }
+    var customFields = document.getElementById(prefix+'custom-fields');
+    if(customFields) customFields.style.display = (key==='custom') ? 'grid' : 'none';
+}
+
+async function deployRelay(){
+    var btn=document.getElementById('deploy-btn');
+    var provider=document.getElementById('deploy-provider').value;
+    var user=document.getElementById('deploy-smtp_user').value.trim();
+    var pass=document.getElementById('deploy-smtp_pass').value.trim();
+    var from=document.getElementById('deploy-from_addr').value.trim();
+    var name=document.getElementById('deploy-from_name').value.trim();
+    if(!user||!pass||!from){alert('SMTP username, password, and From address are required');return}
+    var body={provider,smtp_user:user,smtp_pass:pass,from_addr:from,from_name:name};
+    if(provider==='custom'){
+        body.custom_host=document.getElementById('deploy-custom_host').value.trim();
+        body.custom_port=document.getElementById('deploy-custom_port').value.trim();
+    }
+    btn.disabled=true;btn.textContent='Deploying...';btn.style.opacity='0.7';
+    var r=await fetch('/api/emailrelay/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    if(d.success){location.reload()}
+    else{alert('Error: '+d.error);btn.disabled=false;btn.textContent='📧 Deploy Email Relay';btn.style.opacity='1'}
+}
+
+async function swapProvider(){
+    var provider=document.getElementById('swap-provider').value;
+    var user=document.getElementById('swap-smtp_user').value.trim();
+    var pass=document.getElementById('swap-smtp_pass').value.trim();
+    var from=document.getElementById('swap-from_addr').value.trim();
+    var name=document.getElementById('swap-from_name').value.trim();
+    if(!user||!pass||!from){alert('All fields required');return}
+    var body={provider,smtp_user:user,smtp_pass:pass,from_addr:from,from_name:name};
+    if(provider==='custom'){
+        body.custom_host=document.getElementById('swap-custom_host').value.trim();
+        body.custom_port=document.getElementById('swap-custom_port').value.trim();
+    }
+    if(!confirm('Switch to '+PROVIDERS[provider].name+'? Postfix will restart.')){return}
+    var r=await fetch('/api/emailrelay/swap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    if(d.success){location.reload()}
+    else{alert('Error: '+d.error)}
+}
+
+async function sendTest(){
+    var to=document.getElementById('test-addr').value.trim();
+    if(!to){alert('Enter a recipient address');return}
+    var res=document.getElementById('test-result');
+    res.style.display='block';res.style.color='var(--text-dim)';res.textContent='Sending...';
+    var r=await fetch('/api/emailrelay/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to})});
+    var d=await r.json();
+    if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.output}
+    else{res.style.color='var(--red)';res.textContent='✗ '+d.error}
+}
+
+async function emailControl(action){
+    var r=await fetch('/api/emailrelay/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+    var d=await r.json();
+    if(d.success){location.reload()}else{alert('Error: '+(d.error||d.output))}
+}
+
+async function emailUninstall(){
+    if(!confirm('Remove Postfix email relay? Apps will need to be reconfigured.')){return}
+    var r=await fetch('/api/emailrelay/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var d=await r.json();
+    if(d.success){location.reload()}else{alert('Error removing Postfix')}
+}
+</script>
+</body></html>'''
+
+
+
+
 CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Caddy SSL — TAKWERX Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1403,7 +3145,7 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 <div style="max-width:500px;margin:0 auto">
 <label class="input-label">Base Domain</label>
 <input type="text" id="domain-input" class="input-field" placeholder="yourdomain.com" style="margin-bottom:8px">
-<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:20px">Subdomains auto-configured: console · tak · authentik · portal · nodered · cloudtak<br>Point a wildcard DNS (*.yourdomain.com) or individual A records to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:20px">Subdomains auto-configured: console · tak · authentik · portal · nodered · map · tiles.map · video<br>Point a wildcard DNS (*.yourdomain.com) or individual A records to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
 <div style="text-align:center">
 <button onclick="deployCaddy()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">🚀 Deploy Caddy</button>
 </div>
@@ -1662,6 +3404,12 @@ Features: User creation with auto-cert generation, group management, mutual aid 
 </div>
 </div>
 <button class="deploy-btn" id="deploy-btn" onclick="deployPortal()">🚀 Deploy TAK Portal</button>
+{% if not settings.fqdn %}
+<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:16px 20px;margin-top:16px;font-size:13px;color:#f87171">
+  🔒 <strong>SSL Required</strong> — TAK Portal requires a domain with SSL configured.<br>
+  <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
+</div>
+{% endif %}
 <div class="deploy-log" id="deploy-log" style="display:none">Waiting for deployment to start...</div>
 {% endif %}
 
@@ -3083,6 +4831,12 @@ It provides centralized user authentication and management for all your services
 </div>
 </div>
 <button class="deploy-btn" id="deploy-btn" onclick="deployAk()">🚀 Deploy Authentik</button>
+{% if not settings.fqdn %}
+<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:16px 20px;margin-top:16px;font-size:13px;color:#f87171">
+  🔒 <strong>SSL Required</strong> — Authentik requires a domain with SSL configured.<br>
+  <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
+</div>
+{% endif %}
 <div class="deploy-log" id="deploy-log" style="display:none">Waiting for deployment to start...</div>
 {% endif %}
 
