@@ -3093,10 +3093,26 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             try:
                 resp = _req.urlopen(req, timeout=15)
                 stage_data = json.loads(resp.read().decode())
-                if stage_data.get('recovery_flow') != recovery_flow_pk:
-                    _req.urlopen(_req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
-                        data=json.dumps({**stage_data, 'recovery_flow': recovery_flow_pk}).encode(),
-                        headers=ak_headers, method='PUT'), timeout=15)
+                # recovery_flow can be None, uuid string, or {"pk": "uuid"} from API
+                current_rf = stage_data.get('recovery_flow')
+                current_pk = (current_rf if isinstance(current_rf, str) else
+                              (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
+                if current_pk != recovery_flow_pk:
+                    # Use PATCH to update only recovery_flow (avoids serialization issues)
+                    patch_body = json.dumps({'recovery_flow': recovery_flow_pk}).encode()
+                    req_upd = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                        data=patch_body, headers=ak_headers, method='PATCH')
+                    try:
+                        _req.urlopen(req_upd, timeout=15)
+                    except urllib.error.HTTPError as e:
+                        if e.code == 405:
+                            # PATCH not supported, fall back to PUT with full body
+                            req_put = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                                data=json.dumps({**stage_data, 'recovery_flow': recovery_flow_pk}).encode(),
+                                headers=ak_headers, method='PUT')
+                            _req.urlopen(req_put, timeout=15)
+                        else:
+                            raise
                 break
             except urllib.error.HTTPError as e:
                 if e.code == 404:
@@ -3122,11 +3138,14 @@ def emailrelay_configure_authentik():
     if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
         return jsonify({'success': False, 'error': 'Authentik is not installed.'}), 400
     from_addr = (relay.get('from_addr') or '').strip() or 'authentik@localhost'
+    # Authentik runs in Docker — localhost inside a container is the container, not the host.
+    # Use host.docker.internal so Authentik can reach Postfix on the host.
+    smtp_host = 'host.docker.internal'
     # Authentik email env vars (docs: https://docs.goauthentik.io/install-config/email/)
     email_block = [
         '',
-        '# Email — use local relay (Postfix)',
-        'AUTHENTIK_EMAIL__HOST=localhost',
+        '# Email — use local relay (Postfix on host)',
+        f'AUTHENTIK_EMAIL__HOST={smtp_host}',
         'AUTHENTIK_EMAIL__PORT=25',
         'AUTHENTIK_EMAIL__USERNAME=',
         'AUTHENTIK_EMAIL__PASSWORD=',
@@ -3148,6 +3167,19 @@ def emailrelay_configure_authentik():
         lines.extend(email_block)
         with open(env_path, 'w') as f:
             f.write('\n'.join(lines) + '\n')
+        # Ensure host.docker.internal resolves (worker/server need to reach Postfix on host)
+        override_path = os.path.join(ak_dir, 'docker-compose.override.yml')
+        override_content = '''# infra-TAK: allow containers to reach host Postfix for email
+services:
+  server:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+'''
+        with open(override_path, 'w') as f:
+            f.write(override_content)
         r = subprocess.run(
             f'cd {ak_dir} && docker compose up -d --force-recreate',
             shell=True, capture_output=True, text=True, timeout=120
@@ -3163,7 +3195,7 @@ def emailrelay_configure_authentik():
                     if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
                         ak_token = line.strip().split('=', 1)[1].strip()
                         break
-        message = 'Authentik is now configured to use the local Email Relay (localhost:25). Restart complete.'
+        message = 'Authentik is now configured to use the local Email Relay (host.docker.internal:25). Restart complete.'
         if ak_token:
             ak_url = 'http://127.0.0.1:9090'
             ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
