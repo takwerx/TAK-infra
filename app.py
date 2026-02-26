@@ -82,9 +82,20 @@ def load_auth():
     p = os.path.join(CONFIG_DIR, 'auth.json')
     return json.load(open(p)) if os.path.exists(p) else {}
 
+def _apply_authentik_session():
+    """If request has Authentik headers (from Caddy forward_auth), set session so we treat user as logged in."""
+    uname = request.headers.get('X-Authentik-Username')
+    if uname:
+        session['authenticated'] = True
+        session['authentik_username'] = uname
+        return True
+    return False
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if _apply_authentik_session():
+            return f(*args, **kwargs)
         if not session.get('authenticated'):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
@@ -237,6 +248,8 @@ def get_system_metrics():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    if request.method == 'GET' and _apply_authentik_session():
+        return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
         if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
@@ -252,7 +265,9 @@ def logout():
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    """Landing: login at / (infratak.fqdn); when logged in redirect to console."""
+    """Landing: login at / (infratak.fqdn); when logged in redirect to console. Authentik headers = auto-login."""
+    if request.method == 'GET' and _apply_authentik_session():
+        return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
         if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
@@ -366,11 +381,18 @@ def update_apply():
 def takserver_page():
     modules = detect_modules()
     tak = modules.get('takserver', {})
+    ak = modules.get('authentik', {})
+    # Show "Connect TAK Server to LDAP" when: TAK Server + Authentik installed, CoreConfig exists, LDAP not yet applied
+    show_connect_ldap = (
+        tak.get('installed') and ak.get('installed') and
+        os.path.exists('/opt/tak/CoreConfig.xml') and not _coreconfig_has_ldap()
+    )
     # Reset deploy_done once TAK Server is running so the running view shows
     if tak.get('installed') and tak.get('running') and not deploy_status.get('running', False):
         deploy_status.update({'complete': False, 'error': False})
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=load_settings(), modules=modules, tak=tak,
+        show_connect_ldap=show_connect_ldap,
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
 
@@ -443,9 +465,12 @@ def _caddy_configured_urls(settings, modules):
         return []
     base = f'https://{fqdn}'
     urls = []
-    # infra-TAK platform (login) and console (dashboard) — both served when Caddy has a domain
-    urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': 'Login & platform'})
-    urls.append({'name': 'Console', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}', 'desc': 'Console (after login)'})
+    # infra-TAK platform (login) and console (dashboard) — behind Authentik when Authentik is installed
+    ak = modules.get('authentik', {})
+    infratak_desc = 'Login & platform (Authentik when enabled)' if ak.get('installed') else 'Login & platform'
+    console_desc = 'Console (Authentik when enabled)' if ak.get('installed') else 'Console (after login)'
+    urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': infratak_desc})
+    urls.append({'name': 'Console', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}', 'desc': console_desc})
     tak = modules.get('takserver', {})
     if tak.get('installed'):
         urls.append({'name': 'TAK Server', 'host': f'tak.{fqdn}', 'url': f'https://tak.{fqdn}', 'desc': 'WebGUI, Marti API'})
@@ -536,6 +561,25 @@ def caddy_update_domain():
     settings['fqdn'] = domain
     save_settings(settings)
     generate_caddyfile(settings)
+    # If Authentik is installed, ensure infra-TAK Console provider exists (so infratak/console are behind Authentik)
+    ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
+    if ak_installed:
+        def _ensure_console_app():
+            time.sleep(1)
+            try:
+                env_path = os.path.expanduser('~/authentik/.env')
+                ak_token = ''
+                if os.path.exists(env_path):
+                    with open(env_path) as f:
+                        for line in f:
+                            if line.strip().startswith('AUTHENTIK_TOKEN='):
+                                ak_token = line.strip().split('=', 1)[1].strip()
+                                break
+                if ak_token:
+                    _ensure_authentik_console_app(domain, ak_token)
+            except Exception:
+                pass
+        threading.Thread(target=_ensure_console_app, daemon=True).start()
     # Restart in background so response reaches client before Caddy restarts (console is behind Caddy)
     def _restart():
         time.sleep(2)
@@ -619,27 +663,59 @@ def generate_caddyfile(settings=None):
 
     lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
 
-    # infra-TAK (login & platform) — infratak.domain
+    ak = modules.get('authentik', {})
+    # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
     lines.append(f"infratak.{domain} {{")
-    lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
-    lines.append(f"        transport http {{")
-    lines.append(f"            tls")
-    lines.append(f"            tls_insecure_skip_verify")
-    lines.append(f"        }}")
-    lines.append(f"    }}")
+    if ak.get('installed'):
+        lines.append(f"    route {{")
+        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+        lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+        lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+        lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
+        lines.append(f"            trusted_proxies private_ranges")
+        lines.append(f"        }}")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
+    else:
+        lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"        transport http {{")
+        lines.append(f"            tls")
+        lines.append(f"            tls_insecure_skip_verify")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
     lines.append(f"}}")
     lines.append("")
 
-    # Console — console.domain (Flask only; Node-RED has its own subdomain)
+    # Console — console.domain (behind Authentik when Authentik is installed; backdoor: direct IP:5001 still uses password)
     nodered = modules.get('nodered', {})
-    ak = modules.get('authentik', {})
     lines.append(f"console.{domain} {{")
-    lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
-    lines.append(f"        transport http {{")
-    lines.append(f"            tls")
-    lines.append(f"            tls_insecure_skip_verify")
-    lines.append(f"        }}")
-    lines.append(f"    }}")
+    if ak.get('installed'):
+        lines.append(f"    route {{")
+        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+        lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+        lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+        lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
+        lines.append(f"            trusted_proxies private_ranges")
+        lines.append(f"        }}")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
+    else:
+        lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"        transport http {{")
+        lines.append(f"            tls")
+        lines.append(f"            tls_insecure_skip_verify")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
     lines.append(f"}}")
     lines.append("")
 
@@ -3013,6 +3089,95 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
         log(f"  ⚠ Forward auth setup error: {str(e)[:100]}")
     return True
 
+def _ensure_authentik_console_app(fqdn, ak_token, plog=None):
+    """Create infra-TAK Console proxy providers (infratak + console) and applications in Authentik, add to embedded outpost."""
+    if not fqdn or not ak_token:
+        return False
+    def log(msg):
+        if plog:
+            plog(msg)
+    import urllib.request as _urlreq
+    _ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    _ak_url = 'http://127.0.0.1:9090'
+
+    try:
+        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
+        resp = _urlreq.urlopen(req, timeout=10)
+        flows = json.loads(resp.read().decode())['results']
+        flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
+        if not flow_pk:
+            return False
+        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+        resp = _urlreq.urlopen(req, timeout=10)
+        inv_flows = json.loads(resp.read().decode())['results']
+        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+        if not inv_flow_pk:
+            return False
+
+        provider_pks = []
+        for name, slug, host in [
+            ('infra-TAK (infratak)', 'infratak-console', f'https://infratak.{fqdn}'),
+            ('infra-TAK (console)', 'console-console', f'https://console.{fqdn}'),
+        ]:
+            pk = None
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                    data=json.dumps({'name': name, 'authorization_flow': flow_pk,
+                        'invalidation_flow': inv_flow_pk,
+                        'external_host': host, 'mode': 'forward_single',
+                        'token_validity': 'hours=24'}).encode(),
+                    headers=_ak_headers, method='POST')
+                resp = _urlreq.urlopen(req, timeout=10)
+                pk = json.loads(resp.read().decode())['pk']
+                provider_pks.append(pk)
+                log(f"  ✓ Proxy provider created: {name}")
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 400:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={slug.split("-")[0]}', headers=_ak_headers)
+                    resp = _urlreq.urlopen(req, timeout=10)
+                    results = json.loads(resp.read().decode())['results']
+                    if results:
+                        pk = results[0]['pk']
+                        provider_pks.append(pk)
+                    log(f"  ✓ Proxy provider already exists: {name}")
+                else:
+                    log(f"  ⚠ Provider error {name}: {str(e)[:80]}")
+            if pk:
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                        data=json.dumps({'name': 'infra-TAK Console', 'slug': slug, 'provider': pk}).encode(),
+                        headers=_ak_headers, method='POST')
+                    _urlreq.urlopen(req, timeout=10)
+                    log(f"  ✓ Application created: {name}")
+                except Exception as e:
+                    if hasattr(e, 'code') and e.code == 400:
+                        log(f"  ✓ Application already exists: {name}")
+                    else:
+                        log(f"  ⚠ Application error: {str(e)[:80]}")
+
+        if provider_pks:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/?search=embedded', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                outposts = json.loads(resp.read().decode())['results']
+                embedded = next((o for o in outposts if 'embed' in o.get('name', '').lower() or o.get('type') == 'proxy'), None)
+                if embedded:
+                    current = list(embedded.get('providers', []))
+                    for pk in provider_pks:
+                        if pk not in current:
+                            current.append(pk)
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
+                        data=json.dumps({'providers': current}).encode(),
+                        headers=_ak_headers, method='PATCH')
+                    _urlreq.urlopen(req, timeout=10)
+                    log("  ✓ infra-TAK Console added to embedded outpost")
+            except Exception as e:
+                log(f"  ⚠ Outpost error: {str(e)[:80]}")
+        return True
+    except Exception as e:
+        log(f"  ⚠ Console forward auth setup: {str(e)[:100]}")
+        return False
+
 def run_nodered_deploy():
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
@@ -5327,8 +5492,8 @@ entries:
             else:
                 plog("\u26a0 LDAP service password not found, skipping CoreConfig patch")
         else:
-            plog("\u26a0 TAK Server not installed, skipping CoreConfig patch")
-            plog("  Deploy TAK Server first, then redeploy Authentik to auto-configure")
+            plog("  ℹ TAK Server not installed — skipping CoreConfig (OK for MediaMTX-only or standalone Authentik)")
+            plog("  Deploy TAK Server later and redeploy Authentik to add LDAP to TAK Server if needed")
 
         # Step 11/12: Create admin group and webadmin user in Authentik
         plog("")
@@ -5402,7 +5567,7 @@ entries:
                         plog(f"  ⚠ Group creation error: {e.code} — continuing")
                         group_pk = None
 
-                # Create webadmin user in Authentik
+                # Create webadmin user in Authentik (only when TAK Server is deployed — used for TAK Server admin)
                 webadmin_pass = ''
                 if os.path.exists('/opt/tak'):
                     # Read password from TAK Server settings or use default
@@ -5414,6 +5579,8 @@ entries:
                     if not webadmin_pass:
                         webadmin_pass = 'TakserverAtak1!'
                         plog(f"  ⚠ webadmin_password not found in settings.json — using default: TakserverAtak1!")
+                else:
+                    plog("  ℹ TAK Server not installed — skipping webadmin user (optional; used for TAK Server admin)")
 
                 if webadmin_pass:
                     try:
@@ -5808,6 +5975,10 @@ entries:
                         plog("")
                         plog("  Configuring Authentik for Node-RED...")
                         _ensure_authentik_nodered_app(fqdn, ak_token, plog)
+                    # infra-TAK console (infratak + console subdomains) behind Authentik
+                    plog("")
+                    plog("  Configuring Authentik for infra-TAK Console...")
+                    _ensure_authentik_console_app(fqdn, ak_token, plog)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
@@ -6209,6 +6380,79 @@ async function doUninstallAk(){
 {% if deploying %}pollDeployLog();{% endif %}
 </script>
 </body></html>'''
+
+def _coreconfig_has_ldap():
+    """True if CoreConfig.xml exists and already contains the LDAP auth block."""
+    path = '/opt/tak/CoreConfig.xml'
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        return 'serviceAccountDN="cn=adm_ldapservice"' in content or '<ldap url="ldap://127.0.0.1:389"' in content
+    except Exception:
+        return False
+
+def _apply_ldap_to_coreconfig():
+    """Patch CoreConfig.xml with LDAP auth and restart TAK Server. Returns (success, message)."""
+    import re
+    import shutil
+    coreconfig_path = '/opt/tak/CoreConfig.xml'
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(coreconfig_path):
+        return False, 'CoreConfig.xml not found'
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ldap_pass = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                ldap_pass = line.strip().split('=', 1)[1].strip()
+                break
+    if not ldap_pass:
+        return False, 'LDAP service password not found in Authentik .env'
+    backup_path = coreconfig_path + '.pre-ldap.bak'
+    if not os.path.exists(backup_path):
+        shutil.copy2(coreconfig_path, backup_path)
+    with open(coreconfig_path, 'r') as f:
+        config_content = f.read()
+    auth_block = (
+        '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
+        ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
+        ' x509checkRevocation="true">\n'
+        '        <File location="UserAuthenticationFile.xml"/>\n'
+        '        <ldap url="ldap://127.0.0.1:389"'
+        ' userstring="cn={username},ou=users,dc=takldap"'
+        ' updateinterval="60"'
+        ' groupprefix="cn=tak_"'
+        ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
+        ' matchGroupInChain="true"'
+        f' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
+        f' serviceAccountCredential="{ldap_pass}"'
+        ' groupBaseRDN="ou=groups,dc=takldap"'
+        ' userBaseRDN="ou=users,dc=takldap"'
+        ' groupObjectClass="group" userObjectClass="user"'
+        ' style="DS" ldapSecurityType="simple"'
+        ' dnAttributeName="DN"'
+        ' nameAttr="CN" roleAttribute="memberOf" adminGroup="ROLE_ADMIN"/>\n'
+        '    </auth>'
+    )
+    new_content = re.sub(r'    <auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL)
+    if new_content == config_content:
+        return True, 'CoreConfig already has LDAP'
+    with open(coreconfig_path, 'w') as f:
+        f.write(new_content)
+    r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
+    return True, 'LDAP connected; TAK Server restarted'
+
+@app.route('/api/takserver/connect-ldap', methods=['POST'])
+@login_required
+def takserver_connect_ldap():
+    """One-shot: patch CoreConfig with LDAP and restart TAK Server (when Authentik already deployed)."""
+    ok, msg = _apply_ldap_to_coreconfig()
+    return jsonify({'success': ok, 'message': msg})
 
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
@@ -7147,6 +7391,14 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="cert-download-area" style="margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-secondary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>
 {% endif %}
 {% elif tak.installed %}
+{% if show_connect_ldap %}
+<div class="card" style="border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.06);margin-bottom:24px">
+<div class="card-title">🔗 Connect TAK Server to LDAP</div>
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">Authentik is deployed. Connect TAK Server to the same LDAP so users can sign in with their Authentik accounts. This patches CoreConfig.xml and restarts TAK Server once.</p>
+<button type="button" id="connect-ldap-btn" onclick="connectLdap()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Connect TAK Server to LDAP</button>
+<div id="connect-ldap-msg" style="margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>
+</div>
+{% endif %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
@@ -7284,6 +7536,20 @@ async function takControl(action){
         window.location.reload();
     }
     catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
+}
+
+async function connectLdap(){
+    var btn=document.getElementById('connect-ldap-btn');
+    var msg=document.getElementById('connect-ldap-msg');
+    if(btn){btn.disabled=true;btn.textContent='Connecting...';btn.style.opacity='0.7';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} setTimeout(function(){window.location.reload();},1200);}
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
 }
 
 (function(){

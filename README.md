@@ -33,8 +33,7 @@ The script will:
 1. Detect your OS (Ubuntu 22.04, Rocky 9)
 2. Install Python dependencies
 3. Ask you to set an admin password
-4. Ask if you're using a domain name or IP address
-5. Start the web console
+4. Start the web console
 
 Then open your browser to the URL shown and log in.
 
@@ -56,7 +55,7 @@ Deploy services in this order — each step auto-configures the next:
 5. Anything else     CloudTAK, Node-RED, MediaMTX, Email Relay — any order
 ```
 
-**TAK Server must be deployed before Authentik.** Authentik auto-configures LDAP auth in CoreConfig.xml and restarts TAK Server. TAK Portal auto-detects the Authentik bootstrap token and TAK Server certificates — zero manual configuration required. After TAK Portal, the remaining services can be deployed in any order from the Marketplace.
+**For TAK Server + TAK Portal:** Deploy TAK Server before Authentik so Authentik can add LDAP auth to CoreConfig.xml. TAK Portal then auto-detects the Authentik bootstrap token and TAK Server certificates. **For MediaMTX-only (or standalone Authentik):** You can deploy Authentik without TAK Server — it will skip CoreConfig and webadmin; add TAK Server later and redeploy Authentik to wire LDAP to TAK Server if needed. After TAK Portal (or if you skip it), remaining services can be deployed in any order from the Marketplace.
 
 ## What Gets Automated
 
