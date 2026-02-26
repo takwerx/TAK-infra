@@ -118,6 +118,10 @@ start.sh                    ← One CLI command to launch everything
 - All config files are 600 permissions
 - Authentik bootstrap credentials auto-generated per deployment
 
+## Design notes
+
+- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management).
+
 ---
 
 ## Changelog

@@ -11,7 +11,7 @@ from datetime import datetime
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
-# Share session across infratak.* and console.* so /nodered/* forward_auth works
+# Share session across infratak.* and console.* (nodered has its own subdomain)
 def _set_session_cookie_domain():
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.config', 'settings.json')
@@ -38,7 +38,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
 
 @app.before_request
 def ensure_session_cookie_domain():
-    """Ensure session cookie is set for parent domain so console subdomain receives it (for /nodered/* forward_auth)."""
+    """Ensure session cookie is set for parent domain so console subdomain receives it."""
     if app.config.get('SESSION_COOKIE_DOMAIN'):
         return
     try:
@@ -54,6 +54,10 @@ CADDYFILE_PATH = "/etc/caddy/Caddyfile"
 CLOUDTAK_ICON = "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMYXllcl8xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNzQuMyA0Ni42MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOnVybCgjbGluZWFyLWdyYWRpZW50LTIpO30uY2xzLTJ7ZmlsbDp1cmwoI2xpbmVhci1ncmFkaWVudCk7fTwvc3R5bGU+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQiIHgxPSIxNC4zOCIgeTE9IjguOTMiIHgyPSI2Ni45MiIgeTI9IjYxLjQ3IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmY5ODIwIi8+PHN0b3Agb2Zmc2V0PSIuNDIiIHN0b3AtY29sb3I9IiNmZmNlMDQiLz48c3RvcCBvZmZzZXQ9Ii40OSIgc3RvcC1jb2xvcj0iZ29sZCIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQtMiIgeDE9IjU5LjI3IiB5MT0iLS4zOCIgeDI9IjcyLjc0IiB5Mj0iMTIuMDgiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNmZjk4MjAiLz48c3RvcCBvZmZzZXQ9Ii4yOSIgc3RvcC1jb2xvcj0iI2ZmYjYxMCIvPjxzdG9wIG9mZnNldD0iLjU3IiBzdG9wLWNvbG9yPSJnb2xkIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0yIiBkPSJNNzIuMDUsMjMuNTVjLTEuMjYtMS44OC0zLjAxLTMuNDUtNS4yMS00LjY1LTEuODUtMS4wMS0zLjY5LTEuNTktNS4wNi0xLjkxLS40Mi0xLjc0LTEuMjMtNC4yOC0yLjc3LTYuODVDNTYuNDQsNS44OCw1MS4zNy42Nyw0MS43LjA2Yy0uNTktLjA0LTEuMTgtLjA2LTEuNzUtLjA2LTcuODIsMC0xMi4wNCwzLjUyLTE0LjE5LDYuNDctLjkxLDEuMjQtMS41MywyLjQ4LTEuOTUsMy41NS0uODYtLjEzLTEuODYtLjIyLTIuOTMtLjIyLTMuNTYsMC02LjUyLDEuMDgtOC41NCwzLjEzLTEuOTEsMS45Mi0zLjIsNC4yNi0zLjczLDYuNzUtLjA5LjQxLS4xNS44LS4xOSwxLjE2LS45NS40Ny0yLjEyLDEuMTYtMy4yOSwyLjExQzEuNTYsMjUuODMtLjIsMjkuNjcuMDIsMzQuMDZjLjIyLDQuNDEsMi4yNyw3Ljk2LDUuOTQsMTAuMjksMi42LDEuNjUsNS4xLDIuMTksNS4zOCwyLjIzbC4yMi4wM2guMjJzNDguODYsMCw0OC44NiwwaC4xcy4xLDAsLjEsMGMuMzQtLjAyLDMuMzktLjI2LDYuNTQtMi4xMywzLjA0LTEuOCw2LjctNS40NSw2LjkyLTEyLjU2LjEtMy4xOC0uNjYtNS45OS0yLjI0LTguMzZaTTE0LjQzLDE1YzEuNzUtMS43Nyw0LjI0LTIuMjYsNi40NS0yLjI2LDIuNzEsMCw0Ljk5LjczLDQuOTkuNzMsMCwwLDEuMzMtMTAuNTMsMTQuMDctMTAuNTMuNSwwLDEuMDMuMDIsMS41Ny4wNSwxNi4yNCwxLjAzLDE3Ljc0LDE2LjU0LDE3Ljc0LDE2LjU0LDAsMCw0LjY3LjQyLDguMjEsMy4zMS0zLjQ3LDMuMjItNC45NSw1LjE5LTEyLjc3LDUuNzUtOC42NS42MS03LjQ3LDMuOTUtNy40NywzLjk1bC00LjA1LTguOThoNS43OWMuMTQtMi44NS0uODctNS42NS01LjMxLTUuNjVoLTguNDlsLTYuNTYsMTQuNjJzMS45Ni0zLjMxLTYuNjktMy45NWMtNy42OS0uNTUtNy41OC0yLjY5LTEwLjYxLTUuODgtLjA2LS41OC0uMjYtNC4zLDMuMTMtNy43MloiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik02MS43OSwzLjczaDIuNTl2LjY0aC0uOTN2Mi4zOGgtLjc0di0yLjM4aC0uOTN2LS42NFpNNjcuMDUsMy43M2wtLjc3LDIuMDMtLjc3LTIuMDNoLS45M3YzLjAzaC43di0ybC43MywyaC41NGwuNzMtMnYyaC43di0zLjAzaC0uOTNaIi8+PC9zdmc+"
 # MediaMTX official logo (external URL to avoid long inline strings)
 MEDIAMTX_LOGO_URL = "https://raw.githubusercontent.com/bluenviron/mediamtx/main/logo.png"
+# MediaMTX web editor: regular repo (no LDAP); when Authentik/LDAP is installed we use LDAP branch if set
+MEDIAMTX_EDITOR_REPO = "https://github.com/takwerx/mediamtx-installer.git"
+MEDIAMTX_EDITOR_PATH = "config-editor"  # subdir containing mediamtx_config_editor.py
+MEDIAMTX_EDITOR_LDAP_BRANCH = "infratak"  # when LDAP/Authentik installed, try this branch first; None = always use default branch
 # Node-RED official icons (https://nodered.org/about/resources/media/)
 NODERED_LOGO_URL = "https://nodered.org/about/resources/media/node-red-icon.png"       # icon only (e.g. small nav)
 NODERED_LOGO_URL_2 = "https://nodered.org/about/resources/media/node-red-icon-2.png"   # icon + "Node-RED" text (card, sidebar)
@@ -261,7 +265,7 @@ def index():
 
 @app.route('/api/forward-auth')
 def forward_auth():
-    """Caddy forward_auth: return 200 if session is authenticated; else redirect to console login. Used for /nodered/*."""
+    """Caddy forward_auth: return 200 if session is authenticated; else redirect to console login."""
     if session.get('authenticated'):
         return '', 200
     # Redirect to console login so user can log in and retry (Caddy passes this response to the client)
@@ -453,7 +457,7 @@ def _caddy_configured_urls(settings, modules):
         urls.append({'name': 'TAK Portal', 'host': f'takportal.{fqdn}', 'url': f'https://takportal.{fqdn}', 'desc': 'User & cert management'})
     nodered = modules.get('nodered', {})
     if nodered.get('installed'):
-        urls.append({'name': 'Node-RED', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}/nodered/', 'desc': 'Flow editor (console only)'})
+        urls.append({'name': 'Node-RED', 'host': f'nodered.{fqdn}', 'url': f'https://nodered.{fqdn}', 'desc': 'Flow editor (Authentik when enabled)'})
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
         urls.append({'name': 'CloudTAK (map)', 'host': f'map.{fqdn}', 'url': f'https://map.{fqdn}', 'desc': 'Browser TAK client'})
@@ -626,52 +630,36 @@ def generate_caddyfile(settings=None):
     lines.append(f"}}")
     lines.append("")
 
-    # Console — console.domain; /nodered/* → Node-RED (behind Authentik when Authentik is installed)
+    # Console — console.domain (Flask only; Node-RED has its own subdomain)
     nodered = modules.get('nodered', {})
     ak = modules.get('authentik', {})
     lines.append(f"console.{domain} {{")
-    if nodered.get('installed'):
-        if ak.get('installed'):
-            # Authentik outpost must be reachable for auth to work on this host
-            lines.append(f"    route {{")
-            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-            lines.append(f"        handle /nodered/* {{")
-            lines.append(f"            forward_auth 127.0.0.1:9090 {{")
-            lines.append(f"                uri /outpost.goauthentik.io/auth/caddy")
-            lines.append(f"                trusted_proxies private_ranges")
-            lines.append(f"            }}")
-            lines.append(f"            reverse_proxy 127.0.0.1:1880")
-            lines.append(f"        }}")
-            lines.append(f"        handle {{")
-            lines.append(f"            reverse_proxy 127.0.0.1:5001 {{")
-            lines.append(f"                transport http {{")
-            lines.append(f"                    tls")
-            lines.append(f"                    tls_insecure_skip_verify")
-            lines.append(f"                }}")
-            lines.append(f"            }}")
-            lines.append(f"        }}")
-            lines.append(f"    }}")
-        else:
-            lines.append(f"    handle /nodered/* {{")
-            lines.append(f"        reverse_proxy 127.0.0.1:1880")
-            lines.append(f"    }}")
-            lines.append(f"    handle {{")
-            lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-            lines.append(f"            transport http {{")
-            lines.append(f"                tls")
-            lines.append(f"                tls_insecure_skip_verify")
-            lines.append(f"            }}")
-            lines.append(f"        }}")
-            lines.append(f"    }}")
-    else:
-        lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"        transport http {{")
-        lines.append(f"            tls")
-        lines.append(f"            tls_insecure_skip_verify")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
+    lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
+    lines.append(f"        transport http {{")
+    lines.append(f"            tls")
+    lines.append(f"            tls_insecure_skip_verify")
+    lines.append(f"        }}")
+    lines.append(f"    }}")
     lines.append(f"}}")
     lines.append("")
+
+    # Node-RED — nodered.domain (behind Authentik when Authentik is installed)
+    if nodered.get('installed'):
+        lines.append(f"# Node-RED flow editor")
+        lines.append(f"nodered.{domain} {{")
+        if ak.get('installed'):
+            lines.append(f"    route {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+            lines.append(f"            trusted_proxies private_ranges")
+            lines.append(f"        }}")
+            lines.append(f"        reverse_proxy 127.0.0.1:1880")
+            lines.append(f"    }}")
+        else:
+            lines.append(f"    reverse_proxy 127.0.0.1:1880")
+        lines.append(f"}}")
+        lines.append("")
 
     # TAK Server — tak.domain
     tak = modules.get('takserver', {})
@@ -727,8 +715,6 @@ def generate_caddyfile(settings=None):
             lines.append(f"    reverse_proxy 127.0.0.1:3000")
         lines.append(f"}}")
         lines.append("")
-
-    # Node-RED: no subdomain — only via console.{domain}/nodered/ (session required)
 
     # CloudTAK — map.domain, tiles.map.domain, video.domain
     cloudtak = modules.get('cloudtak', {})
@@ -1884,20 +1870,58 @@ WantedBy=multi-user.target
             f.write(mediamtx_svc)
         plog("✓ mediamtx.service created")
 
-        # Write web editor Python app
+        # Write web editor Python app — flexible: detect LDAP/Authentik and choose regular vs LDAP-enhanced source
         webeditor_dir = '/opt/mediamtx-webeditor'
         os.makedirs(webeditor_dir, exist_ok=True)
         os.makedirs(f'{webeditor_dir}/backups', exist_ok=True)
         os.makedirs(f'{webeditor_dir}/recordings', exist_ok=True)
 
-        # Write the web editor — look next to app.py first, then common locations
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-        webeditor_candidates = [
-            os.path.join(app_dir, 'mediamtx_config_editor.py'),
-            os.path.join(app_dir, 'config-editor', 'mediamtx_config_editor.py'),
-            '/opt/takwerx/mediamtx_config_editor.py',
-        ]
-        webeditor_src = next((p for p in webeditor_candidates if os.path.exists(p)), None)
+        modules = detect_modules()
+        ak = modules.get('authentik', {})
+        ldap_available = bool(ak.get('installed'))
+        if ldap_available:
+            plog("  LDAP/Authentik detected — using editor source for LDAP-aware console")
+        else:
+            plog("  No LDAP — using regular MediaMTX editor from repo")
+
+        webeditor_src = None
+        clone_dir = '/tmp/mediamtx_editor_clone'
+        try:
+            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+            os.makedirs(clone_dir, exist_ok=True)
+            branch = MEDIAMTX_EDITOR_LDAP_BRANCH if (ldap_available and MEDIAMTX_EDITOR_LDAP_BRANCH) else None
+            if branch:
+                r = subprocess.run(f'git clone --depth 1 -b "{branch}" "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                    shell=True, capture_output=True, text=True, timeout=60)
+                if r.returncode != 0:
+                    plog(f"  LDAP branch \"{branch}\" not found or clone failed, trying default branch")
+                    subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+                    r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                        shell=True, capture_output=True, text=True, timeout=60)
+            else:
+                r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                    shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                candidate = os.path.join(clone_dir, MEDIAMTX_EDITOR_PATH, 'mediamtx_config_editor.py')
+                if os.path.exists(candidate):
+                    webeditor_src = candidate
+                    plog(f"  Cloned editor from {MEDIAMTX_EDITOR_REPO}" + (f" (branch {branch})" if branch else ""))
+        except Exception as e:
+            plog(f"  Clone failed: {e}")
+        if not webeditor_src:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            for p in [os.path.join(app_dir, 'mediamtx_config_editor.py'),
+                      os.path.join(app_dir, 'config-editor', 'mediamtx_config_editor.py'),
+                      '/opt/takwerx/mediamtx_config_editor.py']:
+                if os.path.exists(p):
+                    webeditor_src = p
+                    plog("  Using local web editor (clone skipped or failed)")
+                    break
+        try:
+            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+        except Exception:
+            pass
+
         if webeditor_src:
             subprocess.run(f'cp "{webeditor_src}" {webeditor_dir}/mediamtx_config_editor.py', shell=True)
             # Patch port to read from PORT env var instead of hardcoded 5000
@@ -1910,10 +1934,10 @@ WantedBy=multi-user.target
             if domain:
                 subprocess.run(f"sed -i 's/video\\./stream./g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
                 plog("  Stream URL host set to stream.*")
-            plog(f"✓ Web editor installed from {webeditor_src} (port 5080, API 9898)")
+            plog("✓ Web editor installed (port 5080, API 9898)")
         else:
-            plog("⚠ mediamtx_config_editor.py not found alongside app.py")
-            plog("  Place it next to app.py and redeploy, or install manually")
+            plog("⚠ mediamtx_config_editor.py not found (clone failed and no local file)")
+            plog("  Place it next to app.py or in config-editor/, or fix repo access, then redeploy")
             plog("  MediaMTX streaming will work — web editor unavailable until then")
 
         # Download test video
@@ -2918,7 +2942,7 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
                 req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
                     data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
                         'invalidation_flow': inv_flow_pk,
-                        'external_host': f'https://console.{fqdn}/nodered/', 'mode': 'forward_single',
+                        'external_host': f'https://nodered.{fqdn}', 'mode': 'forward_single',
                         'token_validity': 'hours=24'}).encode(),
                     headers=_ak_headers, method='POST')
                 resp = _urlreq.urlopen(req, timeout=10)
@@ -2931,7 +2955,14 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
                     results = json.loads(resp.read().decode())['results']
                     if results:
                         provider_pk = results[0]['pk']
-                    log("  ✓ Proxy provider already exists")
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/{provider_pk}/',
+                                data=json.dumps({'external_host': f'https://nodered.{fqdn}'}).encode(),
+                                headers=_ak_headers, method='PATCH')
+                            _urlreq.urlopen(req, timeout=10)
+                        except Exception:
+                            pass
+                    log("  ✓ Proxy provider already exists (external_host updated to nodered subdomain)")
                 else:
                     log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
 
@@ -2998,14 +3029,14 @@ def run_nodered_deploy():
         plog("━━━ Step 1/3: Creating Docker Compose ━━━")
         compose_yml = os.path.join(nr_dir, 'docker-compose.yml')
         settings_js = os.path.join(nr_dir, 'settings.js')
-        # Node-RED under /nodered so Caddy can proxy console.domain/nodered/* without stripping path
+        # Node-RED at root (/) so Caddy can proxy nodered.domain to 1880
         with open(settings_js, 'w') as f:
             f.write("""module.exports = {
   flowFile: 'flows.json',
   flowFilePretty: true,
   userDir: '/data',
-  httpAdminRoot: '/nodered',
-  httpNodeRoot: '/nodered'
+  httpAdminRoot: '/',
+  httpNodeRoot: '/'
 };
 """)
         with open(compose_yml, 'w') as f:
@@ -3035,7 +3066,7 @@ volumes:
         if domain:
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null', shell=True, capture_output=True, timeout=15)
-            plog(f"✓ Caddy updated — open via https://console.{domain}/nodered/")
+            plog(f"✓ Caddy updated — open via https://nodered.{domain}")
         else:
             plog("  No domain configured — access via http://<server>:1880")
         if not nodered_deploy_status.get('cancelled') and domain and os.path.exists(os.path.expanduser('~/authentik/.env')):
@@ -3124,7 +3155,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% if nr.installed %}
   {% if authentik_installed and settings.fqdn %}<div class="card" style="border-color:rgba(59,130,246,.3);background:rgba(59,130,246,.05)"><div class="card-title">&#128274; Protected by Authentik</div><p style="font-size:13px;color:var(--text-secondary);line-height:1.5">Node-RED is behind Authentik. The application and proxy provider are created automatically when you deploy Authentik or Node-RED.</p></div>{% endif %}
   <div class="card"><div class="card-title">Access</div><div class="info-grid">
-    {% if settings.fqdn %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="https://console.{{ settings.fqdn }}/nodered/" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://console.{{ settings.fqdn }}/nodered/</a> &#8599;</div></div>
+    {% if settings.fqdn %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="https://nodered.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://nodered.{{ settings.fqdn }}</a> &#8599;</div></div>
     {% else %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="http://{{ settings.server_ip }}:1880" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">http://{{ settings.server_ip }}:1880</a> &#8599;</div></div>{% endif %}
     <div class="info-item"><div class="info-label">Install dir</div><div class="info-value">~/node-red</div></div>
   </div></div>
@@ -3138,8 +3169,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   <div class="card" id="logs-card" style="display:none"><div class="card-title">Container logs</div><div class="log-box" id="container-logs">Loading...</div></div>
   {% else %}
   <div class="card"><div class="card-title">Deploy Node-RED</div>
-  <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">Runs Node-RED in Docker with a persistent volume. With a domain set, the flow editor is at https://nodered.&lt;your-domain&gt;.</p>
-  {% if settings.fqdn %}<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Node-RED is only available when logged into the console at <code style="color:var(--cyan)">console.{{ settings.fqdn }}/nodered/</code></p>{% endif %}
+  <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">Runs Node-RED in Docker with a persistent volume. With a domain set, the flow editor is at <code style="color:var(--cyan)">https://nodered.{{ settings.fqdn if settings.fqdn else '&lt;your-domain&gt;' }}</code> (behind Authentik when enabled).</p>
+  {% if settings.fqdn %}<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Open <a href="https://nodered.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">nodered.{{ settings.fqdn }}</a> to use the flow editor. If you upgraded from console.*/nodered/ and the link does not load, redeploy Node-RED once from this page.</p>{% endif %}
   <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">&#x1f680; Deploy Node-RED</button></div>
   {% endif %}
   {% if deploying %}<div class="card" id="deploy-log-card"><div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">Deploy log<button class="btn btn-ghost" id="nodered-cancel-btn-static" onclick="cancelNoderedDeploy()" style="display:none">&#x2717; Cancel</button></div><div class="log-box" id="deploy-log">Initializing...</div></div>{% endif %}
@@ -4428,12 +4459,14 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <button class="control-btn" onclick="portalControl('restart')">🔄 Restart</button>
 <button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
 </div>
+<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">If TAK Portal's in-app "Update Now" fails (e.g. git not found), use ⬆ Update above — it runs on the host and pulls + rebuilds.</div>
 {% elif portal.installed %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="portalControl('start')">▶ Start</button>
 <button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
 </div>
+<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">If TAK Portal's in-app "Update Now" fails (e.g. git not found), use ⬆ Update above — it runs on the host and pulls + rebuilds.</div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
 {% endif %}
