@@ -3028,7 +3028,7 @@ services:
         ak_url = 'http://127.0.0.1:9090'
         ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
         _log("  Waiting for Authentik API...")
-        api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120)
+        api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120, plog=_log)
         if api_ready:
             _log("  Setting up recovery flow...")
             ok, recovery_msg, recovery_slug = _ensure_authentik_recovery_flow(ak_url, ak_headers)
@@ -3046,10 +3046,11 @@ services:
     return message
 
 
-def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
+def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90, plog=None):
     """Poll until Authentik API responds. Returns True when ready (200 or 401/403), False on timeout."""
     import urllib.request as _req
     import urllib.error
+    _log = plog or (lambda msg: None)
     for attempt in range(max_attempts):
         try:
             req = _req.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
@@ -3059,9 +3060,11 @@ def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
             if e.code in (401, 403):
                 return True
             if e.code == 503:
-                pass  # server starting, keep waiting
+                pass
         except Exception:
-            pass  # connection refused, etc.
+            pass
+        if attempt > 0 and attempt % 6 == 0:
+            _log(f"  ⏳ Still waiting for API... ({attempt * 5}s)")
         time.sleep(5)
     return False
 
@@ -5846,7 +5849,7 @@ entries:
             api_ready = _wait_for_authentik_api(
                 'http://127.0.0.1:9090',
                 {'Authorization': f'Bearer {bootstrap_token}'},
-                max_attempts=90
+                max_attempts=90, plog=plog
             )
             if api_ready:
                 plog("✓ Authentik API is ready")
