@@ -2953,6 +2953,12 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     Returns (success: bool, message: str)."""
     import urllib.request as _req
     import urllib.error
+    def _err(e):
+        try:
+            body = e.read().decode()[:300]
+        except Exception:
+            body = ''
+        return f'HTTP {e.code}: {body}' if body else f'HTTP {e.code}'
     try:
         # 1) Get or create recovery flow
         req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=recovery', headers=ak_headers)
@@ -3090,6 +3096,8 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                     continue
                 raise
         return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.'
+    except urllib.error.HTTPError as e:
+        return False, _err(e)
     except Exception as e:
         return False, str(e)
 
