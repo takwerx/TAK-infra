@@ -3277,7 +3277,21 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 current_pk = (current_rf if isinstance(current_rf, str) else
                               (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
                 if current_pk != recovery_flow_pk:
-                    _api_patch(f'stages/identification/{stage_pk}/', {'recovery_flow': recovery_flow_pk})
+                    # Include user_fields in PATCH -- Authentik validates the full model
+                    patch_body = {'recovery_flow': recovery_flow_pk}
+                    uf = stage_data.get('user_fields')
+                    if uf:
+                        patch_body['user_fields'] = uf
+                    try:
+                        _api_patch(f'stages/identification/{stage_pk}/', patch_body)
+                    except urllib.error.HTTPError:
+                        # Full PUT as fallback with all existing data
+                        put_body = {k: v for k, v in stage_data.items()
+                                    if k not in ('pk', 'component', 'verbose_name', 'verbose_name_plural', 'meta_model_name', 'flow_set')}
+                        put_body['recovery_flow'] = recovery_flow_pk
+                        r = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                            data=json.dumps(put_body).encode(), headers=ak_headers, method='PUT')
+                        _req.urlopen(r, timeout=15)
                 break
             except urllib.error.HTTPError as e:
                 if e.code == 404:
