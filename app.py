@@ -2785,9 +2785,23 @@ smtp_generic_maps = hash:/etc/postfix/generic
         plog(f"   Provider: {provider['name']}")
         plog(f"   Relay:    {relay_host}:{relay_port}")
         plog(f"   From:     {from_name} <{from_addr}>")
-        plog("")
-        plog("📋 Configure apps to use SMTP:")
-        plog("   Host: localhost   Port: 25   No auth required")
+
+        # Auto-configure Authentik if installed (SMTP + recovery flow)
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            plog("")
+            plog("🔑 Step 6/6 — Configuring Authentik (SMTP + password recovery)...")
+            try:
+                ak_msg = _configure_authentik_smtp_and_recovery(from_addr, plog)
+                plog(f"✓ {ak_msg}")
+            except Exception as e:
+                plog(f"⚠ Authentik auto-config failed: {e}")
+                plog("  You can configure it manually via the 'Configure Authentik' button.")
+        else:
+            plog("")
+            plog("📋 Configure apps to use SMTP:")
+            plog("   Host: localhost   Port: 25   No auth required")
+
         status.update({'running': False, 'complete': True, 'error': False})
 
     except Exception as e:
@@ -2929,6 +2943,107 @@ def emailrelay_uninstall():
     email_deploy_log.clear()
     email_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
+
+
+def _configure_authentik_smtp_and_recovery(from_addr, plog=None):
+    """Push SMTP settings into Authentik .env, restart containers, and set up recovery flow.
+    Used by both the Email Relay deploy and the 'Configure Authentik' button.
+    Returns a status message string. Raises on fatal error."""
+    import re as _re
+    ak_dir = os.path.expanduser('~/authentik')
+    env_path = os.path.join(ak_dir, '.env')
+    smtp_host = 'host.docker.internal'
+    _from = (from_addr or '').strip() or 'authentik@localhost'
+    _log = plog or (lambda msg: None)
+
+    email_block = [
+        '',
+        '# Email — use local relay (Postfix on host)',
+        f'AUTHENTIK_EMAIL__HOST={smtp_host}',
+        'AUTHENTIK_EMAIL__PORT=25',
+        'AUTHENTIK_EMAIL__USERNAME=',
+        'AUTHENTIK_EMAIL__PASSWORD=',
+        'AUTHENTIK_EMAIL__USE_TLS=false',
+        'AUTHENTIK_EMAIL__USE_SSL=false',
+        'AUTHENTIK_EMAIL__TIMEOUT=10',
+        f'AUTHENTIK_EMAIL__FROM={_from}',
+    ]
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_EMAIL__'):
+                    continue
+                lines.append(line.rstrip('\n'))
+    if lines and lines[-1].strip() != '':
+        lines.append('')
+    lines.extend(email_block)
+    with open(env_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    _log("  Wrote SMTP settings to Authentik .env")
+
+    override_path = os.path.join(ak_dir, 'docker-compose.override.yml')
+    override_content = '''# infra-TAK: allow containers to reach host Postfix for email
+services:
+  server:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+'''
+    with open(override_path, 'w') as f:
+        f.write(override_content)
+
+    main_cf_path = '/etc/postfix/main.cf'
+    if os.path.exists(main_cf_path):
+        with open(main_cf_path) as f:
+            mc = f.read()
+        if '172.16.0.0/12' not in mc:
+            mc = _re.sub(r'^\s*mynetworks\s*=.*$', '', mc, flags=_re.MULTILINE)
+            if mc.strip() and not mc.endswith('\n\n'):
+                mc = mc.rstrip() + '\n'
+            mc += 'mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12\n'
+            with open(main_cf_path, 'w') as f:
+                f.write(mc)
+            subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+
+    _log("  Restarting Authentik containers...")
+    r = subprocess.run(
+        f'cd {ak_dir} && docker compose up -d --force-recreate',
+        shell=True, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f'Authentik restart failed: {r.stderr or r.stdout}')
+
+    ak_token = ''
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                    ak_token = line.strip().split('=', 1)[1].strip()
+                    break
+
+    message = 'Authentik SMTP configured (host.docker.internal:25).'
+    if ak_token:
+        ak_url = 'http://127.0.0.1:9090'
+        ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+        _log("  Waiting for Authentik API...")
+        api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120)
+        if api_ready:
+            _log("  Setting up recovery flow...")
+            ok, recovery_msg, recovery_slug = _ensure_authentik_recovery_flow(ak_url, ak_headers)
+            if ok:
+                message += ' ' + recovery_msg
+                if recovery_slug:
+                    settings = load_settings()
+                    fqdn = settings.get('fqdn', '').strip()
+                    base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
+                    message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
+            else:
+                message += f' Recovery flow issue: {recovery_msg}.'
+        else:
+            message += ' API not ready in time — recovery flow not set up.'
+    return message
 
 
 def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
@@ -3172,99 +3287,10 @@ def emailrelay_configure_authentik():
     if not relay.get('from_addr'):
         return jsonify({'success': False, 'error': 'Email Relay not configured. Deploy the relay first.'}), 400
     ak_dir = os.path.expanduser('~/authentik')
-    env_path = os.path.join(ak_dir, '.env')
     if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
         return jsonify({'success': False, 'error': 'Authentik is not installed.'}), 400
-    from_addr = (relay.get('from_addr') or '').strip() or 'authentik@localhost'
-    # Authentik runs in Docker — localhost inside a container is the container, not the host.
-    # Use host.docker.internal so Authentik can reach Postfix on the host.
-    smtp_host = 'host.docker.internal'
-    # Authentik email env vars (docs: https://docs.goauthentik.io/install-config/email/)
-    email_block = [
-        '',
-        '# Email — use local relay (Postfix on host)',
-        f'AUTHENTIK_EMAIL__HOST={smtp_host}',
-        'AUTHENTIK_EMAIL__PORT=25',
-        'AUTHENTIK_EMAIL__USERNAME=',
-        'AUTHENTIK_EMAIL__PASSWORD=',
-        'AUTHENTIK_EMAIL__USE_TLS=false',
-        'AUTHENTIK_EMAIL__USE_SSL=false',
-        'AUTHENTIK_EMAIL__TIMEOUT=10',
-        f'AUTHENTIK_EMAIL__FROM={from_addr}',
-    ]
     try:
-        lines = []
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if line.strip().startswith('AUTHENTIK_EMAIL__'):
-                        continue
-                    lines.append(line.rstrip('\n'))
-        if lines and lines[-1].strip() != '':
-            lines.append('')
-        lines.extend(email_block)
-        with open(env_path, 'w') as f:
-            f.write('\n'.join(lines) + '\n')
-        # Ensure host.docker.internal resolves (worker/server need to reach Postfix on host)
-        override_path = os.path.join(ak_dir, 'docker-compose.override.yml')
-        override_content = '''# infra-TAK: allow containers to reach host Postfix for email
-services:
-  server:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-  worker:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-'''
-        with open(override_path, 'w') as f:
-            f.write(override_content)
-        # Ensure Postfix accepts relay from Docker (mynetworks)
-        main_cf_path = '/etc/postfix/main.cf'
-        if os.path.exists(main_cf_path):
-            with open(main_cf_path) as f:
-                mc = f.read()
-            import re
-            if '172.16.0.0/12' not in mc:
-                mc = re.sub(r'^\s*mynetworks\s*=.*$', '', mc, flags=re.MULTILINE)
-                if mc.strip() and not mc.endswith('\n\n'):
-                    mc = mc.rstrip() + '\n'
-                mc += 'mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12\n'
-                with open(main_cf_path, 'w') as f:
-                    f.write(mc)
-                subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
-        r = subprocess.run(
-            f'cd {ak_dir} && docker compose up -d --force-recreate',
-            shell=True, capture_output=True, text=True, timeout=120
-        )
-        if r.returncode != 0:
-            return jsonify({'success': False, 'error': f'Authentik restart failed: {r.stderr or r.stdout}'}), 500
-
-        # Wait for API then set up recovery flow
-        ak_token = ''
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
-                        ak_token = line.strip().split('=', 1)[1].strip()
-                        break
-        message = 'Authentik is now configured to use the local Email Relay (host.docker.internal:25). Restart complete.'
-        if ak_token:
-            ak_url = 'http://127.0.0.1:9090'
-            ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-            api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120)
-            if api_ready:
-                ok, recovery_msg, recovery_slug = _ensure_authentik_recovery_flow(ak_url, ak_headers)
-                if ok:
-                    message = 'Authentik is configured to use the local Email Relay. ' + recovery_msg
-                    if recovery_slug:
-                        fqdn = settings.get('fqdn', '').strip()
-                        base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
-                        message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
-                else:
-                    message += f' Recovery flow could not be created: {recovery_msg}. You can set it up manually in Authentik.'
-            else:
-                message += ' Recovery flow was not set up (API not ready in time). You can run "Configure Authentik" again or set up recovery manually in Authentik.'
-
+        message = _configure_authentik_smtp_and_recovery(relay.get('from_addr', ''))
         return jsonify({'success': True, 'message': message})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
