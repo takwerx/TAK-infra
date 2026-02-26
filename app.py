@@ -11,7 +11,7 @@ from datetime import datetime
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
-# Share session across infratak.* and console.* (nodered has its own subdomain)
+# Share session across infratak.* and console.* when using domain; when using IP (backdoor) use no domain so cookie is sent
 def _set_session_cookie_domain():
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.config', 'settings.json')
@@ -37,9 +37,25 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.environ.get('CONFIG_DIR') or os.path.join(BASE_DIR, '.config')
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
 
+def _request_host_is_ip():
+    """True if the request is to an IP address (backdoor), so we must not set cookie domain."""
+    try:
+        host = (request.host or '').split(':')[0]
+        if not host:
+            return True
+        parts = host.split('.')
+        if len(parts) != 4:
+            return False
+        return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+    except Exception:
+        return True
+
 @app.before_request
 def ensure_session_cookie_domain():
-    """Ensure session cookie is set for parent domain so console subdomain receives it."""
+    """When access is via IP (backdoor), do not set cookie domain so the cookie is sent. Otherwise use FQDN for cross-subdomain."""
+    if _request_host_is_ip():
+        app.config['SESSION_COOKIE_DOMAIN'] = False
+        return
     if app.config.get('SESSION_COOKIE_DOMAIN'):
         return
     try:
