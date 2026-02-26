@@ -2953,6 +2953,7 @@ def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
 
 def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     """Create recovery flow + stages + bindings and link to default authentication flow.
+    Matches official Authentik blueprint: Identification -> Email -> Prompt (new pw) -> User Write -> User Login.
     Returns (success: bool, message: str, recovery_slug: str|None)."""
     import urllib.request as _req
     import urllib.error
@@ -2962,158 +2963,186 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         except Exception:
             body = ''
         return f'HTTP {e.code}: {body}' if body else f'HTTP {e.code}'
+    def _api_get(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers)
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _api_post(path, body):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _api_patch(path, body):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='PATCH')
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _find_stage(api_path, name):
+        """Find a stage by exact name match."""
+        results = _api_get(f'{api_path}?search={_req.quote(name)}').get('results', [])
+        for s in results:
+            if s.get('name') == name:
+                return s['pk']
+        return None
+    def _find_or_create_stage(api_path, name, extra_attrs=None):
+        pk = _find_stage(api_path, name)
+        if pk:
+            return pk
+        body = {'name': name}
+        if extra_attrs:
+            body.update(extra_attrs)
+        try:
+            return _api_post(api_path, body)['pk']
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                pk = _find_stage(api_path, name)
+                if pk:
+                    return pk
+            raise
     try:
-        # 1) Get or create recovery flow
-        req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=recovery', headers=ak_headers)
-        resp = _req.urlopen(req, timeout=15)
-        recovery_flows = json.loads(resp.read().decode()).get('results', [])
-        recovery_flow_pk = None
         recovery_flow_slug = 'default-password-recovery'
+
+        # 1) Get or create recovery flow with authentication=none so unauthenticated users can use it
+        recovery_flows = _api_get('flows/instances/?designation=recovery').get('results', [])
+        recovery_flow_pk = None
         for f in recovery_flows:
-            if f.get('slug') == 'default-password-recovery':
+            if f.get('slug') == recovery_flow_slug:
                 recovery_flow_pk = f['pk']
                 break
         if not recovery_flow_pk and recovery_flows:
             recovery_flow_pk = recovery_flows[0]['pk']
             recovery_flow_slug = recovery_flows[0].get('slug', recovery_flow_slug)
         if not recovery_flow_pk:
-            req = _req.Request(f'{ak_url}/api/v3/flows/instances/',
-                data=json.dumps({'name': 'Password Recovery', 'slug': 'default-password-recovery',
-                    'designation': 'recovery', 'title': 'Recover password'}).encode(),
-                headers=ak_headers, method='POST')
-            resp = _req.urlopen(req, timeout=15)
-            recovery_flow_pk = json.loads(resp.read().decode())['pk']
-            recovery_flow_slug = 'default-password-recovery'
+            data = _api_post('flows/instances/', {
+                'name': 'Password Recovery', 'slug': recovery_flow_slug,
+                'designation': 'recovery', 'title': 'Reset your password',
+                'authentication': 'none'})
+            recovery_flow_pk = data['pk']
+        else:
+            try:
+                _api_patch(f'flows/instances/{recovery_flow_slug}/', {'authentication': 'none'})
+            except Exception:
+                pass
 
-        # 2) Get existing bindings for recovery flow
-        req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={recovery_flow_pk}', headers=ak_headers)
-        resp = _req.urlopen(req, timeout=15)
-        bindings = json.loads(resp.read().decode()).get('results', [])
-        existing_stage_pks = set()
+        # 2) Delete ALL existing bindings so we rebuild cleanly (idempotent)
+        bindings = _api_get(f'flows/bindings/?flow__pk={recovery_flow_pk}&ordering=order').get('results', [])
         for b in bindings:
-            s = b.get('stage')
-            if isinstance(s, (int, str)):
-                existing_stage_pks.add(s)
-            elif isinstance(s, dict) and 'pk' in s:
-                existing_stage_pks.add(s['pk'])
-
-        # 3) Create stages if not already bound
-        def create_stage(path, body):
-            r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
-            resp = _req.urlopen(r, timeout=15)
-            return json.loads(resp.read().decode())['pk']
-
-        stage_pks_to_bind = []
-        # Identification (recovery: identify by email)
-        req = _req.Request(f'{ak_url}/api/v3/stages/identification/?search=Recovery+Identification', headers=ak_headers)
-        try:
-            resp = _req.urlopen(req, timeout=15)
-            results = json.loads(resp.read().decode()).get('results', [])
-            id_stage_pk = results[0]['pk'] if results else None
-        except Exception:
-            id_stage_pk = None
-        if not id_stage_pk:
             try:
-                id_stage_pk = create_stage('stages/identification/', {'name': 'Recovery Identification', 'user_fields': ['email']})
+                r = _req.Request(f'{ak_url}/api/v3/flows/bindings/{b["pk"]}/', headers=ak_headers, method='DELETE')
+                _req.urlopen(r, timeout=15)
+            except Exception:
+                pass
+
+        # 3) Create all required stages
+
+        # 3a) Identification stage (find user by email/username)
+        id_stage_pk = _find_or_create_stage('stages/identification/', 'Recovery Identification',
+            {'user_fields': ['email', 'username']})
+
+        # 3b) Email stage (sends recovery link)
+        email_stage_pk = _find_or_create_stage('stages/email/', 'Recovery Email', {
+            'use_global_settings': True,
+            'template': 'email/password_reset.html',
+            'activate_user_on_success': True,
+            'token_expiry': 'minutes=30',
+            'subject': 'Password Reset'})
+        if email_stage_pk:
+            try:
+                _api_patch(f'stages/email/{email_stage_pk}/', {
+                    'use_global_settings': True,
+                    'template': 'email/password_reset.html',
+                    'activate_user_on_success': True})
+            except Exception:
+                pass
+
+        # 3c) Prompt fields for new password
+        def _find_or_create_prompt(name, field_key, label, order):
+            results = _api_get(f'stages/prompt/prompts/?search={_req.quote(name)}').get('results', [])
+            for p in results:
+                if p.get('name') == name:
+                    return p['pk']
+            try:
+                return _api_post('stages/prompt/prompts/', {
+                    'name': name, 'field_key': field_key, 'label': label,
+                    'type': 'password', 'required': True, 'placeholder': label,
+                    'order': order, 'placeholder_expression': False})['pk']
             except urllib.error.HTTPError as e:
                 if e.code == 400:
-                    req = _req.Request(f'{ak_url}/api/v3/stages/identification/', headers=ak_headers)
-                    resp = _req.urlopen(req, timeout=15)
-                    results = json.loads(resp.read().decode()).get('results', [])
-                    id_stage_pk = results[0]['pk'] if results else None
-                else:
-                    raise
-        if id_stage_pk and id_stage_pk not in existing_stage_pks:
-            stage_pks_to_bind.append((10, id_stage_pk))
+                    results = _api_get(f'stages/prompt/prompts/?search={_req.quote(name)}').get('results', [])
+                    for p in results:
+                        if p.get('name') == name:
+                            return p['pk']
+                raise
 
-        # Email stage (sends recovery link)
-        req = _req.Request(f'{ak_url}/api/v3/stages/email/?search=Recovery+Email', headers=ak_headers)
-        try:
-            resp = _req.urlopen(req, timeout=15)
-            results = json.loads(resp.read().decode()).get('results', [])
-            email_stage_pk = results[0]['pk'] if results else None
-        except Exception:
-            email_stage_pk = None
-        if not email_stage_pk:
+        pw_field_pk = _find_or_create_prompt('recovery-field-password', 'password', 'Password', 0)
+        pw_repeat_field_pk = _find_or_create_prompt('recovery-field-password-repeat', 'password_repeat', 'Password (repeat)', 1)
+
+        # 3d) Prompt stage (collects new password from user)
+        prompt_stage_pk = _find_stage('stages/prompt/stages/', 'Recovery Password Change')
+        if not prompt_stage_pk:
             try:
-                email_stage_pk = create_stage('stages/email/', {'name': 'Recovery Email'})
+                prompt_stage_pk = _api_post('stages/prompt/stages/', {
+                    'name': 'Recovery Password Change',
+                    'fields': [pw_field_pk, pw_repeat_field_pk]})['pk']
             except urllib.error.HTTPError as e:
                 if e.code == 400:
-                    req = _req.Request(f'{ak_url}/api/v3/stages/email/', headers=ak_headers)
-                    resp = _req.urlopen(req, timeout=15)
-                    results = json.loads(resp.read().decode()).get('results', [])
-                    email_stage_pk = results[0]['pk'] if results else None
-                else:
+                    prompt_stage_pk = _find_stage('stages/prompt/stages/', 'Recovery Password Change')
+                if not prompt_stage_pk:
                     raise
-        if email_stage_pk and email_stage_pk not in existing_stage_pks:
-            stage_pks_to_bind.append((20, email_stage_pk))
-
-        # Password stage (set new password)
-        req = _req.Request(f'{ak_url}/api/v3/stages/password/?search=Recovery+Password', headers=ak_headers)
-        try:
-            resp = _req.urlopen(req, timeout=15)
-            results = json.loads(resp.read().decode()).get('results', [])
-            pw_stage_pk = results[0]['pk'] if results else None
-        except Exception:
-            pw_stage_pk = None
-        if not pw_stage_pk:
+        else:
             try:
-                pw_stage_pk = create_stage('stages/password/', {'name': 'Recovery Password'})
-            except urllib.error.HTTPError as e:
-                if e.code == 400:
-                    req = _req.Request(f'{ak_url}/api/v3/stages/password/', headers=ak_headers)
-                    resp = _req.urlopen(req, timeout=15)
-                    results = json.loads(resp.read().decode()).get('results', [])
-                    pw_stage_pk = results[0]['pk'] if results else None
-                else:
-                    raise
-        if pw_stage_pk and pw_stage_pk not in existing_stage_pks:
-            stage_pks_to_bind.append((30, pw_stage_pk))
+                _api_patch(f'stages/prompt/stages/{prompt_stage_pk}/', {
+                    'fields': [pw_field_pk, pw_repeat_field_pk]})
+            except Exception:
+                pass
 
-        # 4) Bind stages to recovery flow (API uses 'target' for flow)
-        for order, stage_pk in stage_pks_to_bind:
-            _req.urlopen(_req.Request(f'{ak_url}/api/v3/flows/bindings/',
-                data=json.dumps({'target': recovery_flow_pk, 'stage': stage_pk, 'order': order}).encode(),
-                headers=ak_headers, method='POST'), timeout=15)
+        # 3e) User Write stage (saves the new password)
+        user_write_pk = _find_or_create_stage('stages/user_write/', 'Recovery User Write',
+            {'user_creation_mode': 'never_create'})
 
-        # 5) Get default authentication flow and its identification stage, set recovery_flow
-        req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication', headers=ak_headers)
-        resp = _req.urlopen(req, timeout=15)
-        auth_flows = json.loads(resp.read().decode()).get('results', [])
+        # 3f) User Login stage (logs user in after reset)
+        user_login_pk = _find_or_create_stage('stages/user_login/', 'Recovery User Login')
+
+        # 4) Bind stages in correct order
+        stage_bindings = [
+            (10, id_stage_pk),
+            (20, email_stage_pk),
+            (30, prompt_stage_pk),
+            (40, user_write_pk),
+            (100, user_login_pk),
+        ]
+        for order, stage_pk in stage_bindings:
+            if not stage_pk:
+                continue
+            _api_post('flows/bindings/', {
+                'target': recovery_flow_pk, 'stage': stage_pk, 'order': order,
+                'evaluate_on_plan': True, 're_evaluate_policies': order <= 20,
+                'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+
+        # 5) Link recovery flow to default authentication flow's identification stage
+        auth_flows = _api_get('flows/instances/?designation=authentication').get('results', [])
         auth_flow_pk = next((f['pk'] for f in auth_flows if f.get('slug') == 'default-authentication-flow'),
             auth_flows[0]['pk'] if auth_flows else None)
         if not auth_flow_pk:
             return True, 'Recovery flow created; link to login skipped (no default authentication flow).', recovery_flow_slug
-        req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={auth_flow_pk}', headers=ak_headers)
-        resp = _req.urlopen(req, timeout=15)
-        auth_bindings = json.loads(resp.read().decode()).get('results', [])
+        auth_bindings = _api_get(f'flows/bindings/?flow__pk={auth_flow_pk}').get('results', [])
         for b in auth_bindings:
             stage = b.get('stage')
             stage_pk = stage if isinstance(stage, (int, str)) else (stage.get('pk') if isinstance(stage, dict) else None)
             if not stage_pk:
                 continue
-            req = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/', headers=ak_headers)
             try:
-                resp = _req.urlopen(req, timeout=15)
-                stage_data = json.loads(resp.read().decode())
-                # recovery_flow can be None, uuid string, or {"pk": "uuid"} from API
+                stage_data = _api_get(f'stages/identification/{stage_pk}/')
                 current_rf = stage_data.get('recovery_flow')
                 current_pk = (current_rf if isinstance(current_rf, str) else
                               (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
                 if current_pk != recovery_flow_pk:
-                    # Use PATCH to update only recovery_flow (avoids serialization issues)
-                    patch_body = json.dumps({'recovery_flow': recovery_flow_pk}).encode()
-                    req_upd = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
-                        data=patch_body, headers=ak_headers, method='PATCH')
                     try:
-                        _req.urlopen(req_upd, timeout=15)
+                        _api_patch(f'stages/identification/{stage_pk}/', {'recovery_flow': recovery_flow_pk})
                     except urllib.error.HTTPError as e:
                         if e.code == 405:
-                            # PATCH not supported, fall back to PUT with full body
-                            req_put = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                            r = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
                                 data=json.dumps({**stage_data, 'recovery_flow': recovery_flow_pk}).encode(),
                                 headers=ak_headers, method='PUT')
-                            _req.urlopen(req_put, timeout=15)
+                            _req.urlopen(r, timeout=15)
                         else:
                             raise
                 break
