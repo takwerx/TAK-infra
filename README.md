@@ -41,6 +41,21 @@ Then open your browser to the URL shown and log in.
 
 **Password not working after update?** From the install directory (e.g. `/root/infra-TAK`), run `sudo ./reset-console-password.sh` to set a new console password without re-running the full installer.
 
+## Recovery / backdoor (when Authentik or Caddy is broken)
+
+If Authentik or Caddy is down and you can’t reach **https://infratak.yourdomain.com**:
+
+- **Backdoor:** Open **https://&lt;VPS_IP&gt;:5001** in your browser (use the server’s real IP, not the domain). Log in with the **console password** you set when you ran `start.sh`. That path skips Caddy and Authentik, so you can get back into the console and fix things.
+
+The console password is stored as a **hash** in the install directory at `.config/auth.json` (e.g. `/root/infra-TAK/.config/auth.json`). You **cannot** recover the plaintext password from that file. If you forget it:
+
+```bash
+cd /root/infra-TAK   # or your install path
+sudo ./reset-console-password.sh
+```
+
+Enter a new password twice; the script updates `.config/auth.json` and restarts the console. Then use **https://&lt;VPS_IP&gt;:5001** with the new password. Store the console password somewhere safe (e.g. password manager); it’s your only way in when the domain or Authentik is broken.
+
 ## Deployment Order
 
 Deploy services in this order — each step auto-configures the next:
