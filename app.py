@@ -2714,6 +2714,7 @@ def run_email_deploy(provider_key, smtp_user, smtp_pass, from_addr, from_name):
         relay_port = provider['port']
         main_cf_additions = f"""
 # TAKWERX Email Relay — managed by TAK-infra
+mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12
 relayhost = [{relay_host}]:{relay_port}
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
@@ -2733,6 +2734,8 @@ smtp_generic_maps = hash:/etc/postfix/generic
             existing = re.sub(r'\n# TAKWERX Email Relay.*', '', existing, flags=re.DOTALL)
             # Remove any existing relayhost line (Ubuntu default has a blank one)
             existing = re.sub(r'^\s*relayhost\s*=.*$', '', existing, flags=re.MULTILINE)
+            # Remove any existing mynetworks (we set it in our block for Docker relay)
+            existing = re.sub(r'^\s*mynetworks\s*=.*$', '', existing, flags=re.MULTILINE)
             existing = existing.rstrip()
         else:
             existing = ''
@@ -3180,6 +3183,20 @@ services:
 '''
         with open(override_path, 'w') as f:
             f.write(override_content)
+        # Ensure Postfix accepts relay from Docker (mynetworks)
+        main_cf_path = '/etc/postfix/main.cf'
+        if os.path.exists(main_cf_path):
+            with open(main_cf_path) as f:
+                mc = f.read()
+            import re
+            if '172.16.0.0/12' not in mc:
+                mc = re.sub(r'^\s*mynetworks\s*=.*$', '', mc, flags=re.MULTILINE)
+                if mc.strip() and not mc.endswith('\n\n'):
+                    mc = mc.rstrip() + '\n'
+                mc += 'mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12\n'
+                with open(main_cf_path, 'w') as f:
+                    f.write(mc)
+                subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
         r = subprocess.run(
             f'cd {ak_dir} && docker compose up -d --force-recreate',
             shell=True, capture_output=True, text=True, timeout=120
