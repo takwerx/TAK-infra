@@ -2928,6 +2928,26 @@ def emailrelay_uninstall():
     return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
 
 
+def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
+    """Poll until Authentik API responds. Returns True when ready (200 or 401/403), False on timeout."""
+    import urllib.request as _req
+    import urllib.error
+    for attempt in range(max_attempts):
+        try:
+            req = _req.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
+            _req.urlopen(req, timeout=5)
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return True
+            if e.code == 503:
+                pass  # server starting, keep waiting
+        except Exception:
+            pass  # connection refused, etc.
+        time.sleep(5)
+    return False
+
+
 def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     """Create recovery flow + stages + bindings and link to default authentication flow.
     Returns (success: bool, message: str)."""
@@ -3130,27 +3150,9 @@ def emailrelay_configure_authentik():
                         break
         message = 'Authentik is now configured to use the local Email Relay (localhost:25). Restart complete.'
         if ak_token:
-            import urllib.error as _urllib_err
             ak_url = 'http://127.0.0.1:9090'
             ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-            api_ready = False
-            max_wait = 600  # 10 min cap
-            waited = 0
-            while waited < max_wait:
-                try:
-                    req = urllib.request.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
-                    urllib.request.urlopen(req, timeout=5)
-                    api_ready = True
-                    break
-                except _urllib_err.HTTPError as e:
-                    if e.code in (401, 403):
-                        api_ready = True
-                        break
-                    time.sleep(3)
-                    waited += 3
-                except Exception:
-                    time.sleep(3)
-                    waited += 3
+            api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120)
             if api_ready:
                 ok, recovery_msg = _ensure_authentik_recovery_flow(ak_url, ak_headers)
                 if ok:
@@ -5712,44 +5714,14 @@ entries:
         if not bootstrap_token:
             plog("\u26a0 No bootstrap token found in .env")
         else:
-            import urllib.request
-            import urllib.error
-            import json as json_mod
-            api_ready = False
-            for attempt in range(90):
-                try:
-                    req = urllib.request.Request(
-                        'http://127.0.0.1:9090/api/v3/core/users/',
-                        headers={'Authorization': f'Bearer {bootstrap_token}'}
-                    )
-                    resp = urllib.request.urlopen(req, timeout=5)
-                    json_mod.loads(resp.read().decode())
-                    api_ready = True
-                    plog("✓ Authentik API is ready")
-                    break
-                except urllib.error.HTTPError as http_err:
-                    # Any HTTP response (401, 403) means API is up and responding
-                    if http_err.code in (401, 403):
-                        plog(f"✓ Authentik API is ready (HTTP {http_err.code})")
-                        api_ready = True
-                        break
-                    elif http_err.code == 503:
-                        if attempt % 12 == 0:
-                            em, es = divmod(attempt * 5, 60)
-                            plog(f"  Server starting up (503)... ({em}m {es}s elapsed)")
-                    else:
-                        if attempt % 12 == 0:
-                            em, es = divmod(attempt * 5, 60)
-                            plog(f"  HTTP {http_err.code}... ({em}m {es}s elapsed)")
-                except Exception as poll_err:
-                    err_str = str(poll_err)
-                    if attempt == 0:
-                        plog("  Waiting for Authentik (first boot takes 5-7 minutes)...")
-                    elif attempt % 12 == 0:
-                        em, es = divmod(attempt * 5, 60)
-                        plog(f"  Still waiting... {em}m {es}s elapsed ({err_str[:60]})")
-                time.sleep(5)
-            if not api_ready:
+            api_ready = _wait_for_authentik_api(
+                'http://127.0.0.1:9090',
+                {'Authorization': f'Bearer {bootstrap_token}'},
+                max_attempts=90
+            )
+            if api_ready:
+                plog("✓ Authentik API is ready")
+            else:
                 plog("⚠ API timeout - check Authentik logs")
 
         # Step 9: Start LDAP outpost (placeholder token — Step 11 will inject real token and recreate)
