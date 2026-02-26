@@ -5238,7 +5238,20 @@ def authentik_deploy():
         return jsonify({'error': 'Deployment already in progress'}), 409
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    threading.Thread(target=run_authentik_deploy, daemon=True).start()
+    threading.Thread(target=run_authentik_deploy, args=(False,), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/authentik/reconfigure', methods=['POST'])
+@login_required
+def authentik_reconfigure():
+    """Re-run LDAP/CoreConfig/forward-auth setup without removing anything. Use when TAK Server was deployed after Authentik."""
+    if authentik_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    if not os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml')):
+        return jsonify({'error': 'Authentik not installed. Deploy Authentik first.'}), 400
+    authentik_deploy_log.clear()
+    authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_authentik_deploy, args=(True,), daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/authentik/deploy/log')
@@ -5305,7 +5318,7 @@ def authentik_uninstall():
     return jsonify({'success': True, 'steps': steps})
 
 
-def run_authentik_deploy():
+def run_authentik_deploy(reconfigure=False):
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         authentik_deploy_log.append(entry)
@@ -5314,45 +5327,61 @@ def run_authentik_deploy():
         ak_dir = os.path.expanduser('~/authentik')
         settings = load_settings()
         server_ip = settings.get('server_ip', 'localhost')
+        env_path = os.path.join(ak_dir, '.env')
+        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+        ldap_svc_pass = None
 
-        if settings.get('pkg_mgr', 'apt') == 'apt':
-            wait_for_apt_lock(plog, authentik_deploy_log)
-
-        # Step 1: Check Docker
-        plog("\u2501\u2501\u2501 Step 1/10: Checking Docker \u2501\u2501\u2501")
-        r = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
-        if r.returncode != 0:
-            plog("Docker not found. Installing...")
-            subprocess.run('curl -fsSL https://get.docker.com | sh', shell=True, capture_output=True, text=True, timeout=300)
-            r2 = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
-            if r2.returncode != 0:
-                plog("\u2717 Failed to install Docker")
+        if reconfigure:
+            if not os.path.exists(ak_dir) or not os.path.exists(env_path) or not os.path.exists(compose_path):
+                plog("\u2717 Authentik not fully installed. Run a full Deploy first.")
                 authentik_deploy_status.update({'running': False, 'error': True})
                 return
-            plog(f"  {r2.stdout.strip()}")
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                        ldap_svc_pass = line.strip().split('=', 1)[1].strip()
+                        break
+            plog("\u2501\u2501\u2501 Reconfigure: Updating LDAP, CoreConfig, Forward Auth (no removal) \u2501\u2501\u2501")
+            subprocess.run(f'cd {ak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            plog("  Ensured containers are up")
         else:
-            plog(f"  {r.stdout.strip()}")
-        plog("\u2713 Docker available")
+            if settings.get('pkg_mgr', 'apt') == 'apt':
+                wait_for_apt_lock(plog, authentik_deploy_log)
 
-        # Step 2: Create directory
-        plog("")
-        plog("\u2501\u2501\u2501 Step 2/10: Setting Up Directory \u2501\u2501\u2501")
-        os.makedirs(ak_dir, exist_ok=True)
-        plog(f"  Directory: {ak_dir}")
-        plog("\u2713 Directory ready")
+            # Step 1: Check Docker
+            plog("\u2501\u2501\u2501 Step 1/10: Checking Docker \u2501\u2501\u2501")
+            r = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+            if r.returncode != 0:
+                plog("Docker not found. Installing...")
+                subprocess.run('curl -fsSL https://get.docker.com | sh', shell=True, capture_output=True, text=True, timeout=300)
+                r2 = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+                if r2.returncode != 0:
+                    plog("\u2717 Failed to install Docker")
+                    authentik_deploy_status.update({'running': False, 'error': True})
+                    return
+                plog(f"  {r2.stdout.strip()}")
+            else:
+                plog(f"  {r.stdout.strip()}")
+            plog("\u2713 Docker available")
 
-        # Step 3: Generate secrets and .env
-        plog("")
-        plog("\u2501\u2501\u2501 Step 3/10: Generating Configuration \u2501\u2501\u2501")
-        env_path = os.path.join(ak_dir, '.env')
-        ldap_svc_pass = None
-        if not os.path.exists(env_path):
-            pg_pass = subprocess.run('openssl rand -base64 36 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()[:90]
-            secret_key = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
-            ldap_svc_pass = subprocess.run('openssl rand -base64 24 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
-            bootstrap_pass = subprocess.run('openssl rand -base64 18 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
-            bootstrap_token = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
-            env_content = f"""PG_DB=authentik
+            # Step 2: Create directory
+            plog("")
+            plog("\u2501\u2501\u2501 Step 2/10: Setting Up Directory \u2501\u2501\u2501")
+            os.makedirs(ak_dir, exist_ok=True)
+            plog(f"  Directory: {ak_dir}")
+            plog("\u2713 Directory ready")
+
+            # Step 3: Generate secrets and .env
+            plog("")
+            plog("\u2501\u2501\u2501 Step 3/10: Generating Configuration \u2501\u2501\u2501")
+            ldap_svc_pass = None
+            if not os.path.exists(env_path):
+                pg_pass = subprocess.run('openssl rand -base64 36 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()[:90]
+                secret_key = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+                ldap_svc_pass = subprocess.run('openssl rand -base64 24 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+                bootstrap_pass = subprocess.run('openssl rand -base64 18 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+                bootstrap_token = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+                env_content = f"""PG_DB=authentik
 PG_USER=authentik
 PG_PASS={pg_pass}
 AUTHENTIK_SECRET_KEY={secret_key}
@@ -5378,27 +5407,27 @@ AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
 # AUTHENTIK_EMAIL__USE_TLS=true
 # AUTHENTIK_EMAIL__FROM=authentik@example.com
 """
-            with open(env_path, 'w') as f:
-                f.write(env_content)
-            plog("  Generated PostgreSQL password")
-            plog("  Generated secret key")
-            plog(f"  Generated LDAP service account password")
-            plog("\u2713 .env created")
-        else:
-            plog("\u2713 .env already exists")
-            # Read existing ldap password
-            with open(env_path) as f:
-                for line in f:
-                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
-                        ldap_svc_pass = line.strip().split('=', 1)[1].strip()
+                with open(env_path, 'w') as f:
+                    f.write(env_content)
+                plog("  Generated PostgreSQL password")
+                plog("  Generated secret key")
+                plog(f"  Generated LDAP service account password")
+                plog("\u2713 .env created")
+            else:
+                plog("\u2713 .env already exists")
+                # Read existing ldap password
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                            ldap_svc_pass = line.strip().split('=', 1)[1].strip()
 
-        # Step 4: Create LDAP blueprint
-        plog("")
-        plog("\u2501\u2501\u2501 Step 4/10: Installing LDAP Blueprint \u2501\u2501\u2501")
-        bp_dir = os.path.join(ak_dir, 'blueprints')
-        os.makedirs(bp_dir, exist_ok=True)
-        bp_path = os.path.join(bp_dir, 'tak-ldap-setup.yaml')
-        bp_content = """version: 1
+            # Step 4: Create LDAP blueprint
+            plog("")
+            plog("\u2501\u2501\u2501 Step 4/10: Installing LDAP Blueprint \u2501\u2501\u2501")
+            bp_dir = os.path.join(ak_dir, 'blueprints')
+            os.makedirs(bp_dir, exist_ok=True)
+            bp_path = os.path.join(bp_dir, 'tak-ldap-setup.yaml')
+            bp_content = """version: 1
 metadata:
   name: LDAP Setup for TAK
   labels:
@@ -5558,15 +5587,15 @@ entries:
       - !KeyOf provider
       type: ldap
 """
-        with open(bp_path, 'w') as f:
-            f.write(bp_content)
-        plog("  Created tak-ldap-setup.yaml blueprint")
-        plog("  LDAP service account: adm_ldapservice")
-        plog("  LDAP Base DN: DC=takldap")
+            with open(bp_path, 'w') as f:
+                f.write(bp_content)
+            plog("  Created tak-ldap-setup.yaml blueprint")
+            plog("  LDAP service account: adm_ldapservice")
+            plog("  LDAP Base DN: DC=takldap")
 
-        # Create embedded outpost blueprint to permanently set authentik_host
-        bp_embedded_path = os.path.join(bp_dir, 'tak-embedded-outpost.yaml')
-        bp_embedded_content = f"""version: 1
+            # Create embedded outpost blueprint to permanently set authentik_host
+            bp_embedded_path = os.path.join(bp_dir, 'tak-embedded-outpost.yaml')
+            bp_embedded_content = f"""version: 1
 metadata:
   name: TAK Embedded Outpost Config
   labels:
@@ -5581,87 +5610,86 @@ entries:
         authentik_host: https://authentik.{settings.get('fqdn') or server_ip}
         authentik_host_insecure: false
 """
-        with open(bp_embedded_path, 'w') as f:
-            f.write(bp_embedded_content)
-        plog("  Created tak-embedded-outpost.yaml blueprint")
-        plog("\u2713 Blueprint ready")
+            with open(bp_embedded_path, 'w') as f:
+                f.write(bp_embedded_content)
+            plog("  Created tak-embedded-outpost.yaml blueprint")
+            plog("\u2713 Blueprint ready")
 
-        # Step 5: Download docker-compose.yml and patch for blueprints
-        plog("")
-        plog("\u2501\u2501\u2501 Step 5/10: Downloading Docker Compose File \u2501\u2501\u2501")
-        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
-        if not os.path.exists(compose_path):
-            r = subprocess.run(f'wget -q -O {compose_path} https://goauthentik.io/docker-compose.yml 2>&1', shell=True, capture_output=True, text=True, timeout=30)
-            if r.returncode != 0 or not os.path.exists(compose_path):
-                plog("\u2717 Failed to download docker-compose.yml")
-                authentik_deploy_status.update({'running': False, 'error': True})
-                return
-            plog("\u2713 docker-compose.yml downloaded")
-        else:
-            plog("\u2713 docker-compose.yml already exists")
+            # Step 5: Download docker-compose.yml and patch for blueprints
+            plog("")
+            plog("\u2501\u2501\u2501 Step 5/10: Downloading Docker Compose File \u2501\u2501\u2501")
+            if not os.path.exists(compose_path):
+                r = subprocess.run(f'wget -q -O {compose_path} https://goauthentik.io/docker-compose.yml 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0 or not os.path.exists(compose_path):
+                    plog("\u2717 Failed to download docker-compose.yml")
+                    authentik_deploy_status.update({'running': False, 'error': True})
+                    return
+                plog("\u2713 docker-compose.yml downloaded")
+            else:
+                plog("\u2713 docker-compose.yml already exists")
 
-        # Step 6: Patch docker-compose for blueprints + LDAP container
-        plog("")
-        plog("\u2501\u2501\u2501 Step 6/10: Patching Docker Compose \u2501\u2501\u2501")
-        with open(compose_path, 'r') as f:
-            lines = f.readlines()
-        needs_write = False
-        # Add blueprint volume mounts
-        if not any('blueprints/custom' in l for l in lines):
-            patched = []
-            for line in lines:
-                patched.append(line)
-                if './custom-templates:/templates' in line:
-                    indent = line[:len(line) - len(line.lstrip())]
-                    patched.append(f'{indent}- ./blueprints:/blueprints/custom\n')
-            lines = patched
-            needs_write = True
-            plog("  Added blueprint mount to server & worker")
-        # Add POSTGRES_MAX_CONNECTIONS
-        if not any('POSTGRES_MAX_CONNECTIONS' in l for l in lines):
-            patched = []
-            for line in lines:
-                patched.append(line)
-                if 'POSTGRES_USER:' in line:
-                    indent = line[:len(line) - len(line.lstrip())]
-                    patched.append(f'{indent}POSTGRES_MAX_CONNECTIONS: "200"\n')
-            lines = patched
-            needs_write = True
-            plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
+            # Step 6: Patch docker-compose for blueprints + LDAP container
+            plog("")
+            plog("\u2501\u2501\u2501 Step 6/10: Patching Docker Compose \u2501\u2501\u2501")
+            with open(compose_path, 'r') as f:
+                lines = f.readlines()
+            needs_write = False
+            # Add blueprint volume mounts
+            if not any('blueprints/custom' in l for l in lines):
+                patched = []
+                for line in lines:
+                    patched.append(line)
+                    if './custom-templates:/templates' in line:
+                        indent = line[:len(line) - len(line.lstrip())]
+                        patched.append(f'{indent}- ./blueprints:/blueprints/custom\n')
+                lines = patched
+                needs_write = True
+                plog("  Added blueprint mount to server & worker")
+            # Add POSTGRES_MAX_CONNECTIONS
+            if not any('POSTGRES_MAX_CONNECTIONS' in l for l in lines):
+                patched = []
+                for line in lines:
+                    patched.append(line)
+                    if 'POSTGRES_USER:' in line:
+                        indent = line[:len(line) - len(line.lstrip())]
+                        patched.append(f'{indent}POSTGRES_MAX_CONNECTIONS: "200"\n')
+                lines = patched
+                needs_write = True
+                plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
 
-        # Add LDAP outpost container
-        if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-            ldap_svc = "  ldap:\n    image: ghcr.io/goauthentik/ldap:2025.12.4\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
-            new_lines = []
-            for line in lines:
-                if line.startswith('volumes:'):
-                    new_lines.append(ldap_svc)
-                new_lines.append(line)
-            lines = new_lines
-            needs_write = True
-            plog("  Added LDAP outpost container")
-        if needs_write:
-            with open(compose_path, 'w') as f:
-                f.writelines(lines)
-            plog("\u2713 Docker Compose patched")
-        else:
-            plog("\u2713 Docker Compose already patched")
+            # Add LDAP outpost container
+            if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
+                ldap_svc = "  ldap:\n    image: ghcr.io/goauthentik/ldap:2025.12.4\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                new_lines = []
+                for line in lines:
+                    if line.startswith('volumes:'):
+                        new_lines.append(ldap_svc)
+                    new_lines.append(line)
+                lines = new_lines
+                needs_write = True
+                plog("  Added LDAP outpost container")
+            if needs_write:
+                with open(compose_path, 'w') as f:
+                    f.writelines(lines)
+                plog("\u2713 Docker Compose patched")
+            else:
+                plog("\u2713 Docker Compose already patched")
 
-        # Step 7: Pull and start core services (no verbose docker output in log)
-        plog("")
-        plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
-        plog("  Pulling images (this may take a few minutes)...")
-        r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            plog(f"  \u26a0 Pull had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
-        else:
-            plog("  \u2713 Images pulled")
-        plog("  Starting core services...")
-        r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            plog(f"  \u26a0 Start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
-        else:
-            plog("  \u2713 Core services started")
+            # Step 7: Pull and start core services (no verbose docker output in log)
+            plog("")
+            plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
+            plog("  Pulling images (this may take a few minutes)...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Pull had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            else:
+                plog("  \u2713 Images pulled")
+            plog("  Starting core services...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            else:
+                plog("  \u2713 Core services started")
 
         # Step 8: Wait for Authentik API to be ready
         plog("")
@@ -5807,7 +5835,7 @@ entries:
                 plog("\u26a0 LDAP service password not found, skipping CoreConfig patch")
         else:
             plog("  ℹ TAK Server not installed — skipping CoreConfig (OK for MediaMTX-only or standalone Authentik)")
-            plog("  Deploy TAK Server later and redeploy Authentik to add LDAP to TAK Server if needed")
+            plog("  Deploy TAK Server later, then use Update config & reconnect to add LDAP")
 
         # Step 11/12: Create admin group and webadmin user in Authentik
         plog("")
@@ -6372,7 +6400,7 @@ entries:
         else:
             plog("")
             plog("  ℹ No domain configured — skipping forward auth setup")
-            plog("  Set up a domain in the Caddy module first, then redeploy Authentik")
+            plog("  Set up a domain in the Caddy module first, then use Update config & reconnect")
 
         # Read bootstrap password for display
         bootstrap_pass_display = ''
@@ -6571,11 +6599,13 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% elif ak.installed %}
 <div style="margin-top:24px;text-align:center">
 <button class="control-btn btn-start" onclick="akControl('start')" style="margin-right:12px">▶ Start</button>
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% else %}
@@ -6658,6 +6688,14 @@ async function deployAk(){
         if(d.success)pollDeployLog();
         else{document.getElementById('deploy-log').textContent='Error: '+d.error;btn.disabled=false;btn.textContent='Deploy Authentik';btn.style.opacity='1';btn.style.cursor='pointer'}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
+}
+async function reconfigureAk(){
+    try{
+        var r=await fetch('/api/authentik/reconfigure',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success)window.location.href='/authentik';
+        else alert('Error: '+(d.error||'Reconfigure failed'));
+    }catch(e){alert('Error: '+e.message)}
 }
 
 var logIndex=0;
