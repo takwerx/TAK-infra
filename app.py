@@ -3133,14 +3133,17 @@ def emailrelay_configure_authentik():
             ak_url = 'http://127.0.0.1:9090'
             ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
             api_ready = False
-            for _ in range(18):
+            max_wait = 300  # 5 min cap
+            waited = 0
+            while waited < max_wait:
                 try:
                     req = urllib.request.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
                     urllib.request.urlopen(req, timeout=5)
                     api_ready = True
                     break
                 except Exception:
-                    time.sleep(5)
+                    time.sleep(3)
+                    waited += 3
             if api_ready:
                 ok, recovery_msg = _ensure_authentik_recovery_flow(ak_url, ak_headers)
                 if ok:
