@@ -3015,9 +3015,9 @@ def nodered_uninstall():
     except Exception as e:
         return jsonify({'error': f'Uninstall failed: {str(e)}'}), 500
 
-def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
+def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None, flow_pk=None, inv_flow_pk=None):
     """Create Node-RED proxy provider + application in Authentik, add to embedded outpost.
-    Mirrors TAK Portal's working code exactly (lines 1442-1571)."""
+    When flow_pk/inv_flow_pk are provided (e.g. from Step 12), use them. Otherwise wait for flows."""
     if not fqdn or not ak_token:
         return False
     def log(msg):
@@ -3029,87 +3029,61 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
     _ak_url = 'http://127.0.0.1:9090'
 
     try:
-        # 1) Get authorization flow
-        flow_pk = None
-        attempt = 0
-        while attempt < 60:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
-                resp = _urlreq.urlopen(req, timeout=10)
-                flows = json.loads(resp.read().decode())['results']
-                for fl in flows:
-                    if 'implicit' in fl.get('slug', ''):
-                        flow_pk = fl['pk']
-                        break
-                if not flow_pk and flows:
-                    flow_pk = flows[0]['pk']
-                if flow_pk:
-                    break
-            except Exception:
-                pass
-            if attempt % 6 == 0:
-                log(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
-            time.sleep(5)
-            attempt += 1
-        if not flow_pk:
-            log("  ⚠ No authorization flow found for Node-RED")
-            return False
-        log("  ✓ Got authorization flow")
-
-        # 2) Get invalidation flow
-        inv_flow_pk = None
-        attempt = 0
-        while attempt < 60:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
-                resp = _urlreq.urlopen(req, timeout=10)
-                inv_flows = json.loads(resp.read().decode())['results']
-                inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
-                if inv_flow_pk:
-                    break
-            except Exception:
-                pass
-            if attempt % 6 == 0:
-                log(f"  ⏳ Waiting for invalidation flow... ({attempt * 5}s)")
-            time.sleep(5)
-            attempt += 1
-        if not inv_flow_pk:
-            log("  ⚠ No invalidation flow found for Node-RED")
-            return False
-        log("  ✓ Got invalidation flow")
-
-        # 3) Create proxy provider (same payload structure as TAK Portal)
-        provider_pk = None
-        if flow_pk and inv_flow_pk:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
-                    data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
-                        'invalidation_flow': inv_flow_pk,
-                        'external_host': f'https://nodered.{fqdn}', 'mode': 'forward_single',
-                        'token_validity': 'hours=24'}).encode(),
-                    headers=_ak_headers, method='POST')
-                resp = _urlreq.urlopen(req, timeout=10)
-                provider_pk = json.loads(resp.read().decode())['pk']
-                log("  ✓ Proxy provider created")
-            except Exception as e:
-                if hasattr(e, 'code') and e.code == 400:
-                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=Node-RED', headers=_ak_headers)
+        if not flow_pk or not inv_flow_pk:
+            for attempt in range(36):
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
                     resp = _urlreq.urlopen(req, timeout=10)
-                    results = json.loads(resp.read().decode())['results']
-                    if results:
-                        provider_pk = results[0]['pk']
-                        try:
-                            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/{provider_pk}/',
-                                data=json.dumps({'external_host': f'https://nodered.{fqdn}'}).encode(),
-                                headers=_ak_headers, method='PATCH')
-                            _urlreq.urlopen(req, timeout=10)
-                        except Exception:
-                            pass
-                    log("  ✓ Proxy provider already exists (external_host updated to nodered subdomain)")
-                else:
-                    log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
+                    flows = json.loads(resp.read().decode())['results']
+                    flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
+                    if flow_pk:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        inv_flows = json.loads(resp.read().decode())['results']
+                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+                        if inv_flow_pk:
+                            break
+                except Exception:
+                    pass
+                if attempt % 6 == 0:
+                    log(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+                time.sleep(5)
+            if not flow_pk or not inv_flow_pk:
+                log("  ⚠ No authorization/invalidation flow — skipping Node-RED proxy provider")
+                return False
+            log("  ✓ Got authorization and invalidation flows")
 
-        # 4) Create application
+        # Create proxy provider (same payload structure as TAK Portal)
+        provider_pk = None
+        try:
+            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
+                    'invalidation_flow': inv_flow_pk,
+                    'external_host': f'https://nodered.{fqdn}', 'mode': 'forward_single',
+                    'token_validity': 'hours=24'}).encode(),
+                headers=_ak_headers, method='POST')
+            resp = _urlreq.urlopen(req, timeout=10)
+            provider_pk = json.loads(resp.read().decode())['pk']
+            log("  ✓ Proxy provider created")
+        except Exception as e:
+            if hasattr(e, 'code') and e.code == 400:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=Node-RED', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                results = json.loads(resp.read().decode())['results']
+                if results:
+                    provider_pk = results[0]['pk']
+                    try:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/{provider_pk}/',
+                            data=json.dumps({'external_host': f'https://nodered.{fqdn}'}).encode(),
+                            headers=_ak_headers, method='PATCH')
+                        _urlreq.urlopen(req, timeout=10)
+                    except Exception:
+                        pass
+                log("  ✓ Proxy provider already exists (external_host updated to nodered subdomain)")
+            else:
+                log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
+
+        # Create application
         if provider_pk:
             try:
                 req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
@@ -3156,8 +3130,9 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
         log(f"  ⚠ Forward auth setup error: {str(e)[:100]}")
     return True
 
-def _ensure_authentik_console_app(fqdn, ak_token, plog=None):
-    """Create infra-TAK Console proxy providers (infratak + console) and applications in Authentik, add to embedded outpost."""
+def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_flow_pk=None):
+    """Create infra-TAK Console proxy providers (infratak + console) and applications in Authentik, add to embedded outpost.
+    When flow_pk/inv_flow_pk are provided (e.g. from Step 12), use them. Otherwise wait for flows (e.g. when called from Caddy save)."""
     if not fqdn or not ak_token:
         return False
     def log(msg):
@@ -3168,17 +3143,27 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None):
     _ak_url = 'http://127.0.0.1:9090'
 
     try:
-        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
-        resp = _urlreq.urlopen(req, timeout=10)
-        flows = json.loads(resp.read().decode())['results']
-        flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
-        if not flow_pk:
-            return False
-        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
-        resp = _urlreq.urlopen(req, timeout=10)
-        inv_flows = json.loads(resp.read().decode())['results']
-        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
-        if not inv_flow_pk:
+        if not flow_pk or not inv_flow_pk:
+            for attempt in range(36):
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
+                    resp = _urlreq.urlopen(req, timeout=10)
+                    flows = json.loads(resp.read().decode())['results']
+                    flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
+                    if flow_pk:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        inv_flows = json.loads(resp.read().decode())['results']
+                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+                        if inv_flow_pk:
+                            break
+                except Exception:
+                    pass
+                if attempt % 6 == 0 and plog:
+                    plog(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+                time.sleep(5)
+        if not flow_pk or not inv_flow_pk:
+            log("  ⚠ No authorization/invalidation flow — skipping infra-TAK Console proxy providers")
             return False
 
         provider_pks = []
@@ -6092,11 +6077,11 @@ entries:
                     if nodered_installed:
                         plog("")
                         plog("  Configuring Authentik for Node-RED...")
-                        _ensure_authentik_nodered_app(fqdn, ak_token, plog)
-                    # infra-TAK console (infratak + console subdomains) behind Authentik
+                        _ensure_authentik_nodered_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
+                    # infra-TAK console (infratak + console subdomains) behind Authentik — reuse same flows, no second fetch
                     plog("")
                     plog("  Configuring Authentik for infra-TAK Console...")
-                    _ensure_authentik_console_app(fqdn, ak_token, plog)
+                    _ensure_authentik_console_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
