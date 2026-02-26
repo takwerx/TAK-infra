@@ -240,8 +240,20 @@ generate_self_signed_cert() {
 # ==========================================
 # Create systemd Service
 # ==========================================
+# If the service already exists and points to a directory that has .config/auth.json,
+# keep using that directory so "git pull" or running start.sh from another clone
+# doesn't switch to a path that has no auth (password would stop working).
 create_service() {
-    cat > /etc/systemd/system/takwerx-console.service << EOF
+    SERVICE_FILE="/etc/systemd/system/takwerx-console.service"
+    USE_DIR="$INSTALL_DIR"
+    if [ -f "$SERVICE_FILE" ]; then
+        EXISTING_DIR=$(grep -E '^WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ')
+        if [ -n "$EXISTING_DIR" ] && [ -d "$EXISTING_DIR" ] && [ -f "$EXISTING_DIR/.config/auth.json" ]; then
+            USE_DIR="$EXISTING_DIR"
+        fi
+    fi
+
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=TAKWERX Console - Infrastructure Management Platform
 After=network-online.target
@@ -249,8 +261,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/app.py
-WorkingDirectory=$INSTALL_DIR
+ExecStart=$USE_DIR/.venv/bin/python3 $USE_DIR/app.py
+WorkingDirectory=$USE_DIR
 Restart=always
 RestartSec=5
 User=root

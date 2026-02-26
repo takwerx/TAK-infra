@@ -37,6 +37,10 @@ The script will:
 
 Then open your browser to the URL shown and log in.
 
+**Updating:** After `git pull`, restart the console with `sudo systemctl restart takwerx-console`. Your password and config live in the install directory’s `.config/`. If you run `start.sh` from a different clone or path, the service keeps using the original install directory so your password continues to work.
+
+**Password not working after update?** From the install directory (e.g. `/root/infra-TAK`), run `sudo ./reset-console-password.sh` to set a new console password without re-running the full installer.
+
 ## Deployment Order
 
 Deploy services in this order — each step auto-configures the next:
