@@ -79,8 +79,15 @@ def save_settings(s):
     json.dump(s, open(os.path.join(CONFIG_DIR, 'settings.json'), 'w'), indent=2)
 
 def load_auth():
-    p = os.path.join(CONFIG_DIR, 'auth.json')
-    return json.load(open(p)) if os.path.exists(p) else {}
+    """Load auth.json from CONFIG_DIR. Never raises — returns {} on missing file or error."""
+    try:
+        p = os.path.join(CONFIG_DIR, 'auth.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
 def _apply_authentik_session():
     """If request has Authentik headers (from Caddy forward_auth), set session so we treat user as logged in."""
@@ -252,7 +259,12 @@ def login():
         return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
-        if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
+        if not auth.get('password_hash'):
+            return render_template_string(
+                LOGIN_TEMPLATE,
+                error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
+                version=VERSION)
+        if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
         return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
@@ -270,7 +282,12 @@ def index():
         return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
-        if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
+        if not auth.get('password_hash'):
+            return render_template_string(
+                LOGIN_TEMPLATE,
+                error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
+                version=VERSION)
+        if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
         return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
@@ -665,8 +682,25 @@ def generate_caddyfile(settings=None):
 
     ak = modules.get('authentik', {})
     # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
+    # /login and / go to app without forward_auth so console password works after pull/restart
     lines.append(f"infratak.{domain} {{")
     if ak.get('installed'):
+        lines.append(f"    route /login* {{")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
+        lines.append(f"    route / {{")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
         lines.append(f"    route {{")
         lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
         lines.append(f"        forward_auth 127.0.0.1:9090 {{")
@@ -691,10 +725,26 @@ def generate_caddyfile(settings=None):
     lines.append(f"}}")
     lines.append("")
 
-    # Console — console.domain (behind Authentik when Authentik is installed; backdoor: direct IP:5001 still uses password)
+    # Console — console.domain (behind Authentik when installed; /login and / bypass so console password works after pull)
     nodered = modules.get('nodered', {})
     lines.append(f"console.{domain} {{")
     if ak.get('installed'):
+        lines.append(f"    route /login* {{")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
+        lines.append(f"    route / {{")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
         lines.append(f"    route {{")
         lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
         lines.append(f"        forward_auth 127.0.0.1:9090 {{")
