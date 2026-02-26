@@ -6006,192 +6006,189 @@ entries:
                         except Exception as e:
                             plog(f"  ⚠ Could not set adm_ldapservice password: {str(e)[:100]}")
 
-                    # Create LDAP provider + outpost via API (simplified - use default flows)
-                    try:
-                        # Get default invalidation flow
-                        req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=invalidation',
+                # Create LDAP provider + outpost + inject token — ALWAYS RUN (required for MediaMTX, TAK Server, standalone)
+                try:
+                    # Get default invalidation flow
+                    req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=invalidation',
+                        headers=ak_headers)
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    inv_flows = json.loads(resp.read().decode())['results']
+                    inv_flow_pk = next((f['pk'] for f in inv_flows if 'invalidation' in f['slug'] and 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
+                    plog(f"  ✓ Got invalidation flow: {inv_flow_pk}")
+
+                    # Get default authentication flow - wait until ready
+                    auth_flow_pk = None
+                    attempt = 0
+                    while True:
+                        req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication',
                             headers=ak_headers)
                         resp = urllib.request.urlopen(req, timeout=10)
-                        inv_flows = json.loads(resp.read().decode())['results']
-                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'invalidation' in f['slug'] and 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
-                        plog(f"  ✓ Got invalidation flow: {inv_flow_pk}")
-
-                        # Get default authentication flow - wait forever until ready
-                        auth_flow_pk = None
-                        attempt = 0
-                        while True:
-                            req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication',
-                                headers=ak_headers)
-                            resp = urllib.request.urlopen(req, timeout=10)
-                            auth_flows = json.loads(resp.read().decode())['results']
-                            auth_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'default-authentication-flow'),
-                                               next((f['pk'] for f in auth_flows), None))
-                            if auth_flow_pk:
-                                plog(f"  ✓ Got authentication flow: {auth_flow_pk}")
-                                break
-                            if attempt % 6 == 0:
-                                plog(f"  ⏳ Waiting for authentication flows... ({attempt * 5}s)")
-                            else:
-                                authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
-                            time.sleep(5)
-                            attempt += 1
-
-                        if not auth_flow_pk or not inv_flow_pk:
-                            plog(f"  ✗ Missing flows — auth={auth_flow_pk} inv={inv_flow_pk}")
+                        auth_flows = json.loads(resp.read().decode())['results']
+                        auth_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'default-authentication-flow'),
+                                           next((f['pk'] for f in auth_flows), None))
+                        if auth_flow_pk:
+                            plog(f"  ✓ Got authentication flow: {auth_flow_pk}")
+                            break
+                        if attempt % 6 == 0:
+                            plog(f"  ⏳ Waiting for authentication flows... ({attempt * 5}s)")
                         else:
-                            # Create LDAP provider
-                            ldap_provider_pk = None
-                            try:
-                                req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
-                                    data=json.dumps({'name': 'LDAP', 'authentication_flow': auth_flow_pk,
-                                        'authorization_flow': auth_flow_pk, 'invalidation_flow': inv_flow_pk,
-                                        'base_dn': 'DC=takldap', 'bind_mode': 'cached',
-                                        'search_mode': 'cached', 'mfa_support': False}).encode(),
-                                    headers=ak_headers, method='POST')
-                                resp = urllib.request.urlopen(req, timeout=10)
-                                ldap_provider_pk = json.loads(resp.read().decode())['pk']
-                                plog(f"  ✓ Created LDAP provider (pk={ldap_provider_pk})")
-                            except urllib.error.HTTPError as e:
-                                err = e.read().decode()[:200]
-                                if e.code == 400:
-                                    req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/?search=LDAP',
-                                        headers=ak_headers)
-                                    resp = urllib.request.urlopen(req, timeout=10)
-                                    results = json.loads(resp.read().decode())['results']
-                                    ldap_provider_pk = results[0]['pk'] if results else None
-                                    plog(f"  ✓ LDAP provider already exists (pk={ldap_provider_pk})")
-                                else:
-                                    plog(f"  ✗ LDAP provider creation failed: {e.code} {err}")
+                            authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
+                        time.sleep(5)
+                        attempt += 1
 
-                            # Create LDAP application
-                            if ldap_provider_pk:
-                                try:
-                                    req = urllib.request.Request(f'{ak_url}/api/v3/core/applications/',
-                                        data=json.dumps({'name': 'LDAP', 'slug': 'ldap',
-                                            'provider': ldap_provider_pk}).encode(),
-                                        headers=ak_headers, method='POST')
-                                    urllib.request.urlopen(req, timeout=10)
-                                    plog(f"  ✓ Created LDAP application")
-                                except urllib.error.HTTPError as e:
-                                    if e.code == 400:
-                                        plog(f"  ✓ LDAP application already exists")
-                                    else:
-                                        plog(f"  ⚠ LDAP application error: {e.code} {e.read().decode()[:100]}")
-
-                                # Get or create LDAP outpost (blueprint may have created it)
-                                outpost_token_id = None
-                                try:
-                                    req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP',
-                                        headers=ak_headers)
-                                    resp = urllib.request.urlopen(req, timeout=10)
-                                    results = json.loads(resp.read().decode())['results']
-                                    ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
-                                    if ldap_outpost:
-                                        outpost_token_id = ldap_outpost.get('token_identifier', '')
-                                        if not outpost_token_id:
-                                            # Try detail endpoint; some APIs only return token_identifier there
-                                            req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
-                                                headers=ak_headers)
-                                            resp = urllib.request.urlopen(req, timeout=10)
-                                            detail = json.loads(resp.read().decode())
-                                            outpost_token_id = detail.get('token_identifier', '')
-                                        if outpost_token_id:
-                                            plog(f"  ✓ Using existing LDAP outpost (blueprint)")
-                                except Exception:
-                                    pass
-                                if not outpost_token_id:
-                                    try:
-                                        req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/',
-                                            data=json.dumps({'name': 'LDAP', 'type': 'ldap',
-                                                'providers': [ldap_provider_pk],
-                                                'config': {'authentik_host': 'http://authentik-server-1:9000/',
-                                                    'authentik_host_insecure': True}}).encode(),
-                                                headers=ak_headers, method='POST')
-                                        resp = urllib.request.urlopen(req, timeout=10)
-                                        outpost_data = json.loads(resp.read().decode())
-                                        outpost_token_id = outpost_data.get('token_identifier', '')
-                                        plog(f"  ✓ Created LDAP outpost (token_id={outpost_token_id})")
-                                    except urllib.error.HTTPError as e:
-                                        err = e.read().decode()[:200]
-                                        if e.code == 400:
-                                            req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP',
-                                                headers=ak_headers)
-                                            resp = urllib.request.urlopen(req, timeout=10)
-                                            results = json.loads(resp.read().decode())['results']
-                                            ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
-                                            if ldap_outpost:
-                                                outpost_token_id = ldap_outpost.get('token_identifier', '')
-                                                if not outpost_token_id:
-                                                    req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
-                                                        headers=ak_headers)
-                                                    resp = urllib.request.urlopen(req, timeout=10)
-                                                    detail = json.loads(resp.read().decode())
-                                                    outpost_token_id = detail.get('token_identifier', '')
-                                                if outpost_token_id:
-                                                    plog(f"  ✓ LDAP outpost already exists, using token")
-                                                # Ensure provider is linked
-                                                if outpost_token_id and ldap_provider_pk:
-                                                    req = urllib.request.Request(
-                                                        f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
-                                                        data=json.dumps({'name': 'LDAP', 'type': 'ldap',
-                                                            'providers': [ldap_provider_pk],
-                                                            'config': {'authentik_host': 'http://authentik-server-1:9000/',
-                                                                'authentik_host_insecure': True}}).encode(),
-                                                        headers=ak_headers, method='PUT')
-                                                    urllib.request.urlopen(req, timeout=10)
-                                            if not outpost_token_id:
-                                                plog(f"  ✗ LDAP outpost exists but token not available via API — restart LDAP container after copying token from Authentik Outposts")
-                                        else:
-                                            plog(f"  ✗ LDAP outpost creation failed: {e.code} {err}")
-                                    except Exception as ex:
-                                        plog(f"  ✗ LDAP outpost error: {str(ex)[:150]}")
-
-                                # Inject token into docker-compose.yml
-                                if outpost_token_id:
-                                    try:
-                                        req = urllib.request.Request(
-                                            f'{ak_url}/api/v3/core/tokens/{outpost_token_id}/view_key/',
-                                            headers=ak_headers, method='GET')
-                                        resp = urllib.request.urlopen(req, timeout=10)
-                                        response_body = resp.read().decode()
-                                        ldap_token_key = json.loads(response_body).get('key', '')
-                                        if ldap_token_key:
-                                            with open(compose_path, 'r') as f:
-                                                compose_text = f.read()
-                                            compose_text = compose_text.replace('AUTHENTIK_TOKEN: placeholder', f'AUTHENTIK_TOKEN: {ldap_token_key}')
-                                            with open(compose_path, 'w') as f:
-                                                f.write(compose_text)
-                                            plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
-                                            plog(f"  Recreating LDAP container with new token...")
-                                            subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
-                                                shell=True, capture_output=True, timeout=60)
-                                            plog(f"  ✓ LDAP container recreated with injected token")
-                                            time.sleep(10)
-                                            plog(f"  ℹ LDAP may take 30–60s to show healthy in Authentik Outposts")
-                                        else:
-                                            plog(f"  ⚠ Token key empty — response: {response_body[:200]}")
-                                    except urllib.error.HTTPError as e:
-                                        plog(f"  ✗ Token injection HTTP error: {e.code} {e.read().decode()[:200]}")
-                                    except Exception as e:
-                                        plog(f"  ✗ Token injection error: {str(e)[:200]}")
-                                else:
-                                    plog(f"  ✗ No outpost_token_id — cannot inject token")
-
-                                # Ensure LDAP container is always started so it shows on health screen (even if token inject failed)
-                                r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
-                                if r.returncode == 0:
-                                    plog(f"  ✓ LDAP container started (if token was not injected, add it in Authentik Outposts and restart LDAP)")
-                                else:
-                                    plog(f"  ⚠ LDAP start: {r.stderr.strip()[:150] if r.stderr else r.stdout.strip()[:150]}")
-
-                    except Exception as e:
-                        plog(f"  ✗ LDAP setup error: {str(e)[:200]}")
-                        # Still try to start LDAP so container appears on health screen; user can fix token in Authentik
+                    if not auth_flow_pk or not inv_flow_pk:
+                        plog(f"  ✗ Missing flows — auth={auth_flow_pk} inv={inv_flow_pk}")
+                    else:
+                        # Create LDAP provider
+                        ldap_provider_pk = None
                         try:
-                            subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, timeout=60)
-                            plog(f"  ℹ LDAP container started (add token in Authentik → Outposts → LDAP, then restart LDAP)")
-                        except Exception:
-                            pass
+                            req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
+                                data=json.dumps({'name': 'LDAP', 'authentication_flow': auth_flow_pk,
+                                    'authorization_flow': auth_flow_pk, 'invalidation_flow': inv_flow_pk,
+                                    'base_dn': 'DC=takldap', 'bind_mode': 'cached',
+                                    'search_mode': 'cached', 'mfa_support': False}).encode(),
+                                headers=ak_headers, method='POST')
+                            resp = urllib.request.urlopen(req, timeout=10)
+                            ldap_provider_pk = json.loads(resp.read().decode())['pk']
+                            plog(f"  ✓ Created LDAP provider (pk={ldap_provider_pk})")
+                        except urllib.error.HTTPError as e:
+                            err = e.read().decode()[:200]
+                            if e.code == 400:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/?search=LDAP',
+                                    headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                results = json.loads(resp.read().decode())['results']
+                                ldap_provider_pk = results[0]['pk'] if results else None
+                                plog(f"  ✓ LDAP provider already exists (pk={ldap_provider_pk})")
+                            else:
+                                plog(f"  ✗ LDAP provider creation failed: {e.code} {err}")
+
+                        # Create LDAP application
+                        if ldap_provider_pk:
+                            try:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/applications/',
+                                    data=json.dumps({'name': 'LDAP', 'slug': 'ldap',
+                                        'provider': ldap_provider_pk}).encode(),
+                                    headers=ak_headers, method='POST')
+                                urllib.request.urlopen(req, timeout=10)
+                                plog(f"  ✓ Created LDAP application")
+                            except urllib.error.HTTPError as e:
+                                if e.code == 400:
+                                    plog(f"  ✓ LDAP application already exists")
+                                else:
+                                    plog(f"  ⚠ LDAP application error: {e.code} {e.read().decode()[:100]}")
+
+                            # Get or create LDAP outpost (blueprint may have created it)
+                            outpost_token_id = None
+                            try:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP',
+                                    headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                results = json.loads(resp.read().decode())['results']
+                                ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
+                                if ldap_outpost:
+                                    outpost_token_id = ldap_outpost.get('token_identifier', '')
+                                    if not outpost_token_id:
+                                        req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                            headers=ak_headers)
+                                        resp = urllib.request.urlopen(req, timeout=10)
+                                        detail = json.loads(resp.read().decode())
+                                        outpost_token_id = detail.get('token_identifier', '')
+                                    if outpost_token_id:
+                                        plog(f"  ✓ Using existing LDAP outpost (blueprint)")
+                            except Exception:
+                                pass
+                            if not outpost_token_id:
+                                try:
+                                    req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/',
+                                        data=json.dumps({'name': 'LDAP', 'type': 'ldap',
+                                            'providers': [ldap_provider_pk],
+                                            'config': {'authentik_host': 'http://authentik-server-1:9000/',
+                                                'authentik_host_insecure': True}}).encode(),
+                                            headers=ak_headers, method='POST')
+                                    resp = urllib.request.urlopen(req, timeout=10)
+                                    outpost_data = json.loads(resp.read().decode())
+                                    outpost_token_id = outpost_data.get('token_identifier', '')
+                                    plog(f"  ✓ Created LDAP outpost (token_id={outpost_token_id})")
+                                except urllib.error.HTTPError as e:
+                                    err = e.read().decode()[:200]
+                                    if e.code == 400:
+                                        req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP',
+                                            headers=ak_headers)
+                                        resp = urllib.request.urlopen(req, timeout=10)
+                                        results = json.loads(resp.read().decode())['results']
+                                        ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
+                                        if ldap_outpost:
+                                            outpost_token_id = ldap_outpost.get('token_identifier', '')
+                                            if not outpost_token_id:
+                                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                                    headers=ak_headers)
+                                                resp = urllib.request.urlopen(req, timeout=10)
+                                                detail = json.loads(resp.read().decode())
+                                                outpost_token_id = detail.get('token_identifier', '')
+                                            if outpost_token_id:
+                                                plog(f"  ✓ LDAP outpost already exists, using token")
+                                            if outpost_token_id and ldap_provider_pk:
+                                                req = urllib.request.Request(
+                                                    f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                                    data=json.dumps({'name': 'LDAP', 'type': 'ldap',
+                                                        'providers': [ldap_provider_pk],
+                                                        'config': {'authentik_host': 'http://authentik-server-1:9000/',
+                                                            'authentik_host_insecure': True}}).encode(),
+                                                    headers=ak_headers, method='PUT')
+                                                urllib.request.urlopen(req, timeout=10)
+                                        if not outpost_token_id:
+                                            plog(f"  ✗ LDAP outpost exists but token not available via API")
+                                    else:
+                                        plog(f"  ✗ LDAP outpost creation failed: {e.code} {err}")
+                                except Exception as ex:
+                                    plog(f"  ✗ LDAP outpost error: {str(ex)[:150]}")
+
+                            # Inject token into docker-compose.yml
+                            if outpost_token_id:
+                                try:
+                                    req = urllib.request.Request(
+                                        f'{ak_url}/api/v3/core/tokens/{outpost_token_id}/view_key/',
+                                        headers=ak_headers, method='GET')
+                                    resp = urllib.request.urlopen(req, timeout=10)
+                                    response_body = resp.read().decode()
+                                    ldap_token_key = json.loads(response_body).get('key', '')
+                                    if ldap_token_key:
+                                        with open(compose_path, 'r') as f:
+                                            compose_text = f.read()
+                                        compose_text = compose_text.replace('AUTHENTIK_TOKEN: placeholder', f'AUTHENTIK_TOKEN: {ldap_token_key}')
+                                        with open(compose_path, 'w') as f:
+                                            f.write(compose_text)
+                                        plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
+                                        plog(f"  Recreating LDAP container with new token...")
+                                        subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
+                                            shell=True, capture_output=True, timeout=60)
+                                        plog(f"  ✓ LDAP container recreated with injected token")
+                                        time.sleep(10)
+                                        plog(f"  ℹ LDAP may take 30–60s to show healthy in Authentik Outposts")
+                                    else:
+                                        plog(f"  ⚠ Token key empty — response: {response_body[:200]}")
+                                except urllib.error.HTTPError as e:
+                                    plog(f"  ✗ Token injection HTTP error: {e.code} {e.read().decode()[:200]}")
+                                except Exception as e:
+                                    plog(f"  ✗ Token injection error: {str(e)[:200]}")
+                            else:
+                                plog(f"  ✗ No outpost_token_id — cannot inject token")
+
+                            # Ensure LDAP container is started (even if token inject failed)
+                            r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                            if r.returncode == 0:
+                                plog(f"  ✓ LDAP container started")
+                            else:
+                                plog(f"  ⚠ LDAP start: {r.stderr.strip()[:150] if r.stderr else r.stdout.strip()[:150]}")
+
+                except Exception as e:
+                    plog(f"  ✗ LDAP setup error: {str(e)[:200]}")
+                    try:
+                        subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, timeout=60)
+                        plog(f"  ℹ LDAP container started (add token in Authentik → Outposts → LDAP, then restart LDAP)")
+                    except Exception:
+                        pass
                 else:
                     if os.path.exists('/opt/tak'):
                         plog("  ⚠ No webadmin password found, skipping user creation")
