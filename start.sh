@@ -267,6 +267,7 @@ Restart=always
 RestartSec=5
 User=root
 Environment=PYTHONUNBUFFERED=1
+Environment=CONFIG_DIR=$USE_DIR/.config
 
 [Install]
 WantedBy=multi-user.target

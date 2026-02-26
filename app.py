@@ -33,7 +33,8 @@ def inject_cloudtak_icon():
     return d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(BASE_DIR, '.config')
+# Pin config to env so auth works even if service WorkingDirectory and code path ever differ (e.g. after git pull)
+CONFIG_DIR = os.environ.get('CONFIG_DIR') or os.path.join(BASE_DIR, '.config')
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
 
 @app.before_request

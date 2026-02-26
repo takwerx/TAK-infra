@@ -39,7 +39,7 @@ Then open your browser to the URL shown and log in.
 
 **Updating:** After `git pull`, restart the console with `sudo systemctl restart takwerx-console`. Your password and config live in the install directory’s `.config/`. If you run `start.sh` from a different clone or path, the service keeps using the original install directory so your password continues to work.
 
-**Password not working after update?** If the login form just spins or says invalid, use the **backdoor** first: **https://&lt;VPS_IP&gt;:5001** (replace with your server IP). Log in there with your console password. If it still fails, from the install directory (e.g. `/root/infra-TAK`) run `sudo ./reset-console-password.sh` to set a new password. After pulling the latest code, open the Caddy module and re-save your domain once so the updated Caddyfile (which lets /login work with the console password) is applied.
+**Password not working after update?** Use the **backdoor**: **https://&lt;VPS_IP&gt;:5001**. If login spins or fails, on the server run (from the directory where you do `git pull`, e.g. `/root/infra-TAK`): **`sudo ./fix-console-after-pull.sh`** — it pins the config path in the systemd unit and prompts you to set a new password so you can log in again. Alternatively run `sudo ./reset-console-password.sh` from that same directory. After pulling, open the Caddy module and re-save your domain once so the Caddyfile (login bypass) is applied.
 
 ## Recovery / backdoor (when Authentik or Caddy is broken)
 
