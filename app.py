@@ -6945,6 +6945,59 @@ def _coreconfig_has_ldap():
     except Exception:
         return False
 
+def _ensure_authentik_ldap_service_account():
+    """Ensure adm_ldapservice exists, has password set, and is in authentik Admins (workaround for search_full_directory bug).
+    Runs before Connect TAK Server to LDAP so LDAP bind works regardless of deploy order."""
+    import urllib.request as _req
+    import urllib.error
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    ldap_pass = ''
+    with open(env_path) as f:
+        for line in f:
+            L = line.strip()
+            if L.startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = L.split('=', 1)[1].strip()
+            elif L.startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                ldap_pass = L.split('=', 1)[1].strip()
+    if not ak_token or not ldap_pass:
+        return False, 'Authentik token or LDAP password not in .env'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        req = _req.Request(f'{url}/api/v3/core/users/?search=adm_ldapservice', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        users = json.loads(resp.read().decode())['results']
+        uid = next((u['pk'] for u in users if u.get('username') == 'adm_ldapservice'), None)
+        if not uid:
+            req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps({
+                'username': 'adm_ldapservice', 'name': 'LDAP Service Account', 'is_active': True, 'type': 'service_account'
+            }).encode(), headers=headers, method='POST')
+            resp = _req.urlopen(req, timeout=10)
+            uid = json.loads(resp.read().decode())['pk']
+        req = _req.Request(f'{url}/api/v3/core/users/{uid}/set_password/', data=json.dumps({'password': ldap_pass}).encode(), headers=headers, method='POST')
+        _req.urlopen(req, timeout=10)
+        req = _req.Request(f'{url}/api/v3/core/groups/?search=authentik+Admins', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        groups = json.loads(resp.read().decode())['results']
+        admins = next((g for g in groups if 'admins' in g.get('name', '').lower()), None)
+        if admins:
+            users_raw = admins.get('users') or []
+            member_pks = [u.get('pk') if isinstance(u, dict) else u for u in users_raw]
+            if uid not in member_pks:
+                member_pks.append(uid)
+                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/', data=json.dumps({'users': member_pks}).encode(), headers=headers, method='PATCH')
+                _req.urlopen(req, timeout=10)
+        subprocess.run('cd ~/authentik && docker compose restart ldap 2>/dev/null', shell=True, capture_output=True, timeout=30)
+        time.sleep(5)
+        return True, ''
+    except urllib.error.HTTPError as e:
+        return False, f'Authentik API: {e.code}'
+    except Exception as e:
+        return False, str(e)[:80]
+
 def _apply_ldap_to_coreconfig():
     """Patch CoreConfig.xml with LDAP auth and restart TAK Server. Returns (success, message)."""
     import re
@@ -7002,7 +7055,10 @@ def _apply_ldap_to_coreconfig():
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: patch CoreConfig with LDAP and restart TAK Server (when Authentik already deployed)."""
+    """One-shot: ensure LDAP service account in Authentik, patch CoreConfig, restart TAK Server."""
+    ok, msg = _ensure_authentik_ldap_service_account()
+    if not ok:
+        return jsonify({'success': False, 'message': f'LDAP setup: {msg}'}), 400
     ok, msg = _apply_ldap_to_coreconfig()
     return jsonify({'success': ok, 'message': msg})
 
