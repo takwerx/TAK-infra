@@ -7244,17 +7244,89 @@ def _apply_ldap_to_coreconfig():
         return True, f'LDAP connected and verified — TAK Server is authenticating successfully ({auth_count} binds confirmed)'
     return True, 'LDAP connected; TAK Server restarted (LDAP bind verification pending — may take up to 60s)'
 
+def _ensure_authentik_webadmin():
+    """Ensure webadmin user exists in Authentik with path=users for 8446 LDAP login.
+    Needed when Authentik was deployed before TAK Server (webadmin skipped at deploy time).
+    Returns (True, None) on success, (False, error_msg) on failure."""
+    import urllib.request as _req
+    import urllib.error
+    if not os.path.exists('/opt/tak'):
+        return True, None
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = line.strip().split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        return False, 'Authentik token not in .env'
+    settings = load_settings()
+    webadmin_pass = settings.get('webadmin_password', '') or 'TakserverAtak1!'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        group_pk = None
+        req = _req.Request(f'{url}/api/v3/core/groups/?search=tak_ROLE_ADMIN', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        results = json.loads(resp.read().decode())['results']
+        group_pk = results[0]['pk'] if results else None
+        if not group_pk:
+            gr = _req.Request(f'{url}/api/v3/core/groups/', data=json.dumps({'name': 'tak_ROLE_ADMIN', 'is_superuser': False}).encode(), headers=headers, method='POST')
+            group_pk = json.loads(_req.urlopen(gr, timeout=10).read().decode())['pk']
+        req = _req.Request(f'{url}/api/v3/core/users/?search=webadmin', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        results = json.loads(resp.read().decode())['results']
+        user_obj = next((u for u in results if u.get('username') == 'webadmin'), None)
+        if not user_obj:
+            ud = {'username': 'webadmin', 'name': 'TAK Admin', 'is_active': True, 'path': 'users', 'groups': [group_pk] if group_pk else []}
+            req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps(ud).encode(), headers=headers, method='POST')
+            user_obj = json.loads(_req.urlopen(req, timeout=10).read().decode())
+        webadmin_pk = user_obj['pk']
+        patch_fields = {}
+        if user_obj.get('path', '') != 'users':
+            patch_fields['path'] = 'users'
+        existing = user_obj.get('groups') or []
+        g_pks = [g.get('pk', g) if isinstance(g, dict) else g for g in existing]
+        if group_pk and group_pk not in g_pks:
+            patch_fields['groups'] = list(set(g_pks + [group_pk]))
+        if patch_fields:
+            req = _req.Request(f'{url}/api/v3/core/users/{webadmin_pk}/', data=json.dumps(patch_fields).encode(), headers=headers, method='PATCH')
+            _req.urlopen(req, timeout=10)
+        req = _req.Request(f'{url}/api/v3/core/users/{webadmin_pk}/set_password/', data=json.dumps({'password': webadmin_pass}).encode(), headers=headers, method='POST')
+        _req.urlopen(req, timeout=10)
+        return True, None
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            body = ''
+        return False, f'Authentik API {e.code}: {body}'
+    except Exception as e:
+        return False, str(e)[:120]
+
+@app.route('/api/takserver/sync-webadmin', methods=['POST'])
+@login_required
+def takserver_sync_webadmin():
+    """Sync webadmin user to Authentik for 8446 LDAP login. Use when 8446 doesn't work after LDAP connect."""
+    ok, err = _ensure_authentik_webadmin()
+    return jsonify({'success': ok, 'message': err or 'WebAdmin synced to Authentik — 8446 login should work now'}) if ok else (jsonify({'success': False, 'message': err}), 400)
+
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: fix LDAP flow auth, ensure service account, patch CoreConfig, restart TAK Server.
-    Will NOT patch CoreConfig unless the LDAP bind is verified working first."""
+    """One-shot: fix LDAP flow auth, ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
     ok, err = _ensure_ldap_flow_authentication_none()
     if not ok:
         return jsonify({'success': False, 'message': err}), 400
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
         return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
+    ok, err = _ensure_authentik_webadmin()
+    if not ok:
+        return jsonify({'success': False, 'message': f'WebAdmin sync failed: {err}'}), 400
     ok, msg = _apply_ldap_to_coreconfig()
     return jsonify({'success': ok, 'message': msg})
 
@@ -8204,8 +8276,12 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 {% elif ldap_connected %}
 <div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
-<div style="display:flex;align-items:center;gap:10px"><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+<div><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
+<button type="button" onclick="syncWebadmin()" style="padding:6px 12px;background:transparent;color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer">Sync WebAdmin (8446)</button>
+</div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
+<div id="sync-webadmin-msg" style="margin-top:6px;font-size:12px;color:var(--text-secondary)"></div>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
@@ -8359,6 +8435,19 @@ async function connectLdap(){
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
+}
+async function syncWebadmin(){
+    var btn=document.querySelector('button[onclick="syncWebadmin()"]');
+    var msg=document.getElementById('sync-webadmin-msg');
+    if(btn){btn.disabled=true;btn.textContent='Syncing...';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
+    try{
+        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.textContent='Sync WebAdmin (8446)';}}
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Sync WebAdmin (8446)';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Sync WebAdmin (8446)';}}
 }
 
 (function(){
