@@ -5,7 +5,7 @@ from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory, make_response)
 from werkzeug.security import check_password_hash
 from functools import wraps
-import os, ssl, json, secrets, subprocess, time, psutil, threading, html
+import os, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
 from datetime import datetime
 
 app = Flask(__name__)
@@ -6986,15 +6986,36 @@ def _coreconfig_has_ldap():
     except Exception:
         return False
 
+def _ensure_ldapsearch():
+    """Ensure ldapsearch CLI is available (install ldap-utils / openldap-clients if missing).
+    Used by Connect TAK Server to LDAP to trigger a bind for outpost log verification."""
+    if shutil.which('ldapsearch'):
+        return True
+    try:
+        if os.path.exists('/etc/debian_version'):
+            subprocess.run(
+                'DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y ldap-utils 2>&1',
+                shell=True, capture_output=True, timeout=120)
+        else:
+            subprocess.run('dnf install -y openldap-clients 2>/dev/null || yum install -y openldap-clients 2>/dev/null',
+                shell=True, capture_output=True, timeout=120)
+    except Exception:
+        pass
+    return bool(shutil.which('ldapsearch'))
+
 def _test_ldap_bind(ldap_pass):
     """Test LDAP bind by triggering a connection and checking the outpost logs.
     ldapsearch CLI is incompatible with Authentik's LDAP outpost (returns error 49
     even when the outpost authenticates successfully), so we verify via outpost logs."""
-    subprocess.run(
-        ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
-         '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
-         '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
-        capture_output=True, text=True, timeout=10)
+    try:
+        if shutil.which('ldapsearch'):
+            subprocess.run(
+                ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
+                 '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
+                 '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
+                capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, OSError):
+        pass  # ldapsearch missing or failed; still check logs below
     time.sleep(2)
     r = subprocess.run(
         'docker logs authentik-ldap-1 --since 25s 2>&1',
@@ -7164,7 +7185,9 @@ def _ensure_authentik_ldap_service_account():
         # 5. Force-recreate the LDAP outpost so it picks up the new credentials
         subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
             shell=True, capture_output=True, timeout=60)
-        # 6. Wait for LDAP outpost to be ready, then VERIFY via outpost logs (ldapsearch exit code is unreliable)
+        # 6. Ensure ldapsearch is available (install ldap-utils / openldap-clients if missing)
+        _ensure_ldapsearch()
+        # 7. Wait for LDAP outpost to be ready, then VERIFY via outpost logs (ldapsearch exit code is unreliable)
         time.sleep(10)
         for attempt in range(10):
             time.sleep(6)

@@ -1,7 +1,7 @@
 #!/bin/bash
 ##############################################################################
-# TAKWERX Console - Launcher
-# Emergency Services Infrastructure Management Platform
+# infra-TAK - Launcher
+# Team Awareness Kit Infrastructure Platform
 #
 # This is the ONLY script users need to run.
 # Everything else happens in the browser.
@@ -23,10 +23,10 @@ SETTINGS_FILE="$CONFIG_DIR/settings.json"
 
 clear
 echo ""
-echo -e "${CYAN}${BOLD}  ╔════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}  ║         TAKWERX Console                       ║${NC}"
-echo -e "${CYAN}${BOLD}  ║   Emergency Services Infrastructure Platform  ║${NC}"
-echo -e "${CYAN}${BOLD}  ╚════════════════════════════════════════════════╝${NC}"
+echo -e "${CYAN}${BOLD}  ╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}${BOLD}  ║  infra-TAK                                           ║${NC}"
+echo -e "${CYAN}${BOLD}  ║  Team Awareness Kit Infrastructure Platform          ║${NC}"
+echo -e "${CYAN}${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Check if running as root
@@ -255,7 +255,7 @@ create_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=TAKWERX Console - Infrastructure Management Platform
+Description=infra-TAK - Team Awareness Kit Infrastructure Platform
 After=network-online.target
 Wants=network-online.target
 
@@ -306,9 +306,9 @@ systemctl start takwerx-console
 SERVER_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
-echo -e "${GREEN}${BOLD}  ╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}  ║         TAKWERX Console is running!           ║${NC}"
-echo -e "${GREEN}${BOLD}  ╚════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}${BOLD}  ╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}  ║  infra-TAK is running!                               ║${NC}"
+echo -e "${GREEN}${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}Access:${NC} https://$SERVER_IP:5001"
 echo -e "  ${YELLOW}(Accept the self-signed certificate warning in your browser)${NC}"
