@@ -1211,9 +1211,16 @@ def takportal_page():
             for line in f:
                 if line.strip().startswith('WEB_UI_PORT='):
                     portal_port = line.strip().split('=', 1)[1].strip() or '3000'
+    # Get git version info
+    portal_version = ''
+    portal_dir = os.path.expanduser('~/TAK-Portal')
+    if os.path.isdir(os.path.join(portal_dir, '.git')):
+        rv = subprocess.run(f'cd {portal_dir} && git log -1 --format="%h · %ar"', shell=True, capture_output=True, text=True, timeout=5)
+        if rv.returncode == 0 and rv.stdout.strip():
+            portal_version = rv.stdout.strip()
     return render_template_string(TAKPORTAL_TEMPLATE,
         settings=settings, portal=portal, container_info=container_info,
-        portal_port=portal_port, version=VERSION,
+        portal_port=portal_port, portal_version=portal_version, version=VERSION,
         deploying=takportal_deploy_status.get('running', False),
         deploy_done=takportal_deploy_status.get('complete', False))
 
@@ -1233,7 +1240,16 @@ def takportal_control():
     elif action == 'restart':
         subprocess.run(f'cd {portal_dir} && docker compose down && docker compose up -d', shell=True, capture_output=True, text=True, timeout=120)
     elif action == 'update':
-        subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash && docker compose up -d --build && docker image prune -f', shell=True, capture_output=True, text=True, timeout=180)
+        pull = subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
+        pull_msg = pull.stdout.strip().split('\n')[-1] if pull.stdout.strip() else ''
+        build = subprocess.run(f'cd {portal_dir} && docker compose up -d --build', shell=True, capture_output=True, text=True, timeout=180)
+        subprocess.run(f'cd {portal_dir} && docker image prune -f', shell=True, capture_output=True, text=True, timeout=30)
+        time.sleep(3)
+        rv = subprocess.run(f'cd {portal_dir} && git log -1 --format="%h · %ar"', shell=True, capture_output=True, text=True, timeout=5)
+        new_version = rv.stdout.strip() if rv.returncode == 0 else ''
+        r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+        running = 'Up' in r.stdout
+        return jsonify({'success': True, 'running': running, 'action': action, 'pull': pull_msg, 'version': new_version})
     else:
         return jsonify({'error': 'Invalid action'}), 400
     time.sleep(3)
@@ -5083,16 +5099,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="controls">
 <button class="control-btn btn-stop" onclick="portalControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="portalControl('restart')">🔄 Restart</button>
-<button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()">⬆ Update</button>
 </div>
-<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">If TAK Portal's in-app "Update Now" fails (e.g. git not found), use ⬆ Update above — it runs on the host and pulls + rebuilds.</div>
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}</div>{% endif %}
+<div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% elif portal.installed %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="portalControl('start')">▶ Start</button>
-<button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()">⬆ Update</button>
 </div>
-<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">If TAK Portal's in-app "Update Now" fails (e.g. git not found), use ⬆ Update above — it runs on the host and pulls + rebuilds.</div>
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}</div>{% endif %}
+<div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
 {% endif %}
@@ -5205,6 +5223,24 @@ async function portalControl(action){
         else alert('Error: '+(d.error||'Unknown'));
     }catch(e){alert('Error: '+e.message)}
     btns.forEach(function(b){b.disabled=false;b.style.opacity='1'});
+}
+async function portalUpdate(){
+    var btn=document.getElementById('update-btn');
+    var status=document.getElementById('update-status');
+    btn.disabled=true;btn.innerHTML='<span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:6px"></span>Updating...';
+    status.style.display='block';status.style.color='var(--text-secondary)';status.textContent='Pulling latest code and rebuilding container...';
+    document.querySelectorAll('.control-btn').forEach(function(b){if(b!==btn){b.disabled=true;b.style.opacity='0.5'}});
+    try{
+        var r=await fetch('/api/takportal/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'update'})});
+        var d=await r.json();
+        if(d.success){
+            status.style.color='var(--green)';
+            status.textContent='✓ Updated'+(d.pull?' — '+d.pull:'')+(d.version?' ('+d.version+')':'');
+            setTimeout(function(){window.location.href='/takportal'},1500);
+        }else{status.style.color='var(--red)';status.textContent='✗ '+(d.error||'Update failed')}
+    }catch(e){status.style.color='var(--red)';status.textContent='✗ '+e.message}
+    btn.disabled=false;btn.innerHTML='⬆ Update';
+    document.querySelectorAll('.control-btn').forEach(function(b){b.disabled=false;b.style.opacity='1'});
 }
 
 async function deployPortal(){
