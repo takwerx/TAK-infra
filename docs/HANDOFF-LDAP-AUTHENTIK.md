@@ -32,11 +32,19 @@ The "Flow does not apply to current user" issue has been fixed in code:
 ### What's Broken (Only list if verified broken right now)
 - *(None currently — update when a test confirms a failure)*
 
-### What To Do Next
+### What To Do Next (This Session)
 1. Pull latest code, restart console: `cd ~/infra-TAK && git pull && sudo systemctl restart takwerx-console`
 2. If LDAP not yet connected: hit "Connect TAK Server to LDAP" on TAK Server page
 3. Verify LDAP user auth: create user in TAK Portal, scan QR in ATAK, confirm connection
 4. Proceed with CloudTAK, Node-RED, MediaMTX deployment as needed
+
+### What's Next / Work in Progress
+**Update this when you switch machines.** Note what you were doing, what's queued, and what to pick up.
+
+- **Planned / Backlog**: (add items as they come up — e.g. two-server vs one-server for TAK Server module, penetration testing plan, etc.)
+- **In progress**: (what you were actively working on when you last stopped)
+- **Blocked / Waiting on**: (anything stuck)
+- **Ready to test**: (changes pushed, needs verification on server)
 
 ### Server Access
 ```bash
