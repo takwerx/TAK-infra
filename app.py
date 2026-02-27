@@ -5146,7 +5146,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary);line-height:1.8">
 TAK Portal is a lightweight user-management portal that integrates with <span style="color:var(--cyan)">Authentik</span> and <span style="color:var(--cyan)">TAK Server</span> for streamlined certificate and account control.<br><br>
 Features: User creation with auto-cert generation, group management, mutual aid coordination, QR code device setup, agency-level access control, email notifications.<br><br>
-<span style="color:var(--text-dim)">Requires: Docker · Authentik instance · TAK Server (optional but recommended)</span>
+<span style="color:var(--text-dim)">Requires: Docker · Authentik · TAK Server with LDAP connected</span>
 </div>
 </div>
 <button class="deploy-btn" id="deploy-btn" onclick="deployPortal()">🚀 Deploy TAK Portal</button>
@@ -5182,6 +5182,7 @@ Features: User creation with auto-cert generation, group management, mutual aid 
 </div>
 <footer class="footer"></footer>
 <script>
+async function showAkPassword(){
     var btn=document.getElementById('ak-pw-btn');
     var display=document.getElementById('ak-pw-display');
     if(display.style.display==='inline'){display.style.display='none';btn.textContent='🔑 Show Password';return}
@@ -6987,11 +6988,10 @@ def _ensure_authentik_ldap_service_account():
             users_raw = admins.get('users') or []
             member_pks = [u.get('pk') if isinstance(u, dict) else u for u in users_raw]
             if uid not in member_pks:
-                member_pks.append(uid)
-                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/', data=json.dumps({'users': member_pks}).encode(), headers=headers, method='PATCH')
+                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/add_user/', data=json.dumps({'pk': uid}).encode(), headers=headers, method='POST')
                 _req.urlopen(req, timeout=10)
         subprocess.run('cd ~/authentik && docker compose restart ldap 2>/dev/null', shell=True, capture_output=True, timeout=30)
-        time.sleep(5)
+        time.sleep(10)
         return True, ''
     except urllib.error.HTTPError as e:
         return False, f'Authentik API: {e.code}'
@@ -7050,7 +7050,15 @@ def _apply_ldap_to_coreconfig():
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
-    return True, 'LDAP connected; TAK Server restarted'
+    # Verify LDAP bind works by checking outpost logs for successful auth
+    time.sleep(5)
+    verify = subprocess.run(
+        'docker logs authentik-ldap-1 --since 30s 2>&1 | grep -c "authenticated"',
+        shell=True, capture_output=True, text=True, timeout=10)
+    auth_count = int(verify.stdout.strip()) if verify.stdout.strip().isdigit() else 0
+    if auth_count > 0:
+        return True, f'LDAP connected and verified — TAK Server is authenticating successfully ({auth_count} binds confirmed)'
+    return True, 'LDAP connected; TAK Server restarted (LDAP bind verification pending — may take up to 60s)'
 
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
@@ -8154,7 +8162,7 @@ async function connectLdap(){
     try{
         var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} setTimeout(function(){window.location.reload();},1200);}
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} alert(d.message||'LDAP connected. TAK Server restarted.');setTimeout(function(){window.location.reload();},500);}
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
