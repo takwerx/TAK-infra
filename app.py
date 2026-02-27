@@ -8201,19 +8201,21 @@ async function removeFile(fn,elId){
 
 function queueFiles(fl){
     const a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';const ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
+    var pa=document.getElementById('progress-area');if(pa){pa.style.display='block';pa.style.marginTop='16px';pa.scrollIntoView({behavior:'smooth',block:'nearest'})}
     for(const f of fl){
         var isDupe=false;
         if(uploadedFiles.package&&uploadedFiles.package.filename===f.name)isDupe=true;
         if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===f.name)isDupe=true;
         if(uploadedFiles.policy&&uploadedFiles.policy.filename===f.name)isDupe=true;
-        if(isDupe){var pa=document.getElementById('progress-area');pa.insertAdjacentHTML('beforeend','<div class="progress-item" style="opacity:0.6"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--yellow)">⚠ '+f.name+' already uploaded — skipped</span></div>');continue}
+        if(isDupe){if(pa)pa.insertAdjacentHTML('beforeend','<div class="progress-item" style="opacity:0.6"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--yellow)">⚠ '+f.name+' already uploaded — skipped</span></div>');continue}
         uploadFile(f);
     }
 }
 
 function uploadFile(file){
-    uploadsInProgress++;
     const pa=document.getElementById('progress-area');
+    if(!pa)return;
+    uploadsInProgress++;
     const id='u-'+Date.now()+'-'+Math.random().toString(36).substr(2,5);
     var row=document.createElement('div');row.className='progress-item';row.id=id;
     var top=document.createElement('div');top.style.cssText='display:flex;justify-content:space-between;align-items:center';
@@ -8225,20 +8227,21 @@ function uploadFile(file){
     var barOuter=document.createElement('div');barOuter.className='progress-bar-outer';
     var barInner=document.createElement('div');barInner.className='progress-bar-inner';barInner.id=id+'-bar';barInner.style.width='0%';
     barOuter.appendChild(barInner);row.appendChild(top);row.appendChild(barOuter);pa.appendChild(row);
+    row.scrollIntoView({behavior:'smooth',block:'nearest'});
     const fd=new FormData();fd.append('files',file);
     const xhr=new XMLHttpRequest();
     window['xhr_'+id]=xhr;
     cancelBtn.onclick=function(){cancelUpload(id)};
-    xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round((e.loaded/e.total)*100);document.getElementById(id+'-bar').style.width=p+'%';document.getElementById(id+'-pct').textContent=p+'%'}};
+    xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round((e.loaded/e.total)*100);var el=document.getElementById(id+'-bar');if(el)el.style.width=p+'%';el=document.getElementById(id+'-pct');if(el)el.textContent=p+'%'}};
     xhr.onload=()=>{
         delete window['xhr_'+id];
-        const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
+        const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');if(bar)bar.style.width='100%';
         var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn)}
-        else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
+        if(xhr.status===200){const d=JSON.parse(xhr.responseText);if(bar)bar.style.background='var(--green)';if(pc){pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn)}}
+        else{if(bar)bar.style.background='var(--red)';if(pc)pc.textContent='\u2717';pc.style.color='var(--red)'}
         uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
     };
-    xhr.onerror=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
+    xhr.onerror=()=>{delete window['xhr_'+id];var el=document.getElementById(id+'-bar');if(el)el.style.background='var(--red)';el=document.getElementById(id+'-pct');if(el)el.textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
     xhr.onabort=()=>{delete window['xhr_'+id];uploadsInProgress--};
     xhr.open('POST','/api/upload/takserver');xhr.send(fd);
 }
