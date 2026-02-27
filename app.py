@@ -7262,10 +7262,12 @@ def _apply_ldap_to_coreconfig():
             os.unlink(tmp)
         except Exception:
             pass
-    # Verify the file actually has the LDAP block
-    with open(coreconfig_path, 'r') as f:
-        if 'serviceAccountDN="cn=adm_ldapservice"' not in f.read():
-            return False, 'CoreConfig write did not persist (check permissions or path).'
+    # Verify the file actually has the LDAP block (use sudo grep so we see same file root wrote)
+    rv = subprocess.run(
+        ['sudo', 'grep', '-q', 'serviceAccountDN="cn=adm_ldapservice"', coreconfig_path],
+        capture_output=True, timeout=5)
+    if rv.returncode != 0:
+        return False, 'CoreConfig write did not persist. Run: sudo grep serviceAccountDN /opt/tak/CoreConfig.xml'
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
@@ -7276,8 +7278,8 @@ def _apply_ldap_to_coreconfig():
         shell=True, capture_output=True, text=True, timeout=10)
     auth_count = int(verify.stdout.strip()) if verify.stdout.strip().isdigit() else 0
     if auth_count > 0:
-        return True, f'LDAP connected and verified — TAK Server is authenticating successfully ({auth_count} binds confirmed)'
-    return True, 'LDAP connected; TAK Server restarted (LDAP bind verification pending — may take up to 60s)'
+        return True, f'LDAP connected and verified — TAK Server is authenticating successfully ({auth_count} binds confirmed). Verify: grep -q \'serviceAccountDN="cn=adm_ldapservice"\' /opt/tak/CoreConfig.xml && echo OK'
+    return True, 'LDAP connected; TAK Server restarted. Verify: grep -q \'serviceAccountDN="cn=adm_ldapservice"\' /opt/tak/CoreConfig.xml && echo OK'
 
 def _ensure_authentik_webadmin():
     """Ensure webadmin user exists in Authentik with path=users for 8446 LDAP login.
