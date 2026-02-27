@@ -7023,7 +7023,13 @@ def _ensure_ldap_flow_authentication_none():
     url = 'http://127.0.0.1:9090'
     headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
     try:
-        req = _req.Request(f'{url}/api/v3/flows/instances/ldap-authentication-flow/',
+        resp = _req.urlopen(_req.Request(f'{url}/api/v3/flows/instances/?slug=ldap-authentication-flow', headers=headers), timeout=15)
+        data = json.loads(resp.read().decode())
+        results = data.get('results', [])
+        flow_pk = results[0]['pk'] if results else None
+        if not flow_pk:
+            return False, 'LDAP flow not found. Restart Authentik (cd ~/authentik && docker compose restart) to create it from the blueprint, then try Connect again.'
+        req = _req.Request(f'{url}/api/v3/flows/instances/{flow_pk}/',
             data=json.dumps({'authentication': 'none'}).encode(), headers=headers, method='PATCH')
         _req.urlopen(req, timeout=15)
     except urllib.error.HTTPError as e:
