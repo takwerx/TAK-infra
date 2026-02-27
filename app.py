@@ -5943,27 +5943,13 @@ entries:
                 with open(coreconfig_path, 'r') as f:
                     config_content = f.read()
 
-                # Build the new auth block. CRITICAL: x509groups + caching + updateinterval=60
-                # prevent slow admin GUI and ATAK users getting kicked when webadmin logs in.
+                # Build the new auth block. Match known-good CoreConfig: ldap then File; x509* for cache.
                 auth_block = (
-                    '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
-                    ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
-                    ' x509checkRevocation="true">\n'
+                    '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
+                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" style="DS" ldapSecurityType="simple" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
+                    + ldap_pass
+                    + '" groupObjectClass="group" userObjectClass="user" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" matchGroupInChain="true" roleAttribute="memberOf" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
                     '        <File location="UserAuthenticationFile.xml"/>\n'
-                    '        <ldap url="ldap://127.0.0.1:389"'
-                    ' userstring="cn={username},ou=users,dc=takldap"'
-                    ' updateinterval="60"'
-                    ' groupprefix="cn=tak_"'
-                    ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
-                    ' matchGroupInChain="true"'
-                    f' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
-                    f' serviceAccountCredential="{ldap_pass}"'
-                    ' groupBaseRDN="ou=groups,dc=takldap"'
-                    ' userBaseRDN="ou=users,dc=takldap"'
-                    ' groupObjectClass="group" userObjectClass="user"'
-                    ' style="DS" ldapSecurityType="simple"'
-                    ' dnAttributeName="DN"'
-                    ' nameAttr="CN" roleAttribute="memberOf" adminGroup="ROLE_ADMIN"/>\n'
                     '    </auth>'
                 )
 
@@ -6978,14 +6964,14 @@ async function doUninstallAk(){
 </body></html>'''
 
 def _coreconfig_has_ldap():
-    """True if CoreConfig.xml exists and already contains the LDAP auth block."""
+    """True if CoreConfig.xml exists and already contains our LDAP auth block (serviceAccountDN is definitive)."""
     path = '/opt/tak/CoreConfig.xml'
     if not os.path.exists(path):
         return False
     try:
         with open(path, 'r') as f:
             content = f.read()
-        return 'serviceAccountDN="cn=adm_ldapservice"' in content or '<ldap url="ldap://127.0.0.1:389"' in content
+        return 'serviceAccountDN="cn=adm_ldapservice"' in content
     except Exception:
         return False
 
@@ -7232,38 +7218,30 @@ def _apply_ldap_to_coreconfig():
         shutil.copy2(coreconfig_path, backup_path)
     with open(coreconfig_path, 'r') as f:
         config_content = f.read()
-    # CRITICAL: Use exact block from run_authentik_deploy (~line 5947). Do not improvise.
-    # x509groups + x509useGroupCache + x509useGroupCacheDefaultActive = cert users auth via cert (not LDAP),
-    # group lookups from cache. updateinterval=60 = LDAP sync every 60s, not every request.
-    # Without these: slow admin GUI, ATAK users kicked when webadmin logs in.
+    # CRITICAL: Structure and order must match known-good CoreConfig (ldap then File; x509* for cache).
+    # x509groups + x509useGroupCache + updateinterval=60 prevent slow admin GUI and ATAK disconnects.
     auth_block = (
-        '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
-        ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
-        ' x509checkRevocation="true">\n'
+        '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
+        '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" style="DS" ldapSecurityType="simple" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
+        + ldap_pass
+        + '" groupObjectClass="group" userObjectClass="user" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" matchGroupInChain="true" roleAttribute="memberOf" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
         '        <File location="UserAuthenticationFile.xml"/>\n'
-        '        <ldap url="ldap://127.0.0.1:389"'
-        ' userstring="cn={username},ou=users,dc=takldap"'
-        ' updateinterval="60"'
-        ' groupprefix="cn=tak_"'
-        ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
-        ' matchGroupInChain="true"'
-        f' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
-        f' serviceAccountCredential="{ldap_pass}"'
-        ' groupBaseRDN="ou=groups,dc=takldap"'
-        ' userBaseRDN="ou=users,dc=takldap"'
-        ' groupObjectClass="group" userObjectClass="user"'
-        ' style="DS" ldapSecurityType="simple"'
-        ' dnAttributeName="DN"'
-        ' nameAttr="CN" roleAttribute="memberOf" adminGroup="ROLE_ADMIN"/>\n'
         '    </auth>'
     )
     # Match <auth>...</auth> (any indentation; TAK Server may use 2 or 4 spaces or tabs)
     new_content = re.sub(r'<auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL)
     if new_content == config_content:
-        # Regex didn't match — either already has LDAP or file format differs
-        if _coreconfig_has_ldap():
-            return True, 'CoreConfig already has LDAP'
-        return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
+        # Regex didn't match — try fallback: find <auth ...> and matching </auth> by span
+        start = config_content.find('<auth')
+        if start >= 0:
+            end_tag = config_content.find('</auth>', start)
+            if end_tag >= 0:
+                end = end_tag + len('</auth>')
+                new_content = config_content[:start] + auth_block + config_content[end:]
+        if new_content == config_content:
+            if _coreconfig_has_ldap():
+                return True, 'CoreConfig already has LDAP'
+            return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
     with open(coreconfig_path, 'w') as f:
         f.write(new_content)
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
