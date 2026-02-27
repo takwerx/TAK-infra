@@ -5653,6 +5653,7 @@ entries:
     attrs:
       name: LDAP Service account
       type: service_account
+      path: users
       password: !Context password
   - attrs:
       authentication: require_outpost
@@ -6140,7 +6141,7 @@ entries:
                     try:
                         req = urllib.request.Request(f'{ak_url}/api/v3/core/users/',
                             data=json.dumps({'username': 'adm_ldapservice', 'name': 'LDAP Service Account',
-                                'is_active': True, 'type': 'service_account'}).encode(),
+                                'is_active': True, 'type': 'service_account', 'path': 'users'}).encode(),
                             headers=ak_headers, method='POST')
                         resp = urllib.request.urlopen(req, timeout=10)
                         ldap_pk = json.loads(resp.read().decode())['pk']
@@ -7030,9 +7031,14 @@ def _ensure_authentik_ldap_service_account():
             resp = _req.urlopen(req, timeout=10)
             user_obj = json.loads(resp.read().decode())
             uid = user_obj['pk']
-        # 2. Ensure user is active
+        # 2. Ensure user is active and path is 'users' (service_account defaults to 'service-accounts' which gives wrong LDAP DN)
+        patch_fields = {}
         if user_obj and not user_obj.get('is_active', True):
-            req = _req.Request(f'{url}/api/v3/core/users/{uid}/', data=json.dumps({'is_active': True}).encode(), headers=headers, method='PATCH')
+            patch_fields['is_active'] = True
+        if user_obj and user_obj.get('path', '') != 'users':
+            patch_fields['path'] = 'users'
+        if patch_fields:
+            req = _req.Request(f'{url}/api/v3/core/users/{uid}/', data=json.dumps(patch_fields).encode(), headers=headers, method='PATCH')
             _req.urlopen(req, timeout=10)
         # 3. Set the password
         req = _req.Request(f'{url}/api/v3/core/users/{uid}/set_password/',
