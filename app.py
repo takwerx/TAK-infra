@@ -6994,11 +6994,12 @@ def _test_ldap_bind(ldap_pass):
          '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
          '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
         capture_output=True, text=True, timeout=10)
-    time.sleep(1)
+    time.sleep(2)
     r = subprocess.run(
-        'docker logs authentik-ldap-1 --since 10s 2>&1',
+        'docker logs authentik-ldap-1 --since 25s 2>&1',
         shell=True, capture_output=True, text=True, timeout=10)
-    return 'authenticated' in r.stdout and 'adm_ldapservice' in r.stdout
+    log = (r.stdout or '').lower()
+    return 'authenticated' in log and ('adm_ldapservice' in log or 'ldapservice' in log)
 
 def _ensure_ldap_flow_authentication_none():
     """Ensure ldap-authentication-flow exists with authentication:none, restart LDAP outpost.
@@ -7162,12 +7163,13 @@ def _ensure_authentik_ldap_service_account():
         # 5. Force-recreate the LDAP outpost so it picks up the new credentials
         subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
             shell=True, capture_output=True, timeout=60)
-        # 6. Wait for LDAP outpost to be healthy, then VERIFY the bind
-        for attempt in range(6):
-            time.sleep(5)
+        # 6. Wait for LDAP outpost to be ready, then VERIFY via outpost logs (ldapsearch exit code is unreliable)
+        time.sleep(10)
+        for attempt in range(10):
+            time.sleep(6)
             if _test_ldap_bind(ldap_pass):
                 return True, f'LDAP bind verified (attempt {attempt + 1})'
-        return False, f'LDAP service account created (set_password: {pw_code}) but bind verification failed after 30s — ldapsearch returns Invalid credentials'
+        return False, f'LDAP service account created (set_password: {pw_code}) but outpost logs showed no authenticated bind after ~70s. Check: docker logs authentik-ldap-1'
     except urllib.error.HTTPError as e:
         body = ''
         try:
