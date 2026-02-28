@@ -6194,7 +6194,7 @@ entries:
                     '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
                     '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
                     + ldap_pass
-                    + '" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" dnAttributeName="DN" nameAttr="CN"/>\n'
+                    + '" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
                     '        <File location="UserAuthenticationFile.xml"/>\n'
                     '    </auth>'
                 )
@@ -7499,7 +7499,8 @@ def _apply_ldap_to_coreconfig():
     ldap_line += ' groupBaseRDN="ou=groups,dc=takldap"'
     ldap_line += ' userBaseRDN="ou=users,dc=takldap"'
     ldap_line += ' dnAttributeName="DN"'
-    ldap_line += ' nameAttr="CN"/>'
+    ldap_line += ' nameAttr="CN"'
+    ldap_line += ' adminGroup="ROLE_ADMIN"/>'
     auth_block = ''
     auth_block += '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
     auth_block += ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
