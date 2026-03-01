@@ -52,6 +52,7 @@ def apply_ldap_overlay(app):
         groups = [g.strip() for g in ak_groups_raw.split('|') if g.strip()]
         role = 'admin' if any(g in ADMIN_GROUPS for g in groups) else 'viewer'
         session['username'] = ak_user
+        session['logged_in'] = True
         session['role'] = role
         session['ldap_groups'] = groups
         session['ldap_mode'] = True
