@@ -6513,6 +6513,7 @@ entries:
     id: ldap-authentication-password
   - attrs:
       case_insensitive_matching: true
+      password_stage: !KeyOf ldap-authentication-password
       pretend_user_exists: true
       show_matched_user: true
       user_fields:
