@@ -7734,9 +7734,9 @@ def _test_ldap_bind(ldap_pass):
                 ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
                  '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
                  '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
-                capture_output=True, text=True, timeout=10)
-    except (FileNotFoundError, OSError):
-        pass  # ldapsearch missing or failed; still check logs below
+                capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass  # ldapsearch missing, failed, or timed out; still check logs below
     time.sleep(2)
     r = subprocess.run(
         'docker logs authentik-ldap-1 --since 25s 2>&1',
@@ -8138,6 +8138,9 @@ def takserver_connect_ldap():
     """One-shot: fix LDAP flow auth (inside service account), ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
+        # Sanitize: subprocess errors can include -w password in the command string
+        if '-w' in msg:
+            msg = 'ldapsearch timed out or failed (check Authentik LDAP outpost logs)'
         return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
     ok, err = _ensure_authentik_webadmin()
     if not ok:
