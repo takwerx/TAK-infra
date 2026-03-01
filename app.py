@@ -3937,15 +3937,26 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
             _log("  ⚠ 'authentik Admins' group not found — skipping app access policies")
             return False
 
-        # 2) Find or create the "Allow authentik Admins" group membership policy
+        # 2) Find or create the "Allow authentik Admins" policy (group membership or expression)
         policy_name = 'Allow authentik Admins'
-        policies = _api_get(f'policies/group_membership/?search={_quote(policy_name)}')['results']
         policy_pk = None
-        for p in policies:
-            if p.get('name') == policy_name:
-                policy_pk = p['pk']
-                break
+        # Newer Authentik: policies/all/; older: policies/group_membership/
+        for list_path in ('policies/all/', 'policies/group_membership/'):
+            try:
+                data = _api_get(f'{list_path}?search={_quote(policy_name)}')
+                results = (data.get('results') if isinstance(data, dict) else None) or []
+                for p in results:
+                    if p.get('name') == policy_name:
+                        policy_pk = p['pk']
+                        break
+                if policy_pk:
+                    break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue
+                raise
         if not policy_pk:
+            # Create: try group_membership (older) then expression (newer)
             try:
                 data = _api_post('policies/group_membership/', {
                     'name': policy_name,
@@ -3954,11 +3965,30 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
                 policy_pk = data['pk']
                 _log(f"  ✓ Created policy: {policy_name}")
             except urllib.error.HTTPError as e:
-                if e.code == 400:
-                    policies = _api_get(f'policies/group_membership/?search={_quote(policy_name)}')['results']
-                    for p in policies:
-                        if p.get('name') == policy_name:
-                            policy_pk = p['pk']
+                if e.code == 404:
+                    try:
+                        data = _api_post('policies/expression/', {
+                            'name': policy_name,
+                            'expression': 'return ak_is_group_member(request.user, name="authentik Admins")',
+                        })
+                        policy_pk = data['pk']
+                        _log(f"  ✓ Created expression policy: {policy_name}")
+                    except urllib.error.HTTPError as e2:
+                        _log_http_err(e2)
+                        _log(f"  ⚠ Could not create policy: {e2.code} {e2.reason}")
+                        return False
+                elif e.code == 400:
+                    for list_path in ('policies/all/', 'policies/group_membership/'):
+                        try:
+                            data = _api_get(f'{list_path}?search={_quote(policy_name)}')
+                            for p in (data.get('results') or []):
+                                if p.get('name') == policy_name:
+                                    policy_pk = p['pk']
+                                    break
+                            if policy_pk:
+                                break
+                        except urllib.error.HTTPError:
+                            continue
                     if not policy_pk:
                         _log(f"  ⚠ Could not create policy: {e}")
                         return False
