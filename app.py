@@ -1985,10 +1985,13 @@ def run_mediamtx_deploy():
             return
         plog("✓ Dependencies installed (wget, ffmpeg, python3)")
 
-        # Install Python packages
+        # Install Python packages (try with --break-system-packages for newer pip, else without)
         plog("  Installing Python packages...")
-        subprocess.run('pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
+        r = subprocess.run('pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
             shell=True, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 and 'no such option' in (r.stderr or r.stdout or ''):
+            subprocess.run('pip3 install Flask ruamel.yaml requests psutil 2>&1',
+                shell=True, capture_output=True, text=True, timeout=120)
         plog("✓ Python packages installed")
 
         # Step 2: Detect architecture and latest version
@@ -2207,10 +2210,19 @@ WantedBy=multi-user.target
         if webeditor_src:
             import shutil as _shutil
             _shutil.copy2(webeditor_src, f'{webeditor_dir}/mediamtx_config_editor.py')
-            # Patch port to read from PORT env var instead of hardcoded 5000
-            subprocess.run(
-                f"sed -i 's/app.run(host=.0.0.0.0., port=5000/app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5080))/' {webeditor_dir}/mediamtx_config_editor.py",
-                shell=True)
+            # Patch port to read from PORT env var (systemd sets PORT=5080)
+            editor_path = f'{webeditor_dir}/mediamtx_config_editor.py'
+            try:
+                with open(editor_path, 'r') as f:
+                    lines = f.readlines()
+                for i, line in enumerate(lines):
+                    if 'app.run(' in line and 'port=5000' in line and 'os.environ.get("PORT"' not in line:
+                        lines[i] = line.replace('port=5000', 'port=int(os.environ.get("PORT", 5080))', 1)
+                        break
+                with open(editor_path, 'w') as f:
+                    f.writelines(lines)
+            except Exception:
+                pass
             # Console-deployed MediaMTX uses API port 9898 (CloudTAK uses 9997). Patch editor so "active streams" works.
             subprocess.run(f"sed -i 's/9997/9898/g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
             # When CloudTAK is installed, MediaMTX is at stream.* so "Stream URLs" in the editor should show stream. not video.
@@ -2238,12 +2250,23 @@ WantedBy=multi-user.target
                         "    apply_ldap_overlay(app)\n"
                         "# --- end LDAP overlay ---\n"
                     )
-                    # Insert before app.run() so overlay routes are registered first
-                    if 'app.run(' in editor_src and 'LDAP overlay' not in editor_src:
-                        editor_src = editor_src.replace('    app.run(', inject_block + '    app.run(', 1)
-                        with open(editor_file, 'w') as ef:
-                            ef.write(editor_src)
-                    plog("✓ LDAP overlay applied (Authentik header auth + Stream Access)")
+                    # Insert before app.run() so overlay routes are registered first (match any indentation)
+                    if 'LDAP overlay' not in editor_src:
+                        lines = editor_src.splitlines(keepends=True)
+                        for i, line in enumerate(lines):
+                            if 'app.run(' in line:
+                                lines.insert(i, '\n' + inject_block)
+                                break
+                        else:
+                            lines = None
+                        if lines is not None:
+                            with open(editor_file, 'w') as ef:
+                                ef.writelines(lines)
+                            plog("✓ LDAP overlay applied (Authentik header auth + Stream Access)")
+                        else:
+                            plog("  ⚠ app.run() not found — LDAP overlay not injected")
+                    else:
+                        plog("✓ LDAP overlay already present")
                 else:
                     plog("⚠ mediamtx_ldap_overlay.py not found next to app.py — LDAP overlay skipped")
         else:
@@ -2305,6 +2328,19 @@ WantedBy=multi-user.target
         with open('/etc/systemd/system/mediamtx-webeditor.service', 'w') as f:
             f.write(webeditor_svc)
         plog("✓ mediamtx-webeditor.service created")
+
+        # Ensure web editor Python deps (Flask, etc.) so systemd can start it even if Step 1 pip failed
+        if os.path.exists(f'{webeditor_dir}/mediamtx_config_editor.py'):
+            r = subprocess.run(
+                'pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
+                shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 and 'no such option' in (r.stderr or r.stdout or ''):
+                r = subprocess.run('pip3 install Flask ruamel.yaml requests psutil 2>&1',
+                    shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                plog("  ⚠ pip install for web editor deps had issues (check logs); trying to start anyway")
+            else:
+                plog("  ✓ Web editor Python deps installed")
 
         subprocess.run('systemctl daemon-reload', shell=True, capture_output=True)
         subprocess.run('systemctl enable mediamtx mediamtx-webeditor', shell=True, capture_output=True)
