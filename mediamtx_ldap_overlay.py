@@ -92,6 +92,54 @@ def apply_ldap_overlay(app):
             if request.path not in VIEWER_ALLOWED and not request.path.startswith('/static'):
                 return redirect('/viewer')
 
+    # ── HLS helpers ─────────────────────────────────────────────────────
+
+    CONFIG_FILE = os.environ.get('MEDIAMTX_CONFIG', '/usr/local/etc/mediamtx.yml')
+
+    def _get_hlsviewer_credential():
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                lines = f.readlines()
+            for i, line in enumerate(lines):
+                if 'user: hlsviewer' in line:
+                    for j in range(i + 1, min(i + 10, len(lines))):
+                        if 'pass:' in lines[j]:
+                            pw = lines[j].strip().split(':', 1)[1].strip()
+                            if pw:
+                                return {'username': 'hlsviewer', 'password': pw}
+                    break
+        except Exception:
+            pass
+        return None
+
+    def _get_streaming_domain():
+        import re as _re
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                lines = f.readlines()
+            hls_enc = False
+            domain = None
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith('hlsEncryption:'):
+                    if s.split(':', 1)[1].strip().lower() in ('yes', 'true'):
+                        hls_enc = True
+                if 'hlsServerCert:' in line:
+                    cert = line.split(':', 1)[1].strip() if ':' in line else ''
+                    if not cert and i + 1 < len(lines):
+                        nxt = lines[i + 1].strip()
+                        if nxt and not nxt.startswith('#'):
+                            cert = nxt
+                    if cert:
+                        m = _re.search(r'/([a-z0-9.-]+\.[a-z]{2,})/\1\.crt', cert)
+                        if m:
+                            domain = m.group(1)
+            if domain:
+                return {'domain': domain, 'protocol': 'https' if hls_enc else 'http'}
+        except Exception:
+            pass
+        return {'domain': None, 'protocol': 'http'}
+
     # ── Active Streams viewer page (vid_public / vid_private) ────────────
 
     @app.route('/viewer')
@@ -100,6 +148,15 @@ def apply_ldap_overlay(app):
             return redirect('/')
         return Response(ACTIVE_STREAMS_VIEWER_HTML, content_type='text/html')
 
+    @app.route('/api/viewer/hlscred')
+    def api_viewer_hlscred():
+        if session.get('role') not in ('viewer', 'admin'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        cred = _get_hlsviewer_credential()
+        if cred:
+            return jsonify(cred)
+        return jsonify({'error': 'hlsviewer credential not found'}), 404
+
     @app.route('/api/viewer/streams')
     def api_viewer_streams():
         if session.get('role') != 'viewer':
@@ -107,6 +164,13 @@ def apply_ldap_overlay(app):
         try:
             user_groups = set(session.get('ldap_groups') or [])
             can_see_private = bool(user_groups & {'vid_private'})
+
+            streaming = _get_streaming_domain()
+            if streaming['domain']:
+                hls_base = f"{streaming['protocol']}://{streaming['domain']}:8888"
+            else:
+                host = request.host.split(':')[0]
+                hls_base = f"http://{host}:8888"
 
             api_url = os.environ.get('MEDIAMTX_API_URL', 'http://127.0.0.1:9898')
             req = urllib.request.Request(f'{api_url.rstrip("/")}/v3/paths/list', headers={'Accept': 'application/json'})
@@ -129,6 +193,7 @@ def apply_ldap_overlay(app):
                     'ready': ready,
                     'available': available,
                     'visibility': level,
+                    'hls_url': f"{hls_base}/{name}/index.m3u8",
                 })
             return jsonify({'streams': streams})
         except Exception as e:
@@ -456,46 +521,36 @@ ACTIVE_STREAMS_VIEWER_HTML = r'''<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Active Streams — MediaMTX</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --bg:#121212;--surface:#1e1e1e;--surface2:#2a2a2a;--border:#333;
-  --text:#e0e0e0;--text-dim:#888;--text-faint:#555;
-  --accent:#00bcd4;--accent-hover:#00acc1;--success:#22c55e;--blue:#2196F3;--blue-hover:#1976D2;
-}
-body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
-.header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#121212;color:#e0e0e0;min-height:100vh;line-height:1.5}
+.header{background:#1e1e1e;border-bottom:1px solid #333;padding:16px 24px}
 .header h1{font-size:20px;font-weight:600}
-.header .subtitle{color:var(--text-dim);font-size:13px;margin-top:4px}
-.container{max-width:900px;margin:0 auto;padding:24px}
-.stream-list{display:flex;flex-direction:column;gap:10px}
-.stream-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px}
-.stream-card.live{border-left:4px solid var(--success)}
-.stream-info{flex:1;min-width:0}
-.stream-name{font-weight:500;font-size:15px;font-family:monospace}
-.stream-meta{display:flex;align-items:center;gap:8px;margin-top:4px}
-.stream-badge{font-size:11px;color:var(--success);text-transform:uppercase;font-weight:600}
-.vis-badge{font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600}
-.vis-public{background:rgba(34,197,94,.15);color:var(--success)}
-.vis-private{background:rgba(59,130,246,.15);color:var(--blue)}
-.btn-group{display:flex;gap:8px;flex-shrink:0}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:background .15s,opacity .15s}
-.btn-watch{background:var(--success);color:#fff}
-.btn-watch:hover{background:#16a34a}
-.btn-copy{background:var(--blue);color:#fff}
-.btn-copy:hover{background:var(--blue-hover)}
-.loading{text-align:center;padding:48px 20px;color:var(--text-dim)}
-.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+.header .subtitle{color:#888;font-size:13px;margin-top:4px}
+.container{max-width:960px;margin:0 auto;padding:24px}
+table{width:100%;border-collapse:collapse;background:#1e1e1e;border-radius:8px;overflow:hidden}
+th{background:#2a2a2a;text-align:left;padding:12px;font-size:13px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+td{padding:12px;border-top:1px solid #333}
+.stream-name{font-weight:500;font-family:monospace;font-size:14px}
+.badge-live{display:inline-block;background:#22c55e;color:#fff;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700;text-transform:uppercase;vertical-align:middle;margin-left:8px}
+.badge-private{display:inline-block;background:rgba(59,130,246,.15);color:#3b82f6;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700;vertical-align:middle;margin-left:4px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s}
+.btn-watch{background:#4CAF50;color:#fff}
+.btn-watch:hover{background:#43a047}
+.btn-copy{background:#2196F3;color:#fff;margin-left:6px}
+.btn-copy:hover{background:#1976D2}
+.loading{text-align:center;padding:48px 20px;color:#888}
+.spinner{width:32px;height:32px;border:3px solid #333;border-top-color:#00bcd4;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.empty-state{text-align:center;padding:48px 20px;color:var(--text-dim)}
-.empty-state .material-symbols-outlined{font-size:42px;margin-bottom:12px;color:var(--text-faint)}
-.toast{position:fixed;top:20px;right:20px;background:var(--success);color:#fff;padding:10px 20px;border-radius:6px;font-weight:600;font-size:13px;z-index:10000;opacity:0;transition:opacity .2s}
-.toast.show{opacity:1}
+.empty{text-align:center;padding:48px 20px;color:#888}
+.empty p{margin-top:8px}
 @media(max-width:640px){
-  .stream-card{flex-direction:column;align-items:stretch;gap:12px}
-  .btn-group{flex-direction:column}
-  .btn{justify-content:center;padding:12px 16px;font-size:15px}
+  table,thead,tbody,th,td,tr{display:block}
+  thead{display:none}
+  tr{margin-bottom:12px;background:#1e1e1e;border-radius:8px;border:1px solid #333;padding:12px}
+  td{border:none;padding:6px 0}
+  td:last-child{margin-top:10px;display:flex;gap:8px}
+  .btn{flex:1;justify-content:center;padding:12px}
 }
 </style>
 </head>
@@ -509,21 +564,52 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     <div class="loading"><div class="spinner"></div><div>Loading streams...</div></div>
   </div>
 </div>
-<div id="toast" class="toast"></div>
 <script>
+var hlsCred=null;
+fetch('/api/viewer/hlscred').then(function(r){return r.json()}).then(function(d){if(d.username&&d.password)hlsCred=d}).catch(function(){});
+
 function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 
-function showToast(msg){
-  var t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  setTimeout(function(){t.classList.remove('show')},2000);
+function watchStream(hlsUrl,name){
+  if(!hlsCred){alert('Viewer credential not loaded. Please refresh the page.');return;}
+  var w=1280,h=720,l=(screen.width-w)/2,t=(screen.height-h)/2;
+  var popup=window.open('','streamViewer_'+name,
+    'width='+w+',height='+h+',left='+l+',top='+t+',toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=no,resizable=yes');
+  if(!popup){window.open('/watch/'+encodeURIComponent(name),'_blank');return;}
+  popup.document.write('<!DOCTYPE html><html><head><title>'+escapeHtml(name)+' - Live</title>'
+    +'<style>*{margin:0;padding:0}body{background:#000;overflow:hidden}#p{width:100vw;height:100vh;object-fit:contain}'
+    +'#err{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.9);z-index:100;justify-content:center;align-items:center;flex-direction:column;text-align:center;color:#fff}'
+    +'#err h2{font-size:1.5rem;margin-bottom:10px}#err p{color:#999}</style>'
+    +'<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script></head><body>'
+    +'<video id="p" controls autoplay muted playsinline></video>'
+    +'<div id="err"><h2>Stream Offline</h2><p>Waiting for stream... auto-reconnecting.</p></div>'
+    +'<script>'
+    +'var video=document.getElementById("p"),err=document.getElementById("err");'
+    +'var url="'+hlsUrl+'",user="'+hlsCred.username+'",pass="'+hlsCred.password+'";'
+    +'function start(){'
+    +'if(Hls.isSupported()){'
+    +'var hls=new Hls({enableWorker:true,lowLatencyMode:true,backBufferLength:90,'
+    +'xhrSetup:function(xhr){xhr.setRequestHeader("Authorization","Basic "+btoa(user+":"+pass))}});'
+    +'hls.loadSource(url);hls.attachMedia(video);'
+    +'hls.on(Hls.Events.MANIFEST_PARSED,function(){err.style.display="none";video.play().catch(function(){})});'
+    +'hls.on(Hls.Events.ERROR,function(ev,data){if(data.fatal){err.style.display="flex";setTimeout(function(){hls.destroy();start()},5000)}});'
+    +'}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.addEventListener("loadedmetadata",function(){video.play().catch(function(){})})}'
+    +'}'
+    +'start();'
+    +'<\/script></body></html>');
+  popup.document.close();
 }
 
 function copyLink(name){
   var url=window.location.origin+'/watch/'+encodeURIComponent(name);
-  navigator.clipboard.writeText(url).then(function(){showToast('Link copied!')}).catch(function(){
-    var inp=document.createElement('input');inp.value=url;document.body.appendChild(inp);inp.select();document.execCommand('copy');document.body.removeChild(inp);showToast('Link copied!');
+  navigator.clipboard.writeText(url).then(function(){showCopied(event)}).catch(function(){
+    var inp=document.createElement('input');inp.value=url;document.body.appendChild(inp);inp.select();document.execCommand('copy');document.body.removeChild(inp);
   });
+}
+function showCopied(e){
+  var btn=e&&e.target;if(!btn)return;
+  var orig=btn.innerHTML;btn.textContent='\u2705 Copied!';btn.style.background='#4CAF50';
+  setTimeout(function(){btn.innerHTML=orig;btn.style.background='#2196F3'},2000);
 }
 
 (async function(){
@@ -534,30 +620,29 @@ function copyLink(name){
     if(!r.ok)throw new Error(data.error||'Failed to load streams');
     var streams=(data.streams||[]).filter(function(s){return s.ready||s.available});
     if(streams.length===0){
-      content.innerHTML='<div class="empty-state"><span class="material-symbols-outlined">videocam_off</span><p>No active streams right now.</p><p style="margin-top:8px;font-size:13px">When someone publishes a stream, it will appear here.</p></div>';
+      content.innerHTML='<div class="empty"><p style="font-size:42px;color:#555">&#x1F4F9;</p><p>No active streams right now.</p><p style="font-size:13px">When someone publishes a stream, it will appear here.</p></div>';
       return;
     }
-    var html='<div class="stream-list">';
+    var html='<table><thead><tr><th>Stream</th><th style="text-align:center">Viewers</th><th style="text-align:center">Actions</th></tr></thead><tbody>';
     for(var i=0;i<streams.length;i++){
       var s=streams[i];
       var name=s.name||'';
       var vis=s.visibility||'public';
-      var watchUrl='/watch/'+encodeURIComponent(name);
-      html+='<div class="stream-card live">';
-      html+='<div class="stream-info">';
-      html+='<div class="stream-name">'+escapeHtml(name)+'</div>';
-      html+='<div class="stream-meta"><span class="stream-badge">Live</span>';
-      if(vis==='private'){html+='<span class="vis-badge vis-private">PRIVATE</span>';}
-      html+='</div></div>';
-      html+='<div class="btn-group">';
-      html+='<a href="'+escapeHtml(watchUrl)+'" class="btn btn-watch" target="_blank" rel="noopener"><span class="material-symbols-outlined" style="font-size:18px">play_circle</span>Watch</a>';
-      html+='<button class="btn btn-copy" onclick="copyLink(\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span class="material-symbols-outlined" style="font-size:18px">link</span>Copy Link</button>';
-      html+='</div></div>';
+      var hlsUrl=s.hls_url||'';
+      html+='<tr>';
+      html+='<td><span class="stream-name">'+escapeHtml(name)+'</span><span class="badge-live">Live</span>';
+      if(vis==='private')html+='<span class="badge-private">Private</span>';
+      html+='</td>';
+      html+='<td style="text-align:center;color:#888">—</td>';
+      html+='<td style="text-align:center;white-space:nowrap">';
+      html+='<button class="btn btn-watch" onclick="watchStream(\''+escapeHtml(hlsUrl).replace(/'/g,"\\'")+'\',\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span style="font-size:16px">&#x25B6;&#xFE0F;</span> Watch</button>';
+      html+='<button class="btn btn-copy" onclick="copyLink(\''+escapeHtml(name).replace(/'/g,"\\'")+'\');showCopied(event)">&#x1F4CB; Copy Link</button>';
+      html+='</td></tr>';
     }
-    html+='</div>';
+    html+='</tbody></table>';
     content.innerHTML=html;
   }catch(err){
-    content.innerHTML='<div class="empty-state"><span class="material-symbols-outlined">error</span><p>'+escapeHtml(err.message)+'</p></div>';
+    content.innerHTML='<div class="empty"><p>'+escapeHtml(err.message)+'</p></div>';
   }
 })();
 </script>
