@@ -184,7 +184,8 @@ def apply_ldap_overlay(app):
             return jsonify({'error': 'Unauthorized'}), 403
         try:
             data = request.get_json()
-            user_pk = data['user_pk']
+            raw_pk = data['user_pk']
+            user_pk = int(raw_pk) if str(raw_pk).isdigit() else raw_pk
             group_pk = data['group_pk']
             action = data['action']
             if action == 'add':
@@ -210,7 +211,8 @@ def apply_ldap_overlay(app):
             return jsonify({'error': 'Unauthorized'}), 403
         try:
             data = request.get_json()
-            user_pk = data['user_pk']
+            raw_pk = data['user_pk']
+            user_pk = int(raw_pk) if str(raw_pk).isdigit() else raw_pk
             payload = {}
             if 'name' in data:
                 payload['name'] = data['name']
@@ -236,7 +238,8 @@ def apply_ldap_overlay(app):
             return jsonify({'error': 'Unauthorized'}), 403
         try:
             data = request.get_json()
-            user_pk = data['user_pk']
+            raw_pk = data['user_pk']
+            user_pk = int(raw_pk) if str(raw_pk).isdigit() else raw_pk
             is_active = data['is_active']
             _ak_patch(f'core/users/{user_pk}/', {'is_active': is_active})
             return jsonify({'ok': True})
@@ -256,7 +259,8 @@ def apply_ldap_overlay(app):
             return jsonify({'error': 'Unauthorized'}), 403
         try:
             data = request.get_json()
-            user_pk = data['user_pk']
+            raw_pk = data['user_pk']
+            user_pk = int(raw_pk) if str(raw_pk).isdigit() else raw_pk
             _ak_delete(f'core/users/{user_pk}/')
             return jsonify({'ok': True})
         except urllib.error.HTTPError as e:
