@@ -6575,6 +6575,7 @@ entries:
     identifiers:
       name: LDAP
     attrs:
+      authentication_flow: !KeyOf ldap-authentication-flow
       authorization_flow: !KeyOf ldap-authentication-flow
       base_dn: !Context basedn
       bind_mode: cached
@@ -7021,10 +7022,12 @@ entries:
                     else:
                         # Create LDAP provider
                         ldap_provider_pk = None
+                        ldap_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'ldap-authentication-flow'), None)
+                        ldap_bind_flow = ldap_flow_pk or auth_flow_pk
                         try:
                             req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
-                                data=json.dumps({'name': 'LDAP', 'authentication_flow': auth_flow_pk,
-                                    'authorization_flow': auth_flow_pk, 'invalidation_flow': inv_flow_pk,
+                                data=json.dumps({'name': 'LDAP', 'authentication_flow': ldap_bind_flow,
+                                    'authorization_flow': ldap_bind_flow, 'invalidation_flow': inv_flow_pk,
                                     'base_dn': 'DC=takldap', 'bind_mode': 'cached',
                                     'search_mode': 'cached', 'mfa_support': False}).encode(),
                                 headers=ak_headers, method='POST')
@@ -8010,6 +8013,16 @@ def _ensure_ldap_flow_authentication_none():
                                 pass
                 else:
                     return False, f'LDAP stages not found/created: id={id_stage} pw={pw_stage} login={login_stage}'
+            # Ensure LDAP provider's authentication_flow points to ldap-authentication-flow (not default)
+            try:
+                providers = _get('providers/ldap/?search=LDAP').get('results', [])
+                ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
+                if ldap_prov:
+                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', {
+                        'authentication_flow': ldap_flow_pk,
+                        'authorization_flow': ldap_flow_pk})
+            except Exception:
+                pass
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
@@ -8047,7 +8060,9 @@ def _ensure_ldap_flow_authentication_none():
             providers = _get('providers/ldap/?search=LDAP').get('results', [])
             ldap_provider = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
             if ldap_provider:
-                _patch(f'providers/ldap/{ldap_provider["pk"]}/', {'authorization_flow': new_flow_pk})
+                _patch(f'providers/ldap/{ldap_provider["pk"]}/', {
+                    'authentication_flow': new_flow_pk,
+                    'authorization_flow': new_flow_pk})
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode()[:200]
