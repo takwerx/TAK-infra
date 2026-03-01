@@ -21,6 +21,21 @@ VID_GROUPS = ('vid_private', 'vid_public')
 ADMIN_GROUPS = frozenset({'authentik Admins'})
 VIEWER_GROUPS = frozenset({'vid_private', 'vid_public'})
 
+VISIBILITY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stream_visibility.json')
+
+
+def _load_visibility():
+    try:
+        with open(VISIBILITY_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_visibility(data):
+    with open(VISIBILITY_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
 
 def _ak_headers():
     return {'Authorization': f'Bearer {AK_TOKEN}', 'Content-Type': 'application/json'}
@@ -90,12 +105,15 @@ def apply_ldap_overlay(app):
         if session.get('role') != 'viewer':
             return jsonify({'error': 'Unauthorized'}), 403
         try:
+            user_groups = set(session.get('ldap_groups') or [])
+            can_see_private = bool(user_groups & {'vid_private'})
+
             api_url = os.environ.get('MEDIAMTX_API_URL', 'http://127.0.0.1:9898')
             req = urllib.request.Request(f'{api_url.rstrip("/")}/v3/paths/list', headers={'Accept': 'application/json'})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
             items = data.get('items') or []
-            # Only show paths that are ready/available (active). TODO: filter by session['ldap_groups'] and path-to-group mapping so vid_public vs vid_private see different streams.
+            vis = _load_visibility()
             streams = []
             for p in items:
                 name = p.get('name') or p.get('confName') or ''
@@ -103,10 +121,14 @@ def apply_ldap_overlay(app):
                     continue
                 ready = p.get('ready', False)
                 available = p.get('available', True)
+                level = vis.get(name, 'public')
+                if level == 'private' and not can_see_private:
+                    continue
                 streams.append({
                     'name': name,
                     'ready': ready,
                     'available': available,
+                    'visibility': level,
                 })
             return jsonify({'streams': streams})
         except Exception as e:
@@ -119,6 +141,33 @@ def apply_ldap_overlay(app):
         if session.get('role') != 'admin':
             return redirect('/viewer')
         return Response(STREAM_ACCESS_HTML, content_type='text/html')
+
+    # ── Stream Visibility API ────────────────────────────────────────────
+
+    @app.route('/api/stream-visibility')
+    def api_stream_visibility_get():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        return jsonify(_load_visibility())
+
+    @app.route('/api/stream-visibility', methods=['POST'])
+    def api_stream_visibility_set():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            data = request.get_json()
+            stream = data.get('stream', '').strip()
+            level = data.get('level', 'public').strip().lower()
+            if not stream:
+                return jsonify({'error': 'Stream name required'}), 400
+            if level not in ('public', 'private'):
+                return jsonify({'error': 'Level must be public or private'}), 400
+            vis = _load_visibility()
+            vis[stream] = level
+            _save_visibility(vis)
+            return jsonify({'ok': True, 'stream': stream, 'level': level})
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
 
     # ── Stream Access API ───────────────────────────────────────────────
 
@@ -310,6 +359,67 @@ def apply_ldap_overlay(app):
                 'if(t.indexOf("Account")!==-1){b.style.display="none"}'
                 '});'
                 '});'
+                '</script>'
+                '<script>'
+                '(function(){'
+                'var _visCache={};'
+                'function _loadVis(){fetch("/api/stream-visibility").then(function(r){return r.json()}).then(function(d){_visCache=d||{}}).catch(function(){})}'
+                'function _toggleVis(name,btn){'
+                'var cur=_visCache[name]||"public";'
+                'var next=cur==="public"?"private":"public";'
+                'btn.disabled=true;btn.style.opacity="0.5";'
+                'fetch("/api/stream-visibility",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({stream:name,level:next})})'
+                '.then(function(r){return r.json()}).then(function(d){'
+                'if(d.ok){_visCache[name]=next;_updateBadge(btn,next)}'
+                'btn.disabled=false;btn.style.opacity="1";'
+                '}).catch(function(){btn.disabled=false;btn.style.opacity="1"})}'
+                'function _updateBadge(btn,level){'
+                'if(level==="private"){'
+                'btn.textContent="PRIVATE";btn.style.background="#dc2626";btn.style.color="#fff";btn.title="Only vid_private viewers can see this stream. Click to make public."'
+                '}else{'
+                'btn.textContent="PUBLIC";btn.style.background="#16a34a";btn.style.color="#fff";btn.title="All viewers can see this stream. Click to make private."'
+                '}}'
+                'function _injectBadges(){'
+                'var list=document.getElementById("external-sources-list");'
+                'if(!list)return;'
+                'var cards=list.querySelectorAll("[data-source-name]");'
+                'if(!cards.length){var rows=list.querySelectorAll("tr[data-name],div[data-name],.source-card,.source-item");cards=rows}'
+                'if(!cards.length){'
+                'var btns=list.querySelectorAll("button,h4,h3,strong");'
+                'btns.forEach(function(el){'
+                'var nameEl=el.closest("[data-source-name]")||el.closest("tr")||el.closest("div");'
+                'if(!nameEl)return;'
+                'var name=nameEl.getAttribute("data-source-name")||nameEl.getAttribute("data-name");'
+                'if(!name){var t=nameEl.querySelector("strong,h4,code");if(t)name=t.textContent.trim()}'
+                'if(!name||nameEl.querySelector(".vis-badge"))return;'
+                'var btn=document.createElement("button");'
+                'btn.className="vis-badge";'
+                'btn.style.cssText="margin-left:8px;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:none;vertical-align:middle;";'
+                'var level=_visCache[name]||"public";'
+                '_updateBadge(btn,level);'
+                'btn.onclick=function(e){e.stopPropagation();_toggleVis(name,btn)};'
+                'el.after(btn);'
+                '})}'
+                'else{'
+                'cards.forEach(function(card){'
+                'var name=card.getAttribute("data-source-name")||card.getAttribute("data-name");'
+                'if(!name||card.querySelector(".vis-badge"))return;'
+                'var target=card.querySelector("h4,h3,strong,.source-name")||card;'
+                'var btn=document.createElement("button");'
+                'btn.className="vis-badge";'
+                'btn.style.cssText="margin-left:8px;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:none;vertical-align:middle;";'
+                'var level=_visCache[name]||"public";'
+                '_updateBadge(btn,level);'
+                'btn.onclick=function(e){e.stopPropagation();_toggleVis(name,btn)};'
+                'target.appendChild(btn);'
+                '})}'
+                '}'
+                '_loadVis();'
+                'var _obs=new MutationObserver(function(){_injectBadges()});'
+                'var _el=document.getElementById("external-sources-list");'
+                'if(_el)_obs.observe(_el,{childList:true,subtree:true});'
+                'setInterval(function(){_injectBadges()},2000);'
+                '})();'
                 '</script>'
             )
             idx = html.rfind('</body>')
