@@ -521,35 +521,30 @@ def _caddy_configured_urls(settings, modules):
     fqdn = settings.get('fqdn', '').strip()
     if not fqdn:
         return []
-    base = f'https://{fqdn}'
+    sd = _get_all_service_domains(settings)
     urls = []
-    # infra-TAK (single URL: login + console; behind Authentik when installed)
     ak = modules.get('authentik', {})
     infratak_desc = 'Console (Authentik when enabled)' if ak.get('installed') else 'Console (after login)'
-    urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': infratak_desc})
+    urls.append({'name': 'infra-TAK', 'host': sd['infratak'], 'url': f'https://{sd["infratak"]}', 'desc': infratak_desc})
     tak = modules.get('takserver', {})
     if tak.get('installed'):
-        urls.append({'name': 'TAK Server', 'host': f'tak.{fqdn}', 'url': f'https://tak.{fqdn}', 'desc': 'WebGUI, Marti API'})
-    ak = modules.get('authentik', {})
+        urls.append({'name': 'TAK Server', 'host': sd['takserver'], 'url': f'https://{sd["takserver"]}', 'desc': 'WebGUI, Marti API'})
     if ak.get('installed'):
-        urls.append({'name': 'Authentik', 'host': f'authentik.{fqdn}', 'url': f'https://authentik.{fqdn}', 'desc': 'Identity provider'})
+        urls.append({'name': 'Authentik', 'host': sd['authentik'], 'url': f'https://{sd["authentik"]}', 'desc': 'Identity provider'})
     portal = modules.get('takportal', {})
     if portal.get('installed'):
-        urls.append({'name': 'TAK Portal', 'host': f'takportal.{fqdn}', 'url': f'https://takportal.{fqdn}', 'desc': 'User & cert management'})
+        urls.append({'name': 'TAK Portal', 'host': sd['takportal'], 'url': f'https://{sd["takportal"]}', 'desc': 'User & cert management'})
     nodered = modules.get('nodered', {})
     if nodered.get('installed'):
-        urls.append({'name': 'Node-RED', 'host': f'nodered.{fqdn}', 'url': f'https://nodered.{fqdn}', 'desc': 'Flow editor (Authentik when enabled)'})
+        urls.append({'name': 'Node-RED', 'host': sd['nodered'], 'url': f'https://{sd["nodered"]}', 'desc': 'Flow editor (Authentik when enabled)'})
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
-        urls.append({'name': 'CloudTAK (map)', 'host': f'map.{fqdn}', 'url': f'https://map.{fqdn}', 'desc': 'Browser TAK client'})
-        urls.append({'name': 'CloudTAK (tiles)', 'host': f'tiles.map.{fqdn}', 'url': f'https://tiles.map.{fqdn}', 'desc': 'Tile server'})
-        urls.append({'name': 'CloudTAK (video)', 'host': f'video.{fqdn}', 'url': f'https://video.{fqdn}', 'desc': 'Map video / HLS'})
+        urls.append({'name': 'CloudTAK (map)', 'host': sd['cloudtak_map'], 'url': f'https://{sd["cloudtak_map"]}', 'desc': 'Browser TAK client'})
+        urls.append({'name': 'CloudTAK (tiles)', 'host': sd['cloudtak_tiles'], 'url': f'https://{sd["cloudtak_tiles"]}', 'desc': 'Tile server'})
+        urls.append({'name': 'CloudTAK (video)', 'host': sd['cloudtak_video'], 'url': f'https://{sd["cloudtak_video"]}', 'desc': 'Map video / HLS'})
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
-        mtx_host = settings.get('mediamtx_domain', f'stream.{fqdn}')
-        if '.' not in mtx_host:
-            mtx_host = f'{mtx_host}.{fqdn}'
-        urls.append({'name': 'MediaMTX', 'host': mtx_host, 'url': f'https://{mtx_host}', 'desc': 'Stream web console & HLS'})
+        urls.append({'name': 'MediaMTX', 'host': sd['mediamtx'], 'url': f'https://{sd["mediamtx"]}', 'desc': 'Stream web console & HLS'})
     return urls
 
 @app.route('/caddy')
@@ -707,9 +702,90 @@ def caddy_uninstall():
     caddy_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
 
+@app.route('/api/caddy/domains', methods=['GET'])
+@login_required
+def caddy_get_domains():
+    """Return current per-service domains and which services are installed."""
+    settings = load_settings()
+    modules = detect_modules()
+    sd = _get_all_service_domains(settings)
+    fqdn = settings.get('fqdn', '')
+    services = []
+    svc_defs = [
+        ('infratak', 'infra-TAK', 'infratak', True),
+        ('takserver', 'TAK Server', 'takserver', modules.get('takserver', {}).get('installed', False)),
+        ('authentik', 'Authentik', 'authentik', modules.get('authentik', {}).get('installed', False)),
+        ('takportal', 'TAK Portal', 'takportal', modules.get('takportal', {}).get('installed', False)),
+        ('nodered', 'Node-RED', 'nodered', modules.get('nodered', {}).get('installed', False)),
+        ('cloudtak_map', 'CloudTAK Map', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('cloudtak_tiles', 'CloudTAK Tiles', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('cloudtak_video', 'CloudTAK Video', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('mediamtx', 'MediaMTX', 'mediamtx', modules.get('mediamtx', {}).get('installed', False)),
+    ]
+    for key, label, mod_key, installed in svc_defs:
+        setting_key = f'{key}_domain' if key != 'mediamtx' else 'mediamtx_domain'
+        custom = settings.get(setting_key, '')
+        services.append({
+            'key': key, 'label': label, 'domain': sd[key],
+            'default': f'{SERVICE_DOMAIN_DEFAULTS[key]}.{fqdn}' if fqdn else '',
+            'custom': custom, 'installed': installed,
+        })
+    return jsonify({'fqdn': fqdn, 'services': services})
+
+@app.route('/api/caddy/domains', methods=['POST'])
+@login_required
+def caddy_save_domains():
+    """Save per-service domain overrides and regenerate Caddyfile."""
+    data = request.get_json() or {}
+    domains = data.get('domains', {})
+    settings = load_settings()
+    fqdn = settings.get('fqdn', '')
+    for key in SERVICE_DOMAIN_DEFAULTS:
+        setting_key = f'{key}_domain' if key != 'mediamtx' else 'mediamtx_domain'
+        if key in domains:
+            val = domains[key].strip().lower()
+            default_val = f'{SERVICE_DOMAIN_DEFAULTS[key]}.{fqdn}' if fqdn else ''
+            if val and val != default_val:
+                settings[setting_key] = val
+            elif setting_key in settings:
+                del settings[setting_key]
+    save_settings(settings)
+    generate_caddyfile(settings)
+    threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
+    return jsonify({'success': True, 'domains': _get_all_service_domains(settings)})
+
+SERVICE_DOMAIN_DEFAULTS = {
+    'infratak': 'infratak',
+    'takserver': 'tak',
+    'authentik': 'authentik',
+    'takportal': 'takportal',
+    'nodered': 'nodered',
+    'cloudtak_map': 'map',
+    'cloudtak_tiles': 'tiles.map',
+    'cloudtak_video': 'video',
+    'mediamtx': 'stream',
+}
+
+def _get_service_domain(settings, service_key):
+    """Get domain for a service: custom override from settings, or default prefix.{fqdn}."""
+    setting_key = f'{service_key}_domain' if service_key != 'mediamtx' else 'mediamtx_domain'
+    custom = settings.get(setting_key, '').strip()
+    if custom:
+        if '.' not in custom:
+            fqdn = settings.get('fqdn', '').strip()
+            return f'{custom}.{fqdn}' if fqdn else custom
+        return custom
+    fqdn = settings.get('fqdn', '').strip()
+    prefix = SERVICE_DOMAIN_DEFAULTS.get(service_key, service_key)
+    return f'{prefix}.{fqdn}' if fqdn else ''
+
+def _get_all_service_domains(settings):
+    """Return dict of service_key → current domain for all services."""
+    return {k: _get_service_domain(settings, k) for k in SERVICE_DOMAIN_DEFAULTS}
+
 def generate_caddyfile(settings=None):
     """Generate Caddyfile based on current settings and deployed services.
-    Each service gets its own subdomain: infratak.domain, tak.domain, etc. (console removed — use infratak)."""
+    Each service gets its own domain (customizable per-service, defaults to subdomain of base FQDN)."""
     if settings is None:
         settings = load_settings()
     domain = settings.get('fqdn', '')
@@ -718,12 +794,12 @@ def generate_caddyfile(settings=None):
     modules = detect_modules()
 
     lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
+    sd = _get_all_service_domains(settings)
 
     ak = modules.get('authentik', {})
     nodered = modules.get('nodered', {})
-    # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
-    # Only /login* skips forward_auth so console password / backdoor works; / and all other paths go through Authentik
-    lines.append(f"infratak.{domain} {{")
+    infratak_host = sd['infratak']
+    lines.append(f"{infratak_host} {{")
     if ak.get('installed'):
         lines.append(f"    route /login* {{")
         lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
@@ -763,10 +839,10 @@ def generate_caddyfile(settings=None):
     lines.append(f"}}")
     lines.append("")
 
-    # Node-RED — nodered.domain (behind Authentik when Authentik is installed)
     if nodered.get('installed'):
+        nodered_host = sd['nodered']
         lines.append(f"# Node-RED flow editor")
-        lines.append(f"nodered.{domain} {{")
+        lines.append(f"{nodered_host} {{")
         if ak.get('installed'):
             lines.append(f"    route {{")
             lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
@@ -781,36 +857,36 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # TAK Server — tak.domain
     tak = modules.get('takserver', {})
     if tak.get('installed'):
+        tak_host = sd['takserver']
         lines.append(f"# TAK Server")
-        lines.append(f"tak.{domain} {{")
+        lines.append(f"{tak_host} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:8446 {{")
         lines.append(f"        transport http {{")
         lines.append(f"            tls")
         lines.append(f"            tls_insecure_skip_verify")
         lines.append(f"        }}")
-        lines.append(f"        header_down Location 127.0.0.1:8446 tak.{domain}")
+        lines.append(f"        header_down Location 127.0.0.1:8446 {tak_host}")
         lines.append(f"        header_down Location http:// https://")
         lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
 
-    # Authentik — authentik.domain
     ak = modules.get('authentik', {})
     if ak.get('installed'):
+        ak_host = sd['authentik']
         lines.append(f"# Authentik")
-        lines.append(f"authentik.{domain} {{")
+        lines.append(f"{ak_host} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:9090")
         lines.append(f"}}")
         lines.append("")
 
-    # TAK Portal — portal.domain (with forward_auth if Authentik is deployed)
     portal = modules.get('takportal', {})
     if portal.get('installed'):
+        portal_host = sd['takportal']
         lines.append(f"# TAK Portal")
-        lines.append(f"takportal.{domain} {{")
+        lines.append(f"{portal_host} {{")
         if ak.get('installed'):
             lines.append(f"    route {{")
             lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
@@ -836,24 +912,24 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # CloudTAK — map.domain, tiles.map.domain, video.domain
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
+        ct_map = sd['cloudtak_map']
+        ct_tiles = sd['cloudtak_tiles']
+        ct_video = sd['cloudtak_video']
         lines.append(f"# CloudTAK Web UI")
-        lines.append(f"map.{domain} {{")
+        lines.append(f"{ct_map} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:5000")
         lines.append(f"}}")
         lines.append("")
         lines.append(f"# CloudTAK Tile Server (CORS for map origin)")
-        lines.append(f"tiles.map.{domain} {{")
+        lines.append(f"{ct_tiles} {{")
         lines.append(f"    header Access-Control-Allow-Origin *")
         lines.append(f"    reverse_proxy 127.0.0.1:5002")
         lines.append(f"}}")
         lines.append("")
-        # CloudTAK Media: one host on 443. /stream/* → HLS (18888), rest → MediaMTX API (9997).
-        # CORS inside handle blocks so HLS manifest/segments from map.domain get Allow-Origin (avoids status 0).
         lines.append(f"# CloudTAK Media (video) — /stream/* → HLS, rest → MediaMTX API")
-        lines.append(f"video.{domain} {{")
+        lines.append(f"{ct_video} {{")
         lines.append(f"    handle /stream/* {{")
         lines.append(f"        header Access-Control-Allow-Origin *")
         lines.append(f"        reverse_proxy 127.0.0.1:18888")
@@ -865,12 +941,11 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — stream.domain (behind Authentik when installed). Web editor only; drone/controller/TAK clients push to 8554/8890.
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
-        mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
+        mtx_host = sd['mediamtx']
         lines.append(f"# MediaMTX Web Console")
-        lines.append(f"{mtx_domain} {{")
+        lines.append(f"{mtx_host} {{")
         if ak.get('installed'):
             lines.append(f"    route /watch/* {{")
             lines.append(f"        reverse_proxy 127.0.0.1:5080")
@@ -2509,7 +2584,7 @@ WantedBy=multi-user.target
             # Update Caddyfile first so Caddy issues the cert
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
-            mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
+            mtx_domain = _get_service_domain(settings, 'mediamtx')
             plog(f"✓ Caddyfile updated — {mtx_domain}")
 
             # Wait up to 60s for cert
@@ -3998,13 +4073,10 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
             log("  ⚠ No authorization/invalidation flow — skipping infra-TAK Console proxy providers")
             return False
 
-        entries = [('infra-TAK', 'infratak', f'https://infratak.{fqdn}')]
+        entries = [('infra-TAK', 'infratak', f'https://{_get_service_domain(load_settings(), "infratak")}')]
         try:
             s = load_settings()
-            mtx_domain = s.get('mediamtx_domain', f'stream.{fqdn}')
-            if '.' not in mtx_domain:
-                mtx_domain = f'{mtx_domain}.{fqdn}'
-            # Always add MediaMTX so it's ready when MediaMTX is deployed later
+            mtx_domain = _get_service_domain(s, 'mediamtx')
             entries.append(('MediaMTX', 'stream', f'https://{mtx_domain}'))
         except Exception:
             pass
@@ -5495,6 +5567,21 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Create DNS A records for *.{{ settings.get('fqdn', '') }} or individual subdomains pointing to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
 </div>
+<details id="service-domains-section" style="margin-bottom:24px">
+<summary style="cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--text-secondary);padding:12px 0;user-select:none">Service Domains <span style="font-size:11px;color:var(--text-dim);font-weight:400">— customize per-service domains</span></summary>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-top:8px">
+<div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.5">Override any service's domain. Leave blank to use the default (<code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">prefix.basedomain</code>). Enter a full domain (e.g. <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">mystreams.tv</code>) or just a prefix (e.g. <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">live</code> → <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">live.{{ settings.get('fqdn','') }}</code>).</div>
+<div id="svc-domains-grid" style="display:grid;grid-template-columns:140px 1fr;gap:8px 16px;align-items:center">
+<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;padding-bottom:4px;border-bottom:1px solid var(--border)">Service</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;padding-bottom:4px;border-bottom:1px solid var(--border)">Domain</div>
+</div>
+<div id="svc-domains-loading" style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">Loading...</div>
+<div style="display:flex;gap:12px;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+<button onclick="saveDomains()" id="save-domains-btn" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Save & Reload Caddy</button>
+<span id="save-domains-status" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)"></span>
+</div>
+</div>
+</details>
 {% if configured_urls %}
 <div class="section-title">Configured URLs</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
@@ -5600,6 +5687,63 @@ async function caddyUninstall(){
     if(!confirm('Remove Caddy and clear domain configuration?'))return;
     try{var r=await fetch('/api/caddy/uninstall',{method:'POST'});var d=await r.json();if(d.success)location.reload()}catch(e){alert('Error: '+e.message)}
 }
+async function loadServiceDomains(){
+    try{
+        var r=await fetch('/api/caddy/domains');var d=await r.json();
+        var grid=document.getElementById('svc-domains-grid');
+        var loading=document.getElementById('svc-domains-loading');
+        if(!grid)return;
+        loading.style.display='none';
+        d.services.forEach(function(s){
+            var nameDiv=document.createElement('div');
+            nameDiv.style.cssText='font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:500;color:'+(s.installed?'var(--text-primary)':'var(--text-dim)')+';display:flex;align-items:center;gap:6px;padding:8px 0';
+            nameDiv.innerHTML=s.label+(s.installed?'':' <span style="font-size:9px;color:var(--text-dim);background:rgba(71,85,105,.3);padding:1px 6px;border-radius:3px">not installed</span>');
+            var inputDiv=document.createElement('div');
+            inputDiv.style.cssText='padding:4px 0';
+            var inp=document.createElement('input');
+            inp.type='text';inp.id='svc-domain-'+s.key;
+            inp.value=s.custom||'';
+            inp.placeholder=s.default||s.key;
+            inp.style.cssText='width:100%;padding:8px 12px;background:var(--bg-deep);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:"JetBrains Mono",monospace;font-size:12px;outline:none;transition:border-color .2s';
+            inp.onfocus=function(){this.style.borderColor='var(--cyan)'};
+            inp.onblur=function(){this.style.borderColor='var(--border)'};
+            if(!s.installed){inp.style.opacity='0.5'}
+            inputDiv.appendChild(inp);
+            grid.appendChild(nameDiv);
+            grid.appendChild(inputDiv);
+        });
+        window._svcDomainKeys=d.services.map(function(s){return s.key});
+    }catch(e){
+        var loading=document.getElementById('svc-domains-loading');
+        if(loading)loading.textContent='Failed to load service domains';
+    }
+}
+async function saveDomains(){
+    var btn=document.getElementById('save-domains-btn');
+    var status=document.getElementById('save-domains-status');
+    btn.disabled=true;btn.textContent='Saving...';btn.style.opacity='0.7';
+    status.textContent='';status.style.color='var(--cyan)';
+    var domains={};
+    (window._svcDomainKeys||[]).forEach(function(k){
+        var inp=document.getElementById('svc-domain-'+k);
+        if(inp)domains[k]=inp.value.trim();
+    });
+    try{
+        var r=await fetch('/api/caddy/domains',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains:domains})});
+        var d=await r.json();
+        if(d.success){
+            status.style.color='var(--green)';status.textContent='Saved — Caddy reloading…';
+            setTimeout(function(){location.reload()},3000);
+        }else{
+            status.style.color='var(--red)';status.textContent='Error: '+(d.error||'unknown');
+            btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
+        }
+    }catch(e){
+        status.style.color='var(--red)';status.textContent='Error: '+e.message;
+        btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
+    }
+}
+loadServiceDomains();
 {% if deploying %}pollCaddyLog();{% endif %}
 </script>
 </body></html>'''
