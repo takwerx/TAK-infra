@@ -307,11 +307,47 @@ start();
 
     # ── Active Streams viewer page (vid_public / vid_private) ────────────
 
+    THEME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'theme_config.json')
+    DEFAULT_THEME = {
+        'headerColor': '#1e3a8a', 'headerColorEnd': '#1e293b',
+        'accentColor': '#3b82f6',
+        'headerTitle': 'Active Streams',
+        'subtitle': '',
+    }
+
+    def _load_theme():
+        try:
+            with open(THEME_FILE, 'r') as f:
+                t = json.load(f)
+                m = dict(DEFAULT_THEME)
+                m.update(t)
+                return m
+        except Exception:
+            return dict(DEFAULT_THEME)
+
+    def _logo_exists():
+        import glob as _glob
+        return bool(_glob.glob('/opt/mediamtx-webeditor/agency_logo.*'))
+
     @app.route('/viewer')
     def viewer_page():
         if session.get('role') != 'viewer':
             return redirect('/')
-        return Response(ACTIVE_STREAMS_VIEWER_HTML, content_type='text/html')
+        theme = _load_theme()
+        logo = _logo_exists()
+        html = ACTIVE_STREAMS_VIEWER_HTML
+        html = html.replace('{{HEADER_COLOR}}', theme.get('headerColor', '#1e3a8a'))
+        html = html.replace('{{HEADER_COLOR_END}}', theme.get('headerColorEnd', '#1e293b'))
+        html = html.replace('{{ACCENT_COLOR}}', theme.get('accentColor', '#3b82f6'))
+        html = html.replace('{{HEADER_TITLE}}', theme.get('headerTitle', 'Active Streams'))
+        sub = theme.get('subtitle', '')
+        if sub:
+            html = html.replace('{{SUBTITLE}}', sub)
+        else:
+            html = html.replace('<div class="subtitle">{{SUBTITLE}}</div>', '')
+        html = html.replace('{{LOGO_DISPLAY}}', 'block' if logo else 'none')
+        html = html.replace('{{USERNAME}}', session.get('username', ''))
+        return Response(html, content_type='text/html')
 
     @app.route('/api/viewer/hlscred')
     def api_viewer_hlscred():
@@ -908,15 +944,19 @@ ACTIVE_STREAMS_VIEWER_HTML = r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Active Streams — MediaMTX</title>
+<title>{{HEADER_TITLE}}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#121212;color:#e0e0e0;min-height:100vh;line-height:1.5}
-.header{background:#1e1e1e;border-bottom:1px solid #333;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
+.header{background:linear-gradient(135deg,{{HEADER_COLOR}} 0%,{{HEADER_COLOR_END}} 100%);color:#fff;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;position:relative}
+.header-left{display:flex;align-items:center;gap:16px}
+.header-logo img{max-height:50px;max-width:100px;border-radius:6px}
 .header h1{font-size:20px;font-weight:600}
-.header .subtitle{color:#888;font-size:13px;margin-top:4px}
-.btn-logout{background:transparent;color:#888;border:1px solid #555;border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer;transition:all .15s}
-.btn-logout:hover{color:#e0e0e0;border-color:#888}
+.header .subtitle{color:rgba(255,255,255,.7);font-size:13px;margin-top:2px}
+.header-right{display:flex;align-items:center;gap:12px}
+.header-user{color:rgba(255,255,255,.7);font-size:13px}
+.btn-logout{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer;transition:all .15s}
+.btn-logout:hover{background:rgba(255,255,255,.25)}
 .container{max-width:960px;margin:0 auto;padding:24px}
 table{width:100%;border-collapse:collapse;background:#1e1e1e;border-radius:8px;overflow:hidden}
 th{background:#2a2a2a;text-align:left;padding:12px;font-size:13px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
@@ -927,16 +967,16 @@ td{padding:12px;border-top:1px solid #333}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s}
 .btn-watch{background:#4CAF50;color:#fff}
 .btn-watch:hover{background:#43a047}
-.btn-copy{background:#2196F3;color:#fff;margin-left:6px}
-.btn-copy:hover{background:#1976D2}
 .btn-share{background:#2563eb;color:#fff;margin-left:6px}
 .btn-share:hover{background:#1d4ed8}
 .loading{text-align:center;padding:48px 20px;color:#888}
-.spinner{width:32px;height:32px;border:3px solid #333;border-top-color:#00bcd4;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+.spinner{width:32px;height:32px;border:3px solid #333;border-top-color:{{ACCENT_COLOR}};border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty{text-align:center;padding:48px 20px;color:#888}
 .empty p{margin-top:8px}
 @media(max-width:640px){
+  .header{flex-direction:column;gap:12px;text-align:center}
+  .header-left{flex-direction:column;gap:8px}
   table,thead,tbody,th,td,tr{display:block}
   thead{display:none}
   tr{margin-bottom:12px;background:#1e1e1e;border-radius:8px;border:1px solid #333;padding:12px}
@@ -948,8 +988,14 @@ td{padding:12px;border-top:1px solid #333}
 </head>
 <body>
 <div class="header">
-  <div><h1>Active Streams</h1><div class="subtitle">Streams you can watch</div></div>
-  <button class="btn-logout" onclick="var h=window.location.hostname.replace(/^[^.]+/,'authentik');window.location.href='https://'+h+'/if/flow/default-invalidation-flow/?next='+encodeURIComponent(window.location.origin+'/')">Logout</button>
+  <div class="header-left">
+    <div class="header-logo"><img src="/api/theme/logo" alt="" style="display:{{LOGO_DISPLAY}}" onerror="this.style.display='none'"></div>
+    <div><h1>{{HEADER_TITLE}}</h1><div class="subtitle">{{SUBTITLE}}</div></div>
+  </div>
+  <div class="header-right">
+    <span class="header-user">{{USERNAME}}</span>
+    <button class="btn-logout" onclick="var h=window.location.hostname.replace(/^[^.]+/,'authentik');window.location.href='https://'+h+'/if/flow/default-invalidation-flow/?next='+encodeURIComponent(window.location.origin+'/')">Logout</button>
+  </div>
 </div>
 <div class="container">
   <div id="content">
