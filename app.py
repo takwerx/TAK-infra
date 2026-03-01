@@ -7801,16 +7801,36 @@ def _ensure_ldap_flow_authentication_none():
                 page += 1
             ldap_bindings = [b for b in all_bindings if str(b.get('target')) == str(ldap_flow_pk)]
             if len(ldap_bindings) < 3:
-                # Find blueprint stages by name
+                # Find or create blueprint stages by name (blueprint may not have run)
                 def _find_stage(api_path, name):
-                    data = _get(f'{api_path}?search={name}')
-                    for s in data.get('results', []):
-                        if s.get('name') == name:
-                            return s.get('pk')
+                    for page in range(1, 4):
+                        data = _get(f'{api_path}?page={page}&page_size=100')
+                        for s in data.get('results', []):
+                            if s.get('name') == name:
+                                return s.get('pk')
+                        if not data.get('pagination', {}).get('next'):
+                            break
                     return None
+                def _create_ldap_stage(api_path, name, attrs):
+                    try:
+                        body = {'name': name, **attrs}
+                        return _post(api_path, body).get('pk')
+                    except urllib.error.HTTPError:
+                        return _find_stage(api_path, name)
                 id_stage = _find_stage('stages/identification/', 'ldap-identification-stage')
+                if not id_stage:
+                    id_stage = _create_ldap_stage('stages/identification/', 'ldap-identification-stage', {
+                        'case_insensitive_matching': True, 'pretend_user_exists': True, 'show_matched_user': True,
+                        'user_fields': ['username']})
                 pw_stage = _find_stage('stages/password/', 'ldap-authentication-password')
+                if not pw_stage:
+                    pw_stage = _create_ldap_stage('stages/password/', 'ldap-authentication-password', {
+                        'backends': ['authentik.core.auth.InbuiltBackend', 'authentik.core.auth.TokenBackend'],
+                        'failed_attempts_before_cancel': 5})
                 login_stage = _find_stage('stages/user_login/', 'ldap-authentication-login')
+                if not login_stage:
+                    login_stage = _create_ldap_stage('stages/user_login/', 'ldap-authentication-login', {
+                        'session_duration': 'seconds=0', 'remember_me_offset': 'seconds=0'})
                 if id_stage and pw_stage and login_stage:
                     existing_orders = {b.get('order') for b in ldap_bindings}
                     binding_specs = [(10, id_stage), (15, pw_stage), (20, login_stage)]
@@ -7824,7 +7844,7 @@ def _ensure_ldap_flow_authentication_none():
                             except urllib.error.HTTPError:
                                 pass
                 else:
-                    return False, f'LDAP stages not found: id={id_stage} pw={pw_stage} login={login_stage}'
+                    return False, f'LDAP stages not found/created: id={id_stage} pw={pw_stage} login={login_stage}'
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
