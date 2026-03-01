@@ -137,11 +137,16 @@ def apply_ldap_overlay(app):
                     pass
 
             admin_group_pk = group_map.get('authentik Admins')
+            HIDDEN_PREFIXES = ('ak-', 'adm_', 'nodered-')
+            HIDDEN_EXACT = {'akadmin'}
             users = []
             page = 1
             while True:
                 result = _ak_get(f'core/users/?page={page}&page_size=100&ordering=username')
                 for u in result.get('results', []):
+                    uname = u.get('username', '')
+                    if uname in HIDDEN_EXACT or any(uname.startswith(p) for p in HIDDEN_PREFIXES):
+                        continue
                     user_groups = []
                     is_admin = False
                     for g in (u.get('groups_obj') or []):
@@ -152,7 +157,7 @@ def apply_ldap_overlay(app):
                             is_admin = True
                     users.append({
                         'pk': u['pk'],
-                        'username': u.get('username', ''),
+                        'username': uname,
                         'name': u.get('name', ''),
                         'email': u.get('email', ''),
                         'groups': user_groups,
@@ -285,7 +290,16 @@ def apply_ldap_overlay(app):
                 'document.querySelectorAll(".sidebar-item").forEach(function(b){'
                 'var t=b.textContent||"";'
                 'if(t.indexOf("Web Users")!==-1){'
-                'b.onclick=function(e){e.preventDefault();window.location.href="/stream-access"};'
+                'b.onclick=function(e){'
+                'e.preventDefault();'
+                'if(typeof showTab==="function")showTab("webusers",e);'
+                'var tabs=document.querySelectorAll("[id]");'
+                'tabs.forEach(function(el){'
+                'if(el.id==="webusers"||el.id==="tab-webusers"||el.getAttribute("data-tab")==="webusers"){'
+                'el.innerHTML=\'<iframe src="/stream-access" style="width:100%;height:calc(100vh - 60px);border:none;"></iframe>\';'
+                '}'
+                '});'
+                '};'
                 '}'
                 'if(t.indexOf("Account")!==-1){b.style.display="none"}'
                 '});'
@@ -409,7 +423,9 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .header-left .subtitle{color:var(--text-dim);font-size:13px}
 .back-link{color:var(--accent);text-decoration:none;font-size:13px;display:flex;align-items:center;gap:4px;padding:6px 12px;border-radius:6px;transition:background .15s}
 .back-link:hover{background:rgba(0,188,212,.1)}
-.container{max-width:1200px;margin:0 auto;padding:24px}
+.container{max-width:100%;margin:0 auto;padding:24px}
+.in-iframe .header{display:none}
+.in-iframe .container{padding:16px}
 .info-box{background:rgba(0,188,212,.08);border:1px solid rgba(0,188,212,.25);border-radius:8px;padding:16px 20px;margin-bottom:20px;font-size:13px;line-height:1.7}
 .info-box strong{color:var(--accent)}
 .search-row{display:flex;gap:12px;margin-bottom:20px;align-items:center;flex-wrap:wrap}
@@ -556,6 +572,7 @@ tbody td{padding:12px;border-bottom:1px solid rgba(255,255,255,.04);vertical-ali
 <div class="toast" id="toast"></div>
 
 <script>
+if (window.self !== window.top) document.body.classList.add('in-iframe');
 let allUsers = [];
 let groupPks = {};
 let availableGroups = [];
