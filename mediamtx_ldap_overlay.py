@@ -307,27 +307,28 @@ start();
 
     # ── Active Streams viewer page (vid_public / vid_private) ────────────
 
-    THEME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'theme_config.json')
-    DEFAULT_THEME = {
+    THEME_FILE = '/opt/mediamtx-webeditor/theme_config.json'
+    LOGO_PATH  = '/opt/mediamtx-webeditor/agency_logo'
+    _THEME_DEFAULTS = {
         'headerColor': '#1e3a8a', 'headerColorEnd': '#1e293b',
         'accentColor': '#3b82f6',
-        'headerTitle': 'Active Streams',
-        'subtitle': '',
+        'headerTitle': 'MediaMTX Configuration Editor',
+        'subtitle': 'Brought to you by TAKWERX',
     }
 
     def _load_theme():
         try:
             with open(THEME_FILE, 'r') as f:
                 t = json.load(f)
-                m = dict(DEFAULT_THEME)
+                m = dict(_THEME_DEFAULTS)
                 m.update(t)
                 return m
         except Exception:
-            return dict(DEFAULT_THEME)
+            return dict(_THEME_DEFAULTS)
 
     def _logo_exists():
         import glob as _glob
-        return bool(_glob.glob('/opt/mediamtx-webeditor/agency_logo.*'))
+        return bool(_glob.glob(LOGO_PATH + '.*'))
 
     @app.route('/viewer')
     def viewer_page():
@@ -339,8 +340,8 @@ start();
         html = html.replace('{{HEADER_COLOR}}', theme.get('headerColor', '#1e3a8a'))
         html = html.replace('{{HEADER_COLOR_END}}', theme.get('headerColorEnd', '#1e293b'))
         html = html.replace('{{ACCENT_COLOR}}', theme.get('accentColor', '#3b82f6'))
-        html = html.replace('{{HEADER_TITLE}}', theme.get('headerTitle', 'Active Streams'))
-        sub = theme.get('subtitle', '')
+        html = html.replace('{{HEADER_TITLE}}', theme.get('headerTitle', 'MediaMTX Configuration Editor'))
+        sub = theme.get('subtitle', 'Brought to you by TAKWERX')
         if sub:
             html = html.replace('{{SUBTITLE}}', sub)
         else:
@@ -842,15 +843,10 @@ start();
                 'var list=document.getElementById("external-sources-list");'
                 'if(!list)return;'
                 'list.querySelectorAll("button").forEach(function(b){'
+                'if(b.classList.contains("vis-badge")||b.classList.contains("share-link-btn"))return;'
                 'var txt=(b.textContent||"").toLowerCase();'
-                'if(txt.indexOf("copy hls")===-1&&txt.indexOf("hls link")===-1)return;'
-                'var row=b.closest("tr")||b.closest("[data-source-name]")||b.closest("div");'
-                'if(!row)return;'
-                'var name=row.getAttribute("data-source-name")||row.getAttribute("data-name");'
-                'if(!name){var s=row.querySelector("strong,h4,code");if(s)name=s.textContent.trim()}'
-                'if(!name)return;'
-                'var level=_visCache[name]||"public";'
-                'if(level==="private"){b.style.display="none"}else{b.style.display=""}'
+                'if(txt.indexOf("copy hls")!==-1||txt.indexOf("hls link")!==-1||txt.indexOf("copy link")!==-1){'
+                'b.style.display="none"}'
                 '})}'
                 'function _fixActionBtns(){'
                 'var list=document.getElementById("external-sources-list");'
