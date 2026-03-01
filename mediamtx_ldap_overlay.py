@@ -148,16 +148,22 @@ def apply_ldap_overlay(app):
         if session.get('role') not in ('viewer', 'admin'):
             return 'Unauthorized', 403
         cred = _get_hlsviewer_credential()
+        streaming = _get_streaming_domain()
+        proto = streaming['protocol']
         hls_port = 8888
-        url = f'http://127.0.0.1:{hls_port}/{subpath}'
+        url = f'{proto}://127.0.0.1:{hls_port}/{subpath}'
         try:
+            import base64
+            import ssl
             headers = {'Accept': '*/*'}
             if cred:
-                import base64
                 auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
                 headers['Authorization'] = f'Basic {auth}'
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 data = resp.read()
                 ct = resp.headers.get('Content-Type', 'application/octet-stream')
                 r = Response(data, content_type=ct)
