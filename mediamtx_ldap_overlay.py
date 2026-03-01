@@ -360,7 +360,7 @@ def apply_ldap_overlay(app):
                 '});'
                 'var lo=document.querySelectorAll("a,button");'
                 'var akHost=window.location.hostname.replace(/^[^.]+/,"authentik");'
-                'var logoutUrl="https://"+akHost+"/outpost.goauthentik.io/sign_out";'
+                'var logoutUrl="https://"+akHost+"/if/flow/default-invalidation-flow/";'
                 'lo.forEach(function(el){'
                 'var tx=(el.textContent||"").trim().toLowerCase();'
                 'if(tx==="logout"||tx==="log out"||tx==="sign out"){'
