@@ -1793,7 +1793,7 @@ def run_takportal_deploy():
                             data=json_mod.dumps({'name': 'TAK Portal Proxy', 'authorization_flow': flow_pk,
                                 'invalidation_flow': inv_flow_pk,
                                 'external_host': f'https://takportal.{fqdn}', 'mode': 'forward_single',
-                                'token_validity': 'hours=24'}).encode(),
+                                'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
                             headers=_ak_headers, method='POST')
                         resp = _urlreq.urlopen(req, timeout=10)
                         provider_pk = json_mod.loads(resp.read().decode())['pk']
@@ -3753,7 +3753,7 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                 data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
                     'invalidation_flow': inv_flow_pk,
                     'external_host': f'https://nodered.{fqdn}', 'mode': 'forward_single',
-                    'token_validity': 'hours=24'}).encode(),
+                    'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
                 headers=_ak_headers, method='POST')
             resp = _urlreq.urlopen(req, timeout=10)
             provider_pk = json.loads(resp.read().decode())['pk']
@@ -3767,7 +3767,7 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                     provider_pk = results[0]['pk']
                     try:
                         req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/{provider_pk}/',
-                            data=json.dumps({'external_host': f'https://nodered.{fqdn}'}).encode(),
+                            data=json.dumps({'external_host': f'https://nodered.{fqdn}', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
                             headers=_ak_headers, method='PATCH')
                         _urlreq.urlopen(req, timeout=10)
                     except Exception:
@@ -3870,6 +3870,8 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
         except Exception:
             pass
         provider_pks = []
+        base_domain = fqdn.split(':')[0]
+        cookie_domain = f'.{base_domain}'
         for name, slug, host in entries:
             pk = None
             try:
@@ -3877,7 +3879,7 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                     data=json.dumps({'name': name, 'authorization_flow': flow_pk,
                         'invalidation_flow': inv_flow_pk,
                         'external_host': host, 'mode': 'forward_single',
-                        'token_validity': 'hours=24'}).encode(),
+                        'token_validity': 'hours=24', 'cookie_domain': cookie_domain}).encode(),
                     headers=_ak_headers, method='POST')
                 resp = _urlreq.urlopen(req, timeout=10)
                 pk = json.loads(resp.read().decode())['pk']
@@ -3929,6 +3931,34 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
     except Exception as e:
         log(f"  ⚠ Console forward auth setup: {str(e)[:100]}")
         return False
+
+
+def _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog=None):
+    """Set cookie_domain on all proxy providers so session is shared across subdomains (avoids stream. redirect loop)."""
+    if not fqdn:
+        return
+    import urllib.request as _req
+    import urllib.error
+    base = fqdn.split(':')[0]
+    cookie_domain = f'.{base}'
+    _log = plog or (lambda m: None)
+    try:
+        r = _req.Request(f'{ak_url}/api/v3/providers/proxy/?page_size=100', headers=ak_headers)
+        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
+        for prov in data.get('results', []):
+            pk = prov.get('pk')
+            if not pk:
+                continue
+            try:
+                patch = _req.Request(f'{ak_url}/api/v3/providers/proxy/{pk}/',
+                    data=json.dumps({'cookie_domain': cookie_domain}).encode(),
+                    headers=ak_headers, method='PATCH')
+                _req.urlopen(patch, timeout=10)
+            except urllib.error.HTTPError:
+                pass
+        _log("  ✓ Proxy providers cookie_domain set for shared session")
+    except Exception as e:
+        _log(f"  ⚠ Proxy cookie_domain: {str(e)[:80]}")
 
 
 def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
@@ -6046,6 +6076,8 @@ def run_authentik_deploy(reconfigure=False):
                     plog("")
                     plog("  Waiting for Authentik API...")
                     if _wait_for_authentik_api(ak_url, ak_headers, max_attempts=24, plog=plog):
+                        plog("  Setting proxy cookie domain (shared session across subdomains)...")
+                        _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog)
                         plog("  Configuring application access policies...")
                         _ensure_app_access_policies(ak_url, ak_headers, plog)
                     else:
@@ -6949,13 +6981,15 @@ entries:
                     provider_pk = None
                     if flow_pk:
                         try:
+                            base_domain = fqdn.split(':')[0]
                             provider_data = {
                                 'name': 'TAK Portal Proxy',
                                 'authorization_flow': flow_pk,
                                 'invalidation_flow': inv_flow_pk or flow_pk,
                                 'external_host': f'https://takportal.{fqdn}',
                                 'mode': 'forward_single',
-                                'token_validity': 'hours=24'
+                                'token_validity': 'hours=24',
+                                'cookie_domain': f'.{base_domain}'
                             }
                             req = urllib.request.Request(f'{ak_url}/api/v3/providers/proxy/',
                                 data=json.dumps(provider_data).encode(),
