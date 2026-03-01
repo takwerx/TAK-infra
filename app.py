@@ -5934,11 +5934,15 @@ def run_authentik_deploy(reconfigure=False):
                                 ak_token = line.strip().split('=', 1)[1].strip()
                                 break
                 if ak_token:
-                    plog("")
-                    plog("  Configuring application access policies...")
                     ak_url = 'http://127.0.0.1:9090'
                     ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-                    _ensure_app_access_policies(ak_url, ak_headers, plog)
+                    plog("")
+                    plog("  Waiting for Authentik API...")
+                    if _wait_for_authentik_api(ak_url, ak_headers, max_attempts=24, plog=plog):
+                        plog("  Configuring application access policies...")
+                        _ensure_app_access_policies(ak_url, ak_headers, plog)
+                    else:
+                        plog("  \u26a0 API not ready in time — run Update config & reconnect again to apply app access policies")
                 else:
                     plog("  \u26a0 No token in .env — app access policies not applied")
         else:
