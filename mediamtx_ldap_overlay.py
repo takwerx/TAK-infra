@@ -37,6 +37,32 @@ def _save_visibility(data):
         json.dump(data, f, indent=2)
 
 
+SHARE_LINKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'share_links.json')
+
+
+def _load_share_links():
+    try:
+        with open(SHARE_LINKS_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_share_links(data):
+    with open(SHARE_LINKS_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def _prune_expired_links(links):
+    """Remove expired links in-place, return pruned dict."""
+    import time
+    now = time.time()
+    expired = [tok for tok, info in links.items() if info.get('expires') and info['expires'] < now]
+    for tok in expired:
+        del links[tok]
+    return links
+
+
 def _ak_headers():
     return {'Authorization': f'Bearer {AK_TOKEN}', 'Content-Type': 'application/json'}
 
@@ -68,8 +94,8 @@ def _ak_delete(path):
 def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
-    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred')
-    VIEWER_PREFIXES = ('/watch/', '/hls-proxy/')
+    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred', '/api/share-links', '/api/share-links/generate')
+    VIEWER_PREFIXES = ('/watch/', '/hls-proxy/', '/shared/', '/shared-hls/')
 
     @app.before_request
     def _authentik_auto_auth():
@@ -145,30 +171,137 @@ def apply_ldap_overlay(app):
 
     @app.route('/hls-proxy/<path:subpath>')
     def hls_proxy(subpath):
-        if session.get('role') not in ('viewer', 'admin'):
-            return 'Unauthorized', 403
+        stream_name = subpath.split('/')[0] if '/' in subpath else subpath
+        vis = _load_visibility()
+        level = vis.get(stream_name, 'public')
+        if level == 'private':
+            role = session.get('role')
+            if role not in ('viewer', 'admin'):
+                return 'Unauthorized', 403
+            if role == 'viewer':
+                user_groups = set(session.get('ldap_groups') or [])
+                if not (user_groups & {'vid_private'}):
+                    return 'Unauthorized', 403
+        try:
+            data, ct = _hls_fetch(subpath)
+            r = Response(data, content_type=ct)
+            r.headers['Cache-Control'] = 'no-cache'
+            return r
+        except Exception as e:
+            return str(e)[:200], 502
+
+    # ── Shared stream links (token-based, no login required) ────────────
+
+    def _hls_fetch(subpath):
+        """Internal: fetch HLS content from MediaMTX with credentials."""
+        import base64, ssl
         cred = _get_hlsviewer_credential()
         streaming = _get_streaming_domain()
         proto = streaming['protocol']
-        hls_port = 8888
-        url = f'{proto}://127.0.0.1:{hls_port}/{subpath}'
+        url = f'{proto}://127.0.0.1:8888/{subpath}'
+        headers = {'Accept': '*/*'}
+        if cred:
+            auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
+            headers['Authorization'] = f'Basic {auth}'
+        req = urllib.request.Request(url, headers=headers)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            return resp.read(), resp.headers.get('Content-Type', 'application/octet-stream')
+
+    @app.route('/watch/<stream_name>')
+    def watch_stream_visibility(stream_name):
+        """Public streams: serve HLS player. Private streams: reject unless logged in with vid_private."""
+        vis = _load_visibility()
+        level = vis.get(stream_name, 'public')
+        if level == 'private':
+            role = session.get('role')
+            if role == 'admin':
+                pass
+            elif role == 'viewer':
+                user_groups = set(session.get('ldap_groups') or [])
+                if not (user_groups & {'vid_private'}):
+                    return Response(WATCH_PRIVATE_HTML, content_type='text/html', status=403)
+            else:
+                return Response(WATCH_PRIVATE_HTML, content_type='text/html', status=403)
+        hls_url = f'/hls-proxy/{stream_name}/index.m3u8'
+        title = f'{stream_name} - Live'
+        html = f'''<!DOCTYPE html>
+<html><head><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<style>*{{margin:0;padding:0}}body{{background:#000;overflow:hidden;font-family:sans-serif}}
+#v{{width:100vw;height:100vh;object-fit:contain}}
+#err{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.95);
+z-index:100;justify-content:center;align-items:center;flex-direction:column;text-align:center;color:#fff}}
+#err h2{{font-size:1.4rem;margin-bottom:8px}}#err p{{color:#999;font-size:.9rem}}</style>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script></head><body>
+<video id="v" controls autoplay muted playsinline></video>
+<div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>
+<script>
+var video=document.getElementById("v"),err=document.getElementById("err"),url="{hls_url}";
+function start(){{
+if(Hls.isSupported()){{var hls=new Hls({{enableWorker:true,lowLatencyMode:true,backBufferLength:90}});
+hls.loadSource(url);hls.attachMedia(video);
+hls.on(Hls.Events.MANIFEST_PARSED,function(){{err.style.display="none";video.play().catch(function(){{}});}});
+hls.on(Hls.Events.ERROR,function(ev,data){{if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
+}}else if(video.canPlayType("application/vnd.apple.mpegurl")){{video.src=url;video.addEventListener("loadedmetadata",function(){{video.play().catch(function(){{}});}});}}
+}}
+start();
+</script></body></html>'''
+        return Response(html, content_type='text/html')
+
+    @app.route('/shared/<token>')
+    def shared_stream_page(token):
+        import time
+        links = _prune_expired_links(_load_share_links())
+        _save_share_links(links)
+        info = links.get(token)
+        if not info:
+            return Response(SHARED_EXPIRED_HTML, content_type='text/html', status=404)
+        stream = info['stream']
+        hls_url = f'/shared-hls/{token}/{stream}/index.m3u8'
+        title = f'{stream} - Live'
+        html = f'''<!DOCTYPE html>
+<html><head><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<style>*{{margin:0;padding:0}}body{{background:#000;overflow:hidden;font-family:sans-serif}}
+#v{{width:100vw;height:100vh;object-fit:contain}}
+#err{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.95);
+z-index:100;justify-content:center;align-items:center;flex-direction:column;text-align:center;color:#fff}}
+#err h2{{font-size:1.4rem;margin-bottom:8px}}#err p{{color:#999;font-size:.9rem}}</style>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script></head><body>
+<video id="v" controls autoplay muted playsinline></video>
+<div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>
+<script>
+var video=document.getElementById("v"),err=document.getElementById("err"),url="{hls_url}";
+function start(){{
+if(Hls.isSupported()){{var hls=new Hls({{enableWorker:true,lowLatencyMode:true,backBufferLength:90}});
+hls.loadSource(url);hls.attachMedia(video);
+hls.on(Hls.Events.MANIFEST_PARSED,function(){{err.style.display="none";video.play().catch(function(){{}});}});
+hls.on(Hls.Events.ERROR,function(ev,data){{if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
+}}else if(video.canPlayType("application/vnd.apple.mpegurl")){{video.src=url;video.addEventListener("loadedmetadata",function(){{video.play().catch(function(){{}});}});}}
+}}
+start();
+</script></body></html>'''
+        return Response(html, content_type='text/html')
+
+    @app.route('/shared-hls/<token>/<path:subpath>')
+    def shared_hls_proxy(token, subpath):
+        import time
+        links = _load_share_links()
+        info = links.get(token)
+        if not info:
+            return 'Link expired or revoked', 403
+        if info.get('expires') and info['expires'] < time.time():
+            return 'Link expired', 403
+        if not subpath.startswith(info['stream']):
+            return 'Forbidden', 403
         try:
-            import base64
-            import ssl
-            headers = {'Accept': '*/*'}
-            if cred:
-                auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
-                headers['Authorization'] = f'Basic {auth}'
-            req = urllib.request.Request(url, headers=headers)
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-                data = resp.read()
-                ct = resp.headers.get('Content-Type', 'application/octet-stream')
-                r = Response(data, content_type=ct)
-                r.headers['Cache-Control'] = 'no-cache'
-                return r
+            data, ct = _hls_fetch(subpath)
+            r = Response(data, content_type=ct)
+            r.headers['Cache-Control'] = 'no-cache'
+            return r
         except Exception as e:
             return str(e)[:200], 502
 
@@ -263,6 +396,74 @@ def apply_ldap_overlay(app):
             vis[stream] = level
             _save_visibility(vis)
             return jsonify({'ok': True, 'stream': stream, 'level': level})
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
+
+    # ── Share Links API ────────────────────────────────────────────────
+
+    @app.route('/api/share-links')
+    def api_share_links_list():
+        if session.get('role') not in ('admin', 'viewer'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        links = _prune_expired_links(_load_share_links())
+        _save_share_links(links)
+        result = []
+        for token, info in links.items():
+            result.append({
+                'token': token,
+                'stream': info.get('stream', ''),
+                'created': info.get('created', ''),
+                'created_by': info.get('created_by', ''),
+                'expires': info.get('expires'),
+                'ttl_label': info.get('ttl_label', ''),
+            })
+        return jsonify({'links': result})
+
+    @app.route('/api/share-links/generate', methods=['POST'])
+    def api_share_links_generate():
+        if session.get('role') not in ('admin', 'viewer'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            import time
+            import secrets
+            data = request.get_json()
+            stream = (data.get('stream') or '').strip()
+            ttl = data.get('ttl', 0)
+            if not stream:
+                return jsonify({'error': 'Stream name required'}), 400
+            token = secrets.token_urlsafe(24)
+            now = time.time()
+            expires = now + int(ttl) if ttl else None
+            ttl_labels = {0: 'Until revoked', 3600: '1 hour', 14400: '4 hours', 86400: '24 hours'}
+            ttl_label = ttl_labels.get(int(ttl) if ttl else 0, f'{int(ttl)//3600}h' if ttl else 'Until revoked')
+            links = _prune_expired_links(_load_share_links())
+            links[token] = {
+                'stream': stream,
+                'created': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)),
+                'created_by': session.get('username', 'admin'),
+                'expires': expires,
+                'ttl_label': ttl_label,
+            }
+            _save_share_links(links)
+            share_url = f'{request.scheme}://{request.host}/shared/{token}'
+            return jsonify({'ok': True, 'token': token, 'url': share_url, 'stream': stream, 'ttl_label': ttl_label})
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
+
+    @app.route('/api/share-links/revoke', methods=['POST'])
+    def api_share_links_revoke():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            data = request.get_json()
+            token = (data.get('token') or '').strip()
+            if not token:
+                return jsonify({'error': 'Token required'}), 400
+            links = _load_share_links()
+            if token in links:
+                del links[token]
+                _save_share_links(links)
+            return jsonify({'ok': True})
         except Exception as e:
             return jsonify({'error': str(e)[:200]}), 500
 
@@ -478,7 +679,8 @@ def apply_ldap_overlay(app):
                 'btn.disabled=true;btn.style.opacity="0.5";'
                 'fetch("/api/stream-visibility",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({stream:name,level:next})})'
                 '.then(function(r){return r.json()}).then(function(d){'
-                'if(d.ok){_visCache[name]=next;_updateBadge(btn,next)}'
+                'if(d.ok){_visCache[name]=next;_updateBadge(btn,next);'
+                'var parent=btn.parentElement;if(parent){var old=parent.querySelector(".share-link-btn");if(old)old.remove();btn.after(_makeShareBtn(name,next))}}'
                 'btn.disabled=false;btn.style.opacity="1";'
                 '}).catch(function(){btn.disabled=false;btn.style.opacity="1"})}'
                 'function _updateBadge(btn,level){'
@@ -487,6 +689,75 @@ def apply_ldap_overlay(app):
                 '}else{'
                 'btn.textContent="PUBLIC";btn.style.background="#16a34a";btn.style.color="#fff";btn.title="All viewers can see this stream. Click to make private."'
                 '}}'
+                'function _makeShareBtn(name,level){'
+                'var sb=document.createElement("button");'
+                'sb.className="share-link-btn";'
+                'if(level==="private"){'
+                'sb.innerHTML="\\uD83D\\uDD17 Generate Share Link";'
+                'sb.style.cssText="margin-left:6px;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:none;background:#2563eb;color:#fff;vertical-align:middle;";'
+                'sb.title="Generate a tokenized share link for this private stream";'
+                'sb.onclick=function(e){e.stopPropagation();_openShareModal(name)};'
+                '}else{'
+                'sb.innerHTML="\\uD83D\\uDCCB Copy Link";'
+                'sb.style.cssText="margin-left:6px;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:none;background:#2196F3;color:#fff;vertical-align:middle;";'
+                'sb.title="Copy the watch URL for this public stream";'
+                'sb.onclick=function(e){e.stopPropagation();_copyWatchLink(name,sb)};'
+                '}'
+                'return sb}'
+                'function _copyWatchLink(name,btn){'
+                'var url=window.location.origin+"/watch/"+encodeURIComponent(name);'
+                'navigator.clipboard.writeText(url).catch(function(){});'
+                'var orig=btn.innerHTML;btn.textContent="\\u2705 Copied!";btn.style.background="#16a34a";'
+                'setTimeout(function(){btn.innerHTML=orig;btn.style.background="#2196F3"},2000)}'
+                'function _openShareModal(name){'
+                'var existing=document.getElementById("share-modal");if(existing)existing.remove();'
+                'var overlay=document.createElement("div");overlay.id="share-modal";'
+                'overlay.style.cssText="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:10000;display:flex;justify-content:center;align-items:center;";'
+                'var box=document.createElement("div");'
+                'box.style.cssText="background:#1e1e1e;border:1px solid #444;border-radius:12px;padding:24px;max-width:500px;width:90%;color:#e0e0e0;font-family:sans-serif;";'
+                'box.innerHTML=\'<h3 style="margin:0 0 4px;font-size:18px">\\uD83D\\uDD17 Generate Share Link</h3>\'+'
+                '\'<p style="color:#888;font-size:13px;margin-bottom:16px">\'+name+\' — Private Stream</p>\'+'
+                '\'<div style="margin-bottom:16px"><label style="font-size:13px;color:#aaa">Link expires in:</label>\'+'
+                '\'<select id="share-ttl" style="margin-left:8px;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px;padding:6px 10px;font-size:13px">\'+'
+                '\'<option value="14400">4 hours</option><option value="28800">8 hours</option><option value="43200">12 hours</option><option value="86400">24 hours</option></select></div>\'+'
+                '\'<button id="share-gen-btn" style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer;width:100%">Generate Link</button>\'+'
+                '\'<div id="share-result" style="margin-top:16px;display:none"><input id="share-url" readonly style="width:100%;background:#2a2a2a;color:#4ade80;border:1px solid #555;border-radius:4px;padding:8px;font-family:monospace;font-size:12px;margin-bottom:8px">\'+'
+                '\'<button id="share-copy-btn" style="background:#16a34a;color:#fff;border:none;border-radius:4px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;width:100%">Copy to Clipboard</button></div>\'+'
+                '\'<div id="share-links-list" style="margin-top:16px;border-top:1px solid #333;padding-top:12px;display:none"><h4 style="font-size:13px;color:#aaa;margin-bottom:8px">Active Links for this stream</h4><div id="share-links-items"></div></div>\'+'
+                '\'<button id="share-close" style="margin-top:12px;background:transparent;color:#888;border:1px solid #555;border-radius:4px;padding:8px 16px;font-size:13px;cursor:pointer;width:100%">Close</button>\';'
+                'overlay.appendChild(box);document.body.appendChild(overlay);'
+                'overlay.onclick=function(e){if(e.target===overlay)overlay.remove()};'
+                'document.getElementById("share-close").onclick=function(){overlay.remove()};'
+                'document.getElementById("share-gen-btn").onclick=function(){'
+                'var ttl=document.getElementById("share-ttl").value;'
+                'var btn=this;btn.disabled=true;btn.textContent="Generating...";'
+                'fetch("/api/share-links/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({stream:name,ttl:parseInt(ttl)})})'
+                '.then(function(r){return r.json()}).then(function(d){'
+                'if(d.ok){var res=document.getElementById("share-result");res.style.display="block";'
+                'document.getElementById("share-url").value=d.url;_loadActiveLinks(name)}'
+                'btn.disabled=false;btn.textContent="Generate Another";'
+                '}).catch(function(){btn.disabled=false;btn.textContent="Generate Link"})};'
+                'document.getElementById("share-copy-btn").onclick=function(){'
+                'var inp=document.getElementById("share-url");inp.select();navigator.clipboard.writeText(inp.value);'
+                'this.textContent="\\u2705 Copied!";var b=this;setTimeout(function(){b.textContent="Copy to Clipboard"},2000)};'
+                '_loadActiveLinks(name)}'
+                'function _loadActiveLinks(name){'
+                'fetch("/api/share-links").then(function(r){return r.json()}).then(function(d){'
+                'var links=(d.links||[]).filter(function(l){return l.stream===name});'
+                'var container=document.getElementById("share-links-items");'
+                'var wrap=document.getElementById("share-links-list");'
+                'if(!container||!wrap)return;'
+                'if(links.length===0){wrap.style.display="none";return}'
+                'wrap.style.display="block";'
+                'var h="";links.forEach(function(l){'
+                'h+="<div style=\\"display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #333;font-size:12px\\">";'
+                'h+="<div><code style=\\"color:#4ade80\\">..."+l.token.slice(-8)+"</code> <span style=\\"color:#888\\">"+l.ttl_label+"</span></div>";'
+                'h+="<button onclick=\\"_revokeLink(\'"+l.token+"\',\'"+name+"\')\\" style=\\"background:#dc2626;color:#fff;border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer\\">Revoke</button>";'
+                'h+="</div>"});'
+                'container.innerHTML=h}).catch(function(){})}'
+                'window._revokeLink=function(token,name){'
+                'fetch("/api/share-links/revoke",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token:token})})'
+                '.then(function(){_loadActiveLinks(name)}).catch(function(){})};'
                 'function _injectBadges(){'
                 'var list=document.getElementById("external-sources-list");'
                 'if(!list)return;'
@@ -507,6 +778,8 @@ def apply_ldap_overlay(app):
                 '_updateBadge(btn,level);'
                 'btn.onclick=function(e){e.stopPropagation();_toggleVis(name,btn)};'
                 'el.after(btn);'
+                'var oldShare=nameEl.querySelector(".share-link-btn");if(oldShare)oldShare.remove();'
+                'btn.after(_makeShareBtn(name,level));'
                 '})}'
                 'else{'
                 'cards.forEach(function(card){'
@@ -520,6 +793,8 @@ def apply_ldap_overlay(app):
                 '_updateBadge(btn,level);'
                 'btn.onclick=function(e){e.stopPropagation();_toggleVis(name,btn)};'
                 'target.appendChild(btn);'
+                'var oldShare=card.querySelector(".share-link-btn");if(oldShare)oldShare.remove();'
+                'target.appendChild(_makeShareBtn(name,level));'
                 '})}'
                 '}'
                 '_loadVis();'
@@ -542,6 +817,22 @@ def apply_ldap_overlay(app):
 
     print("[LDAP Overlay] Authentik/LDAP mode active — auto-auth via headers, Stream Access at /stream-access")
 
+
+# ════════════════════════════════════════════════════════════════════════
+# Shared link expired/revoked page
+# ════════════════════════════════════════════════════════════════════════
+
+WATCH_PRIVATE_HTML = '''<!DOCTYPE html>
+<html><head><title>Private Stream</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#121212;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;text-align:center}
+.box{max-width:400px;padding:40px}.icon{font-size:48px;margin-bottom:16px}h1{font-size:22px;margin-bottom:8px}p{color:#888;font-size:14px;line-height:1.6}</style></head>
+<body><div class="box"><div class="icon">&#x1F6E1;</div><h1>Private Stream</h1><p>This stream is restricted. You need a share link from an authorized user, or log in with the appropriate access level.</p></div></body></html>'''
+
+SHARED_EXPIRED_HTML = '''<!DOCTYPE html>
+<html><head><title>Link Expired</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#121212;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;text-align:center}
+.box{max-width:400px;padding:40px}.icon{font-size:48px;margin-bottom:16px}h1{font-size:22px;margin-bottom:8px}p{color:#888;font-size:14px;line-height:1.6}</style></head>
+<body><div class="box"><div class="icon">&#x1F512;</div><h1>Link Expired or Revoked</h1><p>This shared stream link is no longer valid. Contact the administrator for a new link.</p></div></body></html>'''
 
 # ════════════════════════════════════════════════════════════════════════
 # Active Streams viewer page (vid_public / vid_private — regular users)
@@ -571,6 +862,8 @@ td{padding:12px;border-top:1px solid #333}
 .btn-watch:hover{background:#43a047}
 .btn-copy{background:#2196F3;color:#fff;margin-left:6px}
 .btn-copy:hover{background:#1976D2}
+.btn-share{background:#2563eb;color:#fff;margin-left:6px}
+.btn-share:hover{background:#1d4ed8}
 .loading{text-align:center;padding:48px 20px;color:#888}
 .spinner{width:32px;height:32px;border:3px solid #333;border-top-color:#00bcd4;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -633,16 +926,25 @@ function watchStream(name){
   popup.document.close();
 }
 
-function copyLink(name){
-  var url=window.location.origin+'/watch/'+encodeURIComponent(name);
-  navigator.clipboard.writeText(url).then(function(){showCopied(event)}).catch(function(){
-    var inp=document.createElement('input');inp.value=url;document.body.appendChild(inp);inp.select();document.execCommand('copy');document.body.removeChild(inp);
+function shareStream(name,btn){
+  btn.disabled=true;btn.style.opacity='0.6';btn.textContent='Generating...';
+  fetch('/api/share-links/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({stream:name,ttl:14400})})
+  .then(function(r){return r.json()}).then(function(d){
+    if(d.ok&&d.url){
+      navigator.clipboard.writeText(d.url).then(function(){}).catch(function(){
+        var inp=document.createElement('input');inp.value=d.url;document.body.appendChild(inp);inp.select();document.execCommand('copy');document.body.removeChild(inp);
+      });
+      btn.textContent='\u2705 Link Copied! (4h)';btn.style.background='#16a34a';
+      setTimeout(function(){btn.innerHTML='&#x1F517; Share';btn.style.background='#2563eb';btn.disabled=false;btn.style.opacity='1'},3000);
+    }else{
+      btn.textContent='Error';btn.style.background='#dc2626';
+      setTimeout(function(){btn.innerHTML='&#x1F517; Share';btn.style.background='#2563eb';btn.disabled=false;btn.style.opacity='1'},2000);
+    }
+  }).catch(function(){
+    btn.textContent='Error';btn.style.background='#dc2626';
+    setTimeout(function(){btn.innerHTML='&#x1F517; Share';btn.style.background='#2563eb';btn.disabled=false;btn.style.opacity='1'},2000);
   });
-}
-function showCopied(e){
-  var btn=e&&e.target;if(!btn)return;
-  var orig=btn.innerHTML;btn.textContent='\u2705 Copied!';btn.style.background='#4CAF50';
-  setTimeout(function(){btn.innerHTML=orig;btn.style.background='#2196F3'},2000);
 }
 
 (async function(){
@@ -668,7 +970,7 @@ function showCopied(e){
       html+='<td style="text-align:center;color:#888">—</td>';
       html+='<td style="text-align:center;white-space:nowrap">';
       html+='<button class="btn btn-watch" onclick="watchStream(\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span style="font-size:16px">&#x25B6;&#xFE0F;</span> Watch</button>';
-      html+='<button class="btn btn-copy" onclick="copyLink(\''+escapeHtml(name).replace(/'/g,"\\'")+'\');showCopied(event)">&#x1F4CB; Copy Link</button>';
+      html+='<button class="btn btn-share" onclick="shareStream(\''+escapeHtml(name).replace(/'/g,"\\'")+'\',this)">&#x1F517; Share</button>';
       html+='</td></tr>';
     }
     html+='</tbody></table>';
