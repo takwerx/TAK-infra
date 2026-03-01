@@ -9259,6 +9259,20 @@ async function connectLdap(){
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
 }
+async function fixLdap(){
+    var btn=document.getElementById('fix-ldap-btn');
+    var msg=document.getElementById('fix-ldap-msg');
+    if(btn){btn.disabled=true;btn.textContent='Fixing...';btn.style.opacity='0.7';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} setTimeout(function(){window.location.reload();},1500);}
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';}}
+        if(btn){btn.disabled=false;btn.textContent='Fix LDAP bindings';btn.style.opacity='1';}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Fix LDAP bindings';btn.style.opacity='1';}}
+}
 
 (function(){
     if(sessionStorage.getItem('tak_just_started')==='1'){
