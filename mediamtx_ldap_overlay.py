@@ -754,8 +754,10 @@ start();
                 'var shareUrl=window.location.origin+"/shared/"+l.token;'
                 'h+="<div style=\\"display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #333;font-size:12px;gap:6px\\">";'
                 'h+="<div style=\\"flex:1;min-width:0\\"><code style=\\"color:#4ade80\\">..."+l.token.slice(-8)+"</code> <span style=\\"color:#888\\">"+l.ttl_label+"</span></div>";'
-                'h+="<button onclick=\\"navigator.clipboard.writeText(\'"+shareUrl+"\');this.textContent=\'\\u2705\';var _b=this;setTimeout(function(){_b.textContent=\'\\uD83D\\uDCCB\'},1500)\\" style=\\"background:#2196F3;color:#fff;border:none;border-radius:3px;padding:3px 8px;font-size:11px;cursor:pointer;min-width:28px\\" title=\\"Copy link\\">\\uD83D\\uDCCB</button>";'
+                'h+="<div style=\\"display:flex;gap:6px;flex-shrink:0\\">";'
+                'h+="<button onclick=\\"navigator.clipboard.writeText(\'"+shareUrl+"\');this.textContent=\'Copied!\';var _b=this;setTimeout(function(){_b.textContent=\'Copy\'},1500)\\" style=\\"background:#2196F3;color:#fff;border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer\\">Copy</button>";'
                 'h+="<button onclick=\\"_revokeLink(\'"+l.token+"\',\'"+name+"\')\\" style=\\"background:#dc2626;color:#fff;border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer\\">Revoke</button>";'
+                'h+="</div>";'
                 'h+="</div>"});'
                 'container.innerHTML=h}).catch(function(){})}'
                 'window._revokeLink=function(token,name){'
@@ -814,11 +816,57 @@ start();
                 'var level=_visCache[name]||"public";'
                 'if(level==="private"){b.style.display="none"}else{b.style.display=""}'
                 '})}'
+                'function _fixActionBtns(){'
+                'var list=document.getElementById("external-sources-list");'
+                'if(!list)return;'
+                'list.querySelectorAll("td:last-child").forEach(function(td){'
+                'if(td.querySelector(".actions-fixed"))return;'
+                'var btns=td.querySelectorAll("button");'
+                'if(btns.length<2)return;'
+                'td.style.cssText="white-space:nowrap;";'
+                'var wrap=document.createElement("div");'
+                'wrap.className="actions-fixed";'
+                'wrap.style.cssText="display:inline-flex;gap:4px;flex-wrap:nowrap;";'
+                'btns.forEach(function(b){wrap.appendChild(b)});'
+                'td.appendChild(wrap);'
+                '})}'
                 '_loadVis();'
-                'var _obs=new MutationObserver(function(){_injectBadges();_hideUpstreamHlsBtns()});'
+                'var _obs=new MutationObserver(function(){_injectBadges();_hideUpstreamHlsBtns();_fixActionBtns()});'
                 'var _el=document.getElementById("external-sources-list");'
                 'if(_el)_obs.observe(_el,{childList:true,subtree:true});'
-                'setInterval(function(){_injectBadges();_hideUpstreamHlsBtns()},2000);'
+                'setInterval(function(){_injectBadges();_hideUpstreamHlsBtns();_fixActionBtns()},2000);'
+                '})();'
+                '</script>'
+                '<script>'
+                '(function(){'
+                'function _hijackCopyLinks(){'
+                'var container=document.getElementById("streams-container");'
+                'if(!container)return;'
+                'container.querySelectorAll("button").forEach(function(btn){'
+                'var txt=(btn.textContent||"").trim();'
+                'if(txt.indexOf("Copy Link")===-1&&txt.indexOf("Share")===-1)return;'
+                'if(btn.getAttribute("data-share-hijacked"))return;'
+                'btn.setAttribute("data-share-hijacked","1");'
+                'var row=btn.closest("tr")||btn.closest("div");'
+                'if(!row)return;'
+                'var nameEl=row.querySelector("strong,td:first-child");'
+                'var name=nameEl?nameEl.textContent.trim():"";'
+                'if(!name)return;'
+                'btn.textContent="\\uD83D\\uDD17 Share";'
+                'btn.style.background="#2563eb";'
+                'btn.onclick=function(e){'
+                'e.preventDefault();e.stopPropagation();'
+                'btn.disabled=true;btn.style.opacity="0.6";btn.textContent="Generating...";'
+                'fetch("/api/share-links/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({stream:name,ttl:14400})})'
+                '.then(function(r){return r.json()}).then(function(d){'
+                'if(d.ok&&d.url){navigator.clipboard.writeText(d.url).catch(function(){});'
+                'btn.textContent="\\u2705 Copied! (4h)";btn.style.background="#16a34a"}'
+                'else{btn.textContent="Error";btn.style.background="#dc2626"}'
+                'setTimeout(function(){btn.textContent="\\uD83D\\uDD17 Share";btn.style.background="#2563eb";btn.disabled=false;btn.style.opacity="1"},3000);'
+                '}).catch(function(){btn.textContent="Error";setTimeout(function(){btn.textContent="\\uD83D\\uDD17 Share";btn.style.background="#2563eb";btn.disabled=false;btn.style.opacity="1"},2000)})'
+                '};'
+                '})}'
+                'setInterval(_hijackCopyLinks,2000);'
                 '})();'
                 '</script>'
             )
@@ -864,9 +912,11 @@ ACTIVE_STREAMS_VIEWER_HTML = r'''<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#121212;color:#e0e0e0;min-height:100vh;line-height:1.5}
-.header{background:#1e1e1e;border-bottom:1px solid #333;padding:16px 24px}
+.header{background:#1e1e1e;border-bottom:1px solid #333;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
 .header h1{font-size:20px;font-weight:600}
 .header .subtitle{color:#888;font-size:13px;margin-top:4px}
+.btn-logout{background:transparent;color:#888;border:1px solid #555;border-radius:4px;padding:6px 14px;font-size:13px;cursor:pointer;transition:all .15s}
+.btn-logout:hover{color:#e0e0e0;border-color:#888}
 .container{max-width:960px;margin:0 auto;padding:24px}
 table{width:100%;border-collapse:collapse;background:#1e1e1e;border-radius:8px;overflow:hidden}
 th{background:#2a2a2a;text-align:left;padding:12px;font-size:13px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
@@ -898,8 +948,8 @@ td{padding:12px;border-top:1px solid #333}
 </head>
 <body>
 <div class="header">
-  <h1>Active Streams</h1>
-  <div class="subtitle">Streams you can watch</div>
+  <div><h1>Active Streams</h1><div class="subtitle">Streams you can watch</div></div>
+  <button class="btn-logout" onclick="var h=window.location.hostname.replace(/^[^.]+/,'authentik');window.location.href='https://'+h+'/if/flow/default-invalidation-flow/?next='+encodeURIComponent(window.location.origin+'/')">Logout</button>
 </div>
 <div class="container">
   <div id="content">
@@ -1127,7 +1177,7 @@ tbody td{padding:12px;border-bottom:1px solid rgba(255,255,255,.04);vertical-ali
   <div class="info-box">
     <strong>User Roles:</strong><br>
     <strong>Admin:</strong> Full access to all settings and configuration<br>
-    <strong>Viewer:</strong> Can only view Active Streams tab (perfect for customers)
+    <strong>Viewer:</strong> Can only view Active Streams tab
   </div>
 
   <div class="search-row">
