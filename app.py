@@ -6011,8 +6011,22 @@ def run_authentik_deploy(reconfigure=False):
             plog("\u2501\u2501\u2501 Reconfigure: Updating LDAP, CoreConfig, Forward Auth (no removal) \u2501\u2501\u2501")
             subprocess.run(f'cd {ak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, text=True, timeout=120)
             plog("  Ensured containers are up")
-            # Apply app access policies so only authentik Admins see infra-TAK/Node-RED
             fqdn = settings.get('fqdn', '')
+            # Cookie domain: so Authentik session is sent to stream.*, infratak.*, etc. (avoids redirect loop)
+            if fqdn:
+                base_domain = fqdn.split(':')[0]
+                cookie_domain_val = f'.{base_domain}'
+                with open(env_path) as f:
+                    env_lines = f.readlines()
+                has_cookie_domain = any(line.strip().startswith('AUTHENTIK_COOKIE_DOMAIN=') for line in env_lines)
+                if not has_cookie_domain:
+                    with open(env_path, 'w') as f:
+                        for line in env_lines:
+                            f.write(line)
+                        f.write(f"# Cookie domain — session shared across subdomains (avoids stream. redirect loop)\nAUTHENTIK_COOKIE_DOMAIN={cookie_domain_val}\n")
+                    plog("  Set AUTHENTIK_COOKIE_DOMAIN for subdomain shared session; restarting Authentik...")
+                    subprocess.run(f'cd {ak_dir} && docker compose restart 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            # Apply app access policies so only authentik Admins see infra-TAK/Node-RED
             if fqdn:
                 ak_token = ''
                 with open(env_path) as f:
@@ -6093,6 +6107,7 @@ AUTHENTIK_BOOTSTRAP_LDAP_BASEDN=DC=takldap
 AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST=http://authentik-server-1:9000/
 # Embedded outpost host — prevents 0.0.0.0:9000 redirect issue
 AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
+""" + (f"\n# Cookie domain so session is shared across subdomains (stream., infratak., etc.) — avoids redirect loop\nAUTHENTIK_COOKIE_DOMAIN=.{settings.get('fqdn').split(':')[0]}" if settings.get("fqdn") else "") + """
 # Email Configuration (uncomment and configure)
 # AUTHENTIK_EMAIL__HOST=smtp.example.com
 # AUTHENTIK_EMAIL__PORT=587
