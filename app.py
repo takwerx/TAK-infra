@@ -2250,21 +2250,27 @@ WantedBy=multi-user.target
                         "    apply_ldap_overlay(app)\n"
                         "# --- end LDAP overlay ---\n"
                     )
-                    # Insert before app.run() so overlay routes are registered first (match any indentation)
+                    # Inject right after app = Flask(...) so overlay's before_request runs before vanilla login_required
                     if 'LDAP overlay' not in editor_src:
                         lines = editor_src.splitlines(keepends=True)
+                        inserted = False
                         for i, line in enumerate(lines):
-                            if 'app.run(' in line:
-                                lines.insert(i, '\n' + inject_block)
+                            if 'app = Flask(' in line:
+                                lines.insert(i + 1, '\n' + inject_block)
+                                inserted = True
                                 break
-                        else:
-                            lines = None
-                        if lines is not None:
+                        if not inserted:
+                            for i, line in enumerate(lines):
+                                if 'app.run(' in line:
+                                    lines.insert(i, '\n' + inject_block)
+                                    inserted = True
+                                    break
+                        if inserted:
                             with open(editor_file, 'w') as ef:
                                 ef.writelines(lines)
                             plog("✓ LDAP overlay applied (Authentik header auth + Stream Access)")
                         else:
-                            plog("  ⚠ app.run() not found — LDAP overlay not injected")
+                            plog("  ⚠ app = Flask / app.run not found — LDAP overlay not injected")
                     else:
                         plog("✓ LDAP overlay already present")
                 else:
