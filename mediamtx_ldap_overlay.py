@@ -565,39 +565,14 @@ td{padding:12px;border-top:1px solid #333}
   </div>
 </div>
 <script>
-var hlsCred=null;
-fetch('/api/viewer/hlscred').then(function(r){return r.json()}).then(function(d){if(d.username&&d.password)hlsCred=d}).catch(function(){});
-
 function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 
-function watchStream(hlsUrl,name){
-  if(!hlsCred){alert('Viewer credential not loaded. Please refresh the page.');return;}
+function watchStream(name){
+  var url='/watch/'+encodeURIComponent(name);
   var w=1280,h=720,l=(screen.width-w)/2,t=(screen.height-h)/2;
-  var popup=window.open('','streamViewer_'+name,
+  var popup=window.open(url,'streamViewer_'+name,
     'width='+w+',height='+h+',left='+l+',top='+t+',toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=no,resizable=yes');
-  if(!popup){window.open('/watch/'+encodeURIComponent(name),'_blank');return;}
-  popup.document.write('<!DOCTYPE html><html><head><title>'+escapeHtml(name)+' - Live</title>'
-    +'<style>*{margin:0;padding:0}body{background:#000;overflow:hidden}#p{width:100vw;height:100vh;object-fit:contain}'
-    +'#err{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.9);z-index:100;justify-content:center;align-items:center;flex-direction:column;text-align:center;color:#fff}'
-    +'#err h2{font-size:1.5rem;margin-bottom:10px}#err p{color:#999}</style>'
-    +'<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script></head><body>'
-    +'<video id="p" controls autoplay muted playsinline></video>'
-    +'<div id="err"><h2>Stream Offline</h2><p>Waiting for stream... auto-reconnecting.</p></div>'
-    +'<script>'
-    +'var video=document.getElementById("p"),err=document.getElementById("err");'
-    +'var url="'+hlsUrl+'",user="'+hlsCred.username+'",pass="'+hlsCred.password+'";'
-    +'function start(){'
-    +'if(Hls.isSupported()){'
-    +'var hls=new Hls({enableWorker:true,lowLatencyMode:true,backBufferLength:90,'
-    +'xhrSetup:function(xhr){xhr.setRequestHeader("Authorization","Basic "+btoa(user+":"+pass))}});'
-    +'hls.loadSource(url);hls.attachMedia(video);'
-    +'hls.on(Hls.Events.MANIFEST_PARSED,function(){err.style.display="none";video.play().catch(function(){})});'
-    +'hls.on(Hls.Events.ERROR,function(ev,data){if(data.fatal){err.style.display="flex";setTimeout(function(){hls.destroy();start()},5000)}});'
-    +'}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.addEventListener("loadedmetadata",function(){video.play().catch(function(){})})}'
-    +'}'
-    +'start();'
-    +'<\/script></body></html>');
-  popup.document.close();
+  if(!popup)window.open(url,'_blank');
 }
 
 function copyLink(name){
@@ -635,7 +610,7 @@ function showCopied(e){
       html+='</td>';
       html+='<td style="text-align:center;color:#888">—</td>';
       html+='<td style="text-align:center;white-space:nowrap">';
-      html+='<button class="btn btn-watch" onclick="watchStream(\''+escapeHtml(hlsUrl).replace(/'/g,"\\'")+'\',\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span style="font-size:16px">&#x25B6;&#xFE0F;</span> Watch</button>';
+      html+='<button class="btn btn-watch" onclick="watchStream(\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span style="font-size:16px">&#x25B6;&#xFE0F;</span> Watch</button>';
       html+='<button class="btn btn-copy" onclick="copyLink(\''+escapeHtml(name).replace(/'/g,"\\'")+'\');showCopied(event)">&#x1F4CB; Copy Link</button>';
       html+='</td></tr>';
     }
