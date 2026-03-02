@@ -8014,15 +8014,16 @@ def _ensure_ldap_flow_authentication_none():
                 else:
                     return False, f'LDAP stages not found/created: id={id_stage} pw={pw_stage} login={login_stage}'
             # Ensure LDAP provider's authentication_flow points to ldap-authentication-flow (not default)
-            try:
-                providers = _get('providers/ldap/?search=LDAP').get('results', [])
-                ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
-                if ldap_prov:
-                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', {
-                        'authentication_flow': ldap_flow_pk,
-                        'authorization_flow': ldap_flow_pk})
-            except Exception:
-                pass
+            providers = _get('providers/ldap/?search=LDAP').get('results', [])
+            ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
+            if ldap_prov:
+                try:
+                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', {'authentication_flow': ldap_flow_pk})
+                except urllib.error.HTTPError as e:
+                    body = ''
+                    try: body = e.read().decode()[:200]
+                    except Exception: pass
+                    return False, f'Failed to set LDAP provider authentication_flow: {e.code} {body}'
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
@@ -8189,6 +8190,29 @@ def _apply_ldap_to_coreconfig():
     with open(coreconfig_path, 'r') as f:
         original = f.read()
     if _coreconfig_has_ldap():
+        # LDAP already configured — check if password needs updating
+        import re as _re
+        m = _re.search(r'serviceAccountCredential="([^"]*)"', original)
+        existing_pass = m.group(1) if m else ''
+        if existing_pass == ldap_pass:
+            return True, 'CoreConfig already has LDAP (password matches .env)'
+        # Password mismatch — update it in place
+        updated = original.replace(
+            f'serviceAccountCredential="{existing_pass}"',
+            f'serviceAccountCredential="{ldap_pass}"')
+        if updated != original:
+            patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
+            with open(patch_path, 'w') as f:
+                f.write(updated)
+            r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return False, f'Password resync: sudo cp failed: {r.stderr.strip()[:200]}'
+            r = subprocess.run('sudo systemctl restart takserver 2>&1',
+                shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return False, f'Password resynced but TAK Server restart failed: {r.stderr.strip()[:120]}'
+            return True, 'LDAP password resynced from .env to CoreConfig — TAK Server restarted.'
         return True, 'CoreConfig already has LDAP'
     # Backup
     backup_path = coreconfig_path + '.pre-ldap.bak'
@@ -8316,17 +8340,51 @@ def _ensure_authentik_webadmin():
 @login_required
 def takserver_connect_ldap():
     """One-shot: fix LDAP flow auth (inside service account), ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
+    diag = []
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
-        # Sanitize: subprocess errors can include -w password in the command string
-        if '-w' in msg:
+        if '-w' in (msg or ''):
             msg = 'ldapsearch timed out or failed (check Authentik LDAP outpost logs)'
         return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
+    diag.append(f'Service account: {msg}')
     ok, err = _ensure_authentik_webadmin()
     if not ok:
-        return jsonify({'success': False, 'message': f'WebAdmin sync failed: {err}'}), 400
+        diag.append(f'WebAdmin: {err}')
+    else:
+        diag.append('WebAdmin: OK')
     ok, msg = _apply_ldap_to_coreconfig()
-    return jsonify({'success': ok, 'message': msg})
+    diag.append(f'CoreConfig: {msg}')
+    # Diagnostic: compare passwords and check outpost health
+    try:
+        env_path = os.path.expanduser('~/authentik/.env')
+        ldap_pass = ''
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                    ldap_pass = line.strip().split('=', 1)[1].strip()
+                    break
+        import re as _re
+        cc_pass = ''
+        if os.path.exists('/opt/tak/CoreConfig.xml'):
+            with open('/opt/tak/CoreConfig.xml') as f:
+                m = _re.search(r'serviceAccountCredential="([^"]*)"', f.read())
+                cc_pass = m.group(1) if m else ''
+        if ldap_pass and cc_pass:
+            diag.append(f'Password match: {"YES" if ldap_pass == cc_pass else "NO (MISMATCH!)"}')
+        elif not cc_pass:
+            diag.append('Password: not in CoreConfig')
+        r = subprocess.run('docker ps --filter name=authentik-ldap --format "{{.Status}}" 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=10)
+        ldap_status = (r.stdout or '').strip()
+        diag.append(f'LDAP outpost: {ldap_status or "not running"}')
+        r = subprocess.run('docker logs authentik-ldap-1 --since 30s 2>&1 | tail -5',
+            shell=True, capture_output=True, text=True, timeout=10)
+        outpost_tail = (r.stdout or '').strip()
+        if outpost_tail:
+            diag.append(f'Outpost log: {outpost_tail[:200]}')
+    except Exception as e:
+        diag.append(f'Diagnostic error: {str(e)[:100]}')
+    return jsonify({'success': ok, 'message': ' | '.join(diag)})
 
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
