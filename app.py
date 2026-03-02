@@ -6576,7 +6576,7 @@ entries:
       name: LDAP
     attrs:
       authentication_flow: !KeyOf ldap-authentication-flow
-      authorization_flow: !KeyOf ldap-authentication-flow
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       base_dn: !Context basedn
       bind_mode: cached
       gid_start_number: 4000
@@ -7024,10 +7024,18 @@ entries:
                         ldap_provider_pk = None
                         ldap_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'ldap-authentication-flow'), None)
                         ldap_bind_flow = ldap_flow_pk or auth_flow_pk
+                        # authorization_flow must be an authorization-designated flow (not authentication)
+                        try:
+                            _authz_req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authorization', headers=ak_headers)
+                            _authz_resp = urllib.request.urlopen(_authz_req, timeout=10)
+                            _authz_flows = json.loads(_authz_resp.read().decode())['results']
+                            ldap_authz_flow = next((f['pk'] for f in _authz_flows if 'implicit' in f.get('slug', '')), _authz_flows[0]['pk'] if _authz_flows else ldap_bind_flow)
+                        except Exception:
+                            ldap_authz_flow = ldap_bind_flow
                         try:
                             req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
                                 data=json.dumps({'name': 'LDAP', 'authentication_flow': ldap_bind_flow,
-                                    'authorization_flow': ldap_bind_flow, 'invalidation_flow': inv_flow_pk,
+                                    'authorization_flow': ldap_authz_flow, 'invalidation_flow': inv_flow_pk,
                                     'base_dn': 'DC=takldap', 'bind_mode': 'cached',
                                     'search_mode': 'cached', 'mfa_support': False}).encode(),
                                 headers=ak_headers, method='POST')
@@ -8013,17 +8021,24 @@ def _ensure_ldap_flow_authentication_none():
                                 pass
                 else:
                     return False, f'LDAP stages not found/created: id={id_stage} pw={pw_stage} login={login_stage}'
-            # Ensure LDAP provider's authentication_flow points to ldap-authentication-flow (not default)
+            # Ensure LDAP provider's authentication_flow and authorization_flow are correct
             providers = _get('providers/ldap/?search=LDAP').get('results', [])
             ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
             if ldap_prov:
+                # authorization_flow MUST be an authorization-designated flow (not authentication!)
+                # Using the same auth flow for both causes "exceeded stage recursion depth"
+                authz_flows = _get('flows/instances/?designation=authorization').get('results', [])
+                authz_pk = next((f['pk'] for f in authz_flows if 'implicit' in f.get('slug', '')), authz_flows[0]['pk'] if authz_flows else None)
+                patch_data = {'authentication_flow': ldap_flow_pk}
+                if authz_pk:
+                    patch_data['authorization_flow'] = authz_pk
                 try:
-                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', {'authentication_flow': ldap_flow_pk})
+                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', patch_data)
                 except urllib.error.HTTPError as e:
                     body = ''
                     try: body = e.read().decode()[:200]
                     except Exception: pass
-                    return False, f'Failed to set LDAP provider authentication_flow: {e.code} {body}'
+                    return False, f'Failed to update LDAP provider flows: {e.code} {body}'
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
@@ -8061,9 +8076,11 @@ def _ensure_ldap_flow_authentication_none():
             providers = _get('providers/ldap/?search=LDAP').get('results', [])
             ldap_provider = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
             if ldap_provider:
+                authz_flows = _get('flows/instances/?designation=authorization').get('results', [])
+                authz_pk = next((f['pk'] for f in authz_flows if 'implicit' in f.get('slug', '')), authz_flows[0]['pk'] if authz_flows else new_flow_pk)
                 _patch(f'providers/ldap/{ldap_provider["pk"]}/', {
                     'authentication_flow': new_flow_pk,
-                    'authorization_flow': new_flow_pk})
+                    'authorization_flow': authz_pk})
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode()[:200]
