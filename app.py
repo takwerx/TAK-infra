@@ -8547,11 +8547,11 @@ def takserver_services():
             if 'profiles.active=messaging' in cmd:
                 name = 'Messaging'; icon = '📡'
             elif 'profiles.active=api' in cmd:
-                name = 'API'; icon = '🔌'
+                name = 'API'; icon = '🧩'
             elif 'profiles.active=config' in cmd:
                 name = 'Config'; icon = '⚙️'
             elif 'takserver-pm.jar' in cmd:
-                name = 'Plugin Manager'; icon = '🧩'
+                name = 'Plugin Manager'; icon = '🔌'
             elif 'takserver-retention.jar' in cmd:
                 name = 'Retention'; icon = '📦'
             else:
