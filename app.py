@@ -6688,7 +6688,7 @@ entries:
       search_mode: cached
       uid_start_number: 2000
     permissions:
-      - permission: search_full_directory
+      - permission: authentik_providers_ldap.search_full_directory
         user: !KeyOf ldap-service-account
   - model: authentik_core.application
     id: app
@@ -6793,7 +6793,11 @@ entries:
                     ak_tag = m.group(1).strip()
                     break
             if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-                ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                _fqdn = (settings.get('fqdn') or '').split(':')[0]
+                if _fqdn:
+                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    extra_hosts:\n      - \"authentik.{_fqdn}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: https://authentik.{_fqdn}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                else:
+                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 new_lines = []
                 for line in lines:
                     if line.startswith('volumes:'):
