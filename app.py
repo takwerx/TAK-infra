@@ -8562,6 +8562,11 @@ def _ensure_authentik_webadmin():
                 req = _req.Request(f'{url}/api/v3/core/groups/{admins_grp["pk"]}/add_user/',
                     data=json.dumps({'pk': webadmin_pk}).encode(), headers=headers, method='POST')
                 _req.urlopen(req, timeout=10)
+        # Restart LDAP outpost to clear bind cache (password change would otherwise be ignored until cache expires)
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
+                shell=True, capture_output=True, timeout=90)
         return True, None
     except urllib.error.HTTPError as e:
         try:
