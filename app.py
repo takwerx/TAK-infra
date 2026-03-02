@@ -9578,10 +9578,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="resync-ldap-btn" onclick="resyncLdap()" style="padding:8px 16px;background:rgba(16,185,129,.2);color:var(--green);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Resync LDAP to TAK Server</button>
 <button type="button" id="sync-webadmin-btn" onclick="syncWebadmin()" style="padding:8px 16px;background:rgba(59,130,246,.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Sync webadmin to Authentik</button>
-<span id="sync-webadmin-msg" style="font-size:12px;color:var(--text-dim)"></span>
+<span id="sync-webadmin-msg" style="font-size:12px;color:var(--text-dim)"></span><span id="resync-ldap-msg" style="font-size:12px;color:var(--text-dim)"></span>
 </div>
-<p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:0">If 8446 login fails, click to push the TAK Server deploy password from settings into Authentik for user <code>webadmin</code>.</p>
+<p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:0"><strong>Resync LDAP</strong> re-runs the full flow (fix blueprint if needed, restart Authentik worker, ensure service account &amp; webadmin, sync CoreConfig). Use after pulling console updates or if QR/login fails. <strong>Sync webadmin</strong> only pushes the 8446 password from settings into Authentik.</p>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
@@ -9736,6 +9737,20 @@ async function connectLdap(){
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
+}
+
+async function resyncLdap(){
+    var btn=document.getElementById('resync-ldap-btn');
+    var msg=document.getElementById('resync-ldap-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';btn.textContent='Resyncing...';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} setTimeout(function(){window.location.reload();},800);}
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
 }
 
 async function syncWebadmin(){
