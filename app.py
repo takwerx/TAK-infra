@@ -7770,9 +7770,15 @@ It provides centralized user authentication and management for all your services
 {% if deploy_done %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center">
 <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--green);margin-bottom:8px">✓ Authentik deployed!</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">1. Click <strong>Authentik</strong> below to open the admin UI, then come back and <strong>refresh this page</strong> to see/copy the akadmin password. After logging in: <strong>Admin interface → Groups</strong> → <strong>authentik Admins</strong> → <strong>Users</strong> → Add new user, add email, create user.<br>2. Go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a> and set up SMTP; then use &quot;Configure Authentik to use these settings&quot;.</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px;text-align:left">
+<strong>Next steps:</strong><br>
+1. <strong>Set up Email Relay</strong> — go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a>, configure SMTP, then click &quot;Configure Authentik to use these settings&quot;.<br>
+2. <strong>Deploy TAK Portal</strong> — go to <a href="/takportal" style="color:var(--cyan)">TAK Portal</a> and deploy when ready.<br>
+You can also open the Authentik admin UI below to create users (Admin → Groups → authentik Admins → Users).
+</div>
 <a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
-<a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay → SMTP</a>
+<a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay</a>
+<a href="/takportal" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Portal</a>
 <button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
@@ -7862,7 +7868,7 @@ function pollDeployLog(){
             var el=document.getElementById('deploy-log');
             var inst=document.createElement('div');
             inst.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan);margin-top:16px;margin-bottom:8px;text-align:left;line-height:1.6';
-            inst.textContent='Next: Click \u201cLaunch Authentik Admin\u201d below, then come back here and click \u201cRefresh Authentik Page\u201d to see/copy the akadmin password. After logging in: Admin interface \u2192 Groups \u2192 authentik Admins \u2192 Users \u2192 Add new user, add email, create user.';
+            inst.innerHTML='<strong>Next steps:</strong><br>1. Set up <strong>Email Relay</strong> (SMTP), then &quot;Configure Authentik&quot;.<br>2. Deploy <strong>TAK Portal</strong> when ready.<br>Use &quot;Launch Authentik Admin&quot; below to open the admin UI (e.g. to create users).';
             el.appendChild(inst);
             var authUrl=el.getAttribute('data-authentik-url')||'';
             var launchLink=document.createElement('a');
