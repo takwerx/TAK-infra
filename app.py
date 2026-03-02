@@ -714,10 +714,19 @@ def caddy_uninstall():
     settings = load_settings()
     pkg_mgr = settings.get('pkg_mgr', 'apt')
     if pkg_mgr == 'apt':
-        subprocess.run('apt-get remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
     else:
         subprocess.run('dnf remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
     steps.append('Removed Caddy package')
+    for path in ['/usr/bin/caddy', '/usr/local/bin/caddy']:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                subprocess.run(f'rm -f {path}', shell=True, capture_output=True)
+    if os.path.exists('/etc/caddy'):
+        subprocess.run('rm -rf /etc/caddy', shell=True, capture_output=True, timeout=10)
+    subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
     settings['fqdn'] = ''
     save_settings(settings)
     steps.append('Cleared domain from settings')
@@ -9385,9 +9394,19 @@ def run_full_uninstall():
         subprocess.run('systemctl stop caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
         subprocess.run('systemctl disable caddy 2>/dev/null; true', shell=True, capture_output=True)
         if pkg_mgr == 'apt':
-            subprocess.run('apt-get remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+            subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
         else:
             subprocess.run('dnf remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        # Ensure binary and config are gone so console no longer shows Caddy as installed (which uses "which caddy")
+        for path in ['/usr/bin/caddy', '/usr/local/bin/caddy']:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    subprocess.run(f'rm -f {path}', shell=True, capture_output=True)
+        if os.path.exists('/etc/caddy'):
+            subprocess.run('rm -rf /etc/caddy', shell=True, capture_output=True, timeout=10)
+        subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
         settings = load_settings()
         settings['fqdn'] = ''
         save_settings(settings)
@@ -9501,15 +9520,15 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <h2>Backdoor (IP:5001)</h2>
 <p>If Authentik or the domain is down, you can always reach the console at:</p>
 <p class="backdoor-url">https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</p>
-<p>Accept the self-signed cert and log in with your <strong>console password</strong>.</p>
+<p>Accept the self-signed cert and log in with your <strong>console password</strong>. <strong>Full lockout?</strong> If you can't log in at all, you have to get on the CLI: the <strong>README on the GitHub repo</strong> has the exact commands to run on the server to reset the password (e.g. <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">./reset-console-password.sh</code>).</p>
 </div>
 <div class="help-card">
 <h2>Console password</h2>
-<p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Reset below.</p>
+<p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Use the form below if you're logged in; for a full lockout you need the CLI — see the README on the GitHub repo.</p>
 </div>
 <div class="help-card">
 <h2>Reset console password</h2>
-<p>Enter your current password and choose a new one. The console will restart and you'll use the new password for 5001 and Uninstall all.</p>
+<p>Enter your current password and choose a new one. The console will restart and you'll use the new password for 5001 and Uninstall all. <em>Only works when you're already logged in.</em> For a full lockout, use the CLI (README has the commands).</p>
 <div class="form-field"><label>Current password</label><input type="password" id="reset-current" placeholder="Current console password"></div>
 <div class="form-field"><label>New password</label><input type="password" id="reset-new" placeholder="At least 8 characters"></div>
 <div class="form-field"><label>Confirm new password</label><input type="password" id="reset-confirm" placeholder="Same as above"></div>
