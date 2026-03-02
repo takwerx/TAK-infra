@@ -8063,22 +8063,24 @@ def _ensure_ldap_flow_authentication_none():
         return False, 'Authentik not deployed'
     url = 'http://127.0.0.1:9090'
     headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    # Authentik API can be slow after worker restart or under load; use 60s per request
+    _api_timeout = 60
 
     def _get(path):
         r = _req.Request(f'{url}/api/v3/{path}', headers=headers)
-        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+        return json.loads(_req.urlopen(r, timeout=_api_timeout).read().decode())
 
     def _post(path, body):
         r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='POST')
-        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+        return json.loads(_req.urlopen(r, timeout=_api_timeout).read().decode())
 
     def _patch(path, body):
         r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='PATCH')
-        _req.urlopen(r, timeout=15)
+        _req.urlopen(r, timeout=_api_timeout)
 
     def _delete(path):
         r = _req.Request(f'{url}/api/v3/{path}', headers=headers, method='DELETE')
-        _req.urlopen(r, timeout=15)
+        _req.urlopen(r, timeout=_api_timeout)
 
     try:
         auth_flows = _get('flows/instances/?designation=authentication').get('results', [])
