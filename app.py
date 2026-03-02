@@ -7569,7 +7569,7 @@ entries:
         plog("=" * 50)
         plog("  Next steps:")
         plog("  1. Launch Authentik Admin (link below), then come back and refresh this page to get the akadmin password.")
-        plog("     After logging in: Admin interface → Groups → authentik Admins → Users → Add new user, add email, create user.")
+        plog("     After logging in: Admin interface → Groups → authentik Admins → Users → Add new user (additional Admin users).")
         if not relay.get('from_addr'):
             plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
         else:
@@ -7774,7 +7774,7 @@ It provides centralized user authentication and management for all your services
 <strong>Next steps:</strong><br>
 1. <strong>Set up Email Relay</strong> — go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a>, configure SMTP, then click &quot;Configure Authentik to use these settings&quot;.<br>
 2. <strong>Deploy TAK Portal</strong> — go to <a href="/takportal" style="color:var(--cyan)">TAK Portal</a> and deploy when ready.<br>
-You can also open the Authentik admin UI below to create users (Admin → Groups → authentik Admins → Users).
+You can also open the Authentik admin UI below to make additional Admin users (Admin → Groups → authentik Admins → Users).
 </div>
 <a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
 <a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay</a>
@@ -7868,7 +7868,7 @@ function pollDeployLog(){
             var el=document.getElementById('deploy-log');
             var inst=document.createElement('div');
             inst.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan);margin-top:16px;margin-bottom:8px;text-align:left;line-height:1.6';
-            inst.innerHTML='<strong>Next steps:</strong><br>1. Set up <strong>Email Relay</strong> (SMTP), then &quot;Configure Authentik&quot;.<br>2. Deploy <strong>TAK Portal</strong> when ready.<br>Use &quot;Launch Authentik Admin&quot; below to open the admin UI (e.g. to create users).';
+            inst.innerHTML='<strong>Next steps:</strong><br>1. Set up <strong>Email Relay</strong> (SMTP), then &quot;Configure Authentik&quot;.<br>2. Deploy <strong>TAK Portal</strong> when ready.<br>Use &quot;Launch Authentik Admin&quot; below to make additional Admin users.';
             el.appendChild(inst);
             var authUrl=el.getAttribute('data-authentik-url')||'';
             var launchLink=document.createElement('a');
