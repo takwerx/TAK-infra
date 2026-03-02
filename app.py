@@ -448,8 +448,9 @@ def takserver_page():
     # Reset deploy_done once TAK Server is running so the running view shows
     if tak.get('installed') and tak.get('running') and not deploy_status.get('running', False):
         deploy_status.update({'complete': False, 'error': False})
+    tak_version = _get_takserver_version_info().get('version', '') if tak.get('installed') else ''
     return render_template_string(TAKSERVER_TEMPLATE,
-        settings=load_settings(), modules=modules, tak=tak,
+        settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
@@ -1333,6 +1334,29 @@ def _get_takportal_version_info():
     return out
 
 
+def _get_takserver_version_info():
+    """Return {version: str, update_available: bool, latest: None} for TAK Server from installed package."""
+    out = {'version': '', 'update_available': False, 'latest': None}
+    if not os.path.exists('/opt/tak') or not os.path.exists('/opt/tak/CoreConfig.xml'):
+        return out
+    r = subprocess.run("dpkg -s takserver 2>/dev/null | grep ^Version:", shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout.strip():
+        # "Version: 5.6-RELEASE-6" or "Version: 5.6-RELEASE-6-HEAD"
+        out['version'] = r.stdout.strip().replace('Version:', '').strip()
+        return out
+    r = subprocess.run("rpm -q takserver 2>/dev/null", shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout.strip():
+        # noarch package: takserver-5.6-RELEASE-6.noarch
+        ver = r.stdout.strip()
+        if ver.startswith('takserver-'):
+            ver = ver.split('-', 1)[1]
+        if '.noarch' in ver:
+            ver = ver.replace('.noarch', '')
+        if ver:
+            out['version'] = ver
+    return out
+
+
 def _get_caddy_version_info():
     """Return {version: str, update_available: bool} for Caddy."""
     out = {'version': '', 'update_available': False}
@@ -1439,6 +1463,8 @@ def get_all_module_versions():
         result['cloudtak'] = _get_cloudtak_version_info()
     if modules.get('takportal', {}).get('installed'):
         result['takportal'] = _get_takportal_version_info()
+    if modules.get('takserver', {}).get('installed'):
+        result['takserver'] = _get_takserver_version_info()
     return result
 
 
@@ -6590,7 +6616,6 @@ entries:
     id: ldap-authentication-password
   - attrs:
       case_insensitive_matching: true
-      password_stage: !KeyOf ldap-authentication-password
       pretend_user_exists: true
       show_matched_user: true
       user_fields:
@@ -8438,11 +8463,40 @@ def _ensure_authentik_webadmin():
     except Exception as e:
         return False, str(e)[:120]
 
+@app.route('/api/takserver/sync-webadmin', methods=['POST'])
+@login_required
+def takserver_sync_webadmin():
+    """Create or update webadmin user in Authentik with password from settings. Use when 8446 login fails (e.g. Authentik was deployed before TAK Server)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'success': False, 'message': 'TAK Server not installed'}), 400
+    if not os.path.exists(os.path.expanduser('~/authentik/.env')):
+        return jsonify({'success': False, 'message': 'Authentik not installed'}), 400
+    ok, err = _ensure_authentik_webadmin()
+    if ok:
+        return jsonify({'success': True, 'message': 'Webadmin user synced to Authentik. Use the same password you set at TAK Server deploy to log in to 8446.'})
+    return jsonify({'success': False, 'message': err or 'Sync failed'}), 400
+
+
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: fix LDAP flow auth (inside service account), ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
+    """One-shot: fix LDAP blueprint (remove recursion-causing password_stage), fix flow auth, ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
     diag = []
+    # Fix LDAP blueprint on disk if it still has the broken password_stage (causes "invalid credentials" / recursion on user bind, e.g. QR code)
+    bp_path = os.path.expanduser('~/authentik/blueprints/tak-ldap-setup.yaml')
+    if os.path.exists(bp_path):
+        try:
+            with open(bp_path, 'r') as f:
+                content = f.read()
+            if 'password_stage: !KeyOf ldap-authentication-password' in content:
+                content = content.replace('      password_stage: !KeyOf ldap-authentication-password\n', '')
+                with open(bp_path, 'w') as f:
+                    f.write(content)
+                subprocess.run('cd ~/authentik && docker compose restart worker 2>&1', shell=True, capture_output=True, timeout=90)
+                time.sleep(50)  # let blueprint reconcile and update identification stage
+                diag.append('LDAP blueprint fixed (removed password_stage); worker restarted')
+        except Exception as e:
+            diag.append(f'Blueprint fix: {str(e)[:80]}')
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
         if '-w' in (msg or ''):
@@ -9492,10 +9546,10 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
 <div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
-<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
 <div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
-<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running</div></div></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
 <div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
 <div class="status-info"><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
@@ -9517,12 +9571,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <button type="button" id="connect-ldap-btn" onclick="connectLdap()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Connect TAK Server to LDAP</button>
 <div id="connect-ldap-msg" style="margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>
 </div>
-{% elif ldap_connected %}
+{% elif ldap_connected and modules.get('authentik', {}).get('installed') %}
 <div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
 <div style="display:flex;align-items:center;gap:12px">
 <span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
+<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="sync-webadmin-btn" onclick="syncWebadmin()" style="padding:8px 16px;background:rgba(59,130,246,.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Sync webadmin to Authentik</button>
+<span id="sync-webadmin-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:0">If 8446 login fails, click to push the TAK Server deploy password from settings into Authentik for user <code>webadmin</code>.</p>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
@@ -9677,6 +9736,20 @@ async function connectLdap(){
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
+}
+
+async function syncWebadmin(){
+    var btn=document.getElementById('sync-webadmin-btn');
+    var msg=document.getElementById('sync-webadmin-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';}
+    if(msg){msg.textContent='Syncing...';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+        else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
 }
 
 (function(){
