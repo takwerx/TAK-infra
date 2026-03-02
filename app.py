@@ -6692,9 +6692,19 @@ entries:
                 needs_write = True
                 plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
 
-            # Add LDAP outpost container
+            # Add LDAP outpost container (version must match server)
+            ak_tag = '2026.2.0'
+            for l in lines:
+                m = re.search(r'goauthentik/server[:\s]+\$\{AUTHENTIK_TAG:-([^}]+)\}', l)
+                if m:
+                    ak_tag = m.group(1)
+                    break
+                m = re.search(r'goauthentik/server:([^\s\n]+)', l)
+                if m and m.group(1).strip() not in ('${AUTHENTIK_TAG}', ''):
+                    ak_tag = m.group(1).strip()
+                    break
             if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-                ldap_svc = "  ldap:\n    image: ghcr.io/goauthentik/ldap:2025.12.4\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 new_lines = []
                 for line in lines:
                     if line.startswith('volumes:'):
@@ -6703,6 +6713,13 @@ entries:
                 lines = new_lines
                 needs_write = True
                 plog("  Added LDAP outpost container")
+            else:
+                for i, line in enumerate(lines):
+                    m = re.search(r'ghcr\.io/goauthentik/ldap:([^\s\n]+)', line)
+                    if m and m.group(1) != ak_tag:
+                        lines[i] = line.replace(f'ghcr.io/goauthentik/ldap:{m.group(1)}', f'ghcr.io/goauthentik/ldap:{ak_tag}')
+                        needs_write = True
+                        plog(f"  Updated LDAP outpost image {m.group(1)} -> {ak_tag}")
             if needs_write:
                 with open(compose_path, 'w') as f:
                     f.writelines(lines)
