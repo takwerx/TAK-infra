@@ -4,6 +4,22 @@
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
 
+### Help Page and Uninstall-All (2026-03-02)
+
+**Help page (`/help`):** Sidebar has a "Help" link. The Help page includes:
+- **Backdoor (IP:5001)** — URL `https://<server_ip>:5001`, accept self-signed cert, log in with console password. **Full lockout:** If you can't log in at all, you must use the CLI; the **README on the GitHub repo** has the exact commands (e.g. `./reset-console-password.sh`).
+- **Console password** — Same password for backdoor and "Uninstall all". Not stored in plaintext. Forgot it? Use the reset form below if logged in; for full lockout use CLI (README).
+- **Reset console password** — Form (current + new + confirm) calls `POST /api/console/password/reset`; only works when already logged in. For full lockout, use CLI (README has commands).
+- **Uninstall all services** — Card + modal (password, type UNINSTALL to confirm). Runs full uninstall in background; console and config remain.
+- **Deployment order** and **Docs** (GitHub link) — Moved from console footer to Help.
+
+**Uninstall all (full uninstall):**
+- **Location:** Only on the Help page (removed from Console page).
+- **APIs:** `POST /api/console/uninstall-all` (body: `password`, `confirm: "UNINSTALL"`), `GET /api/console/uninstall-all/status`, `POST /api/console/uninstall-all/validate` (password check for green check in UI).
+- **Order:** MediaMTX → TAK Portal → CloudTAK → Node-RED → TAK Server → Email Relay → Authentik → Caddy. Console and `.config` are left in place.
+- **Caddy cleanup:** Full uninstall now purges Caddy package and explicitly removes `/usr/bin/caddy`, `/usr/local/bin/caddy`, and `/etc/caddy` so the console no longer shows Caddy as installed (detection uses `which caddy`). Same cleanup applied when uninstalling Caddy from the Caddy page.
+- **Leftover Caddy:** If the binary was left behind (e.g. uninstall ran before this logic), `detect_modules()` cleans up when it sees Caddy binary present but service **disabled** and **inactive** — removes binary and `/etc/caddy` so the card disappears on next page load after git pull + restart.
+
 ### This Session (2026-03-02 evening) — LDAP 403 Root Cause Found and Fixed
 
 **STATUS: LDAP fully working. QR enrollment confirmed. SA bind, user bind, group lookups all verified.**
@@ -131,6 +147,8 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 - **TAK Portal dashboard metrics** -- working (requires full TAK_URL with `:8443/Marti`)
 - **TAK Portal email auto-config** -- pulls SMTP settings from Email Relay module if deployed
 - **TAK Portal group filtering** -- `GROUPS_HIDDEN_PREFIXES` hides `vid_` and `tak_ROLE_` groups
+- **Help page** -- Sidebar link to `/help`; backdoor URL, console password, reset form (when logged in), full-lockout note (CLI + README), Uninstall all services (modal), deployment order, Docs link
+- **Uninstall all** -- Only on Help; full uninstall order MediaMTX→Portal→CloudTAK→Node-RED→TAK Server→Email→Authentik→Caddy; Caddy purge + binary/config removal; leftover Caddy cleanup in `detect_modules()` when service disabled/inactive
 
 ### What's Broken (Verified)
 - Nothing critical. LDAP fully resolved.
@@ -157,8 +175,10 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
    - **Flow lookup fix** (lines ~8090-8094): `_ensure_ldap_flow_authentication_none()` now searches by `slug=ldap-authentication-flow` instead of `designation=authentication` (prevents pagination miss / slug-already-exists 400).
    - **JavaScript fix in TAKSERVER_TEMPLATE**: Moved `resyncLdap` and `syncWebadmin` functions to top of script block; escaped newlines in confirm() dialogs.
 
+9. **Help page and Uninstall-all (2026-03-02):** Sidebar "Help" link and `HELP_TEMPLATE` at `/help`: backdoor (IP:5001), console password, reset form (`POST /api/console/password/reset`), full-lockout wording (CLI + README). Uninstall all moved to Help only (removed from Console template); modal with password + "UNINSTALL" confirm. Full uninstall: Caddy step purges package and removes `/usr/bin/caddy`, `/usr/local/bin/caddy`, `/etc/caddy`; Caddy page uninstall does same. In `detect_modules()`: when Caddy binary exists but service is disabled and inactive, one-time cleanup removes binary and `/etc/caddy` so card disappears (fixes leftover after uninstall before this commit). Auto-updates: show "Running..." only when enabled and running; disable also stops/disables `apt-daily-upgrade.timer`.
+
 ### Key Files Changed
-- `app.py` — Blueprint fix (configure_flow/password_stage removed), LDAP verification, TAK Portal email/URL fixes, MediaMTX self-healing overlay; plus (2026-03-02) re import, TAK Portal CA bundle/takserver.pem, infratak app creation, LDAP outpost version sync, MediaMTX deploy log UX, Authentik next-steps UI
+- `app.py` — Blueprint fix (configure_flow/password_stage removed), LDAP verification, TAK Portal email/URL fixes, MediaMTX self-healing overlay; plus (2026-03-02) re import, TAK Portal CA bundle/takserver.pem, infratak app creation, LDAP outpost version sync, MediaMTX deploy log UX, Authentik next-steps UI; Help page (HELP_TEMPLATE, /help), Uninstall all on Help only, Caddy full cleanup + leftover cleanup in detect_modules, auto-updates timer + "Running..." only when enabled
 - `mediamtx_ldap_overlay.py` — Stream visibility, share links, themed viewer, External Sources UI, Admin Active Streams UI
 
 ### Server Access
