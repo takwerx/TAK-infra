@@ -5,7 +5,7 @@ from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory, make_response)
 from werkzeug.security import check_password_hash
 from functools import wraps
-import os, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
+import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
 from datetime import datetime
 
 app = Flask(__name__)
@@ -6879,7 +6879,6 @@ entries:
                 )
 
                 # Replace auth block using regex (match <auth>...</auth> regardless of indentation)
-                import re
                 new_content = re.sub(
                     r'<auth[^>]*>.*?</auth>',
                     auth_block,
