@@ -9694,6 +9694,38 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 </div>
 <footer class="footer"></footer>
 <script>
+async function resyncLdap(){
+    if(!confirm('Resync will restart the Authentik worker and re-apply the LDAP blueprint. The TAK Portal user list may take a short moment to repopulate.\\n\\nContinue?')){return;}
+    var btn=document.getElementById('resync-ldap-btn');
+    var msg=document.getElementById('resync-ldap-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';btn.textContent='Resyncing...';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){
+            if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';}
+            var notice=document.getElementById('resync-notice');
+            if(notice){notice.style.display='block';window.setTimeout(function(){notice.style.display='none';},10000);}
+            if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}
+        }
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
+}
+async function syncWebadmin(){
+    var btn=document.getElementById('sync-webadmin-btn');
+    var msg=document.getElementById('sync-webadmin-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';}
+    if(msg){msg.textContent='Syncing...';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+        else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+}
 async function loadServices(){
     var el=document.getElementById('services-list');
     if(!el)return;
@@ -9774,40 +9806,6 @@ async function connectLdap(){
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
-}
-
-async function resyncLdap(){
-    if(!confirm('Resync will restart the Authentik worker and re-apply the LDAP blueprint. The TAK Portal user list may take a short moment to repopulate.\n\nContinue?')){return;}
-    var btn=document.getElementById('resync-ldap-btn');
-    var msg=document.getElementById('resync-ldap-msg');
-    if(btn){btn.disabled=true;btn.style.opacity='0.7';btn.textContent='Resyncing...';}
-    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
-    try{
-        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){
-            if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';}
-            var notice=document.getElementById('resync-notice');
-            if(notice){notice.style.display='block';window.setTimeout(function(){notice.style.display='none';},10000);}
-            if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}
-        }
-        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
-}
-
-async function syncWebadmin(){
-    var btn=document.getElementById('sync-webadmin-btn');
-    var msg=document.getElementById('sync-webadmin-msg');
-    if(btn){btn.disabled=true;btn.style.opacity='0.7';}
-    if(msg){msg.textContent='Syncing...';msg.style.color='var(--text-dim)';}
-    try{
-        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
-        else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
 }
 
 (function(){
