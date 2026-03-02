@@ -4,6 +4,24 @@
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
 
+### This Session (2026-03-02) — Fixes and UI Changes
+
+**Authentik deploy crash at Step 6:** `UnboundLocalError: local variable 're' referenced before assignment`. Step 6 (Patching Docker Compose) used `re.search()` but `import re` lived later in the same function (Step 10). Python treated `re` as local for the whole function, so it was unassigned at first use. **Fix:** Added `re` to top-level imports in `app.py` and removed the inner `import re` in Step 10.
+
+**TAK Portal dashboard metrics (-- / not connected):** Portal could not talk to TAK Server. Two causes: (1) CA file was single-cert or used `-----BEGIN TRUSTED CERTIFICATE-----`, which Node.js does not accept; (2) Node.js needs the full cert chain (intermediate + root) for `rejectUnauthorized: true`. **Fix:** Prefer `takserver.pem` (full chain) for TAK Portal CA; fallback: build bundle from `ca.pem` + `root-ca.pem` in standard PEM format. Copy into portal `data/certs/tak-ca.pem`. Justin confirmed `takserver.pem` is the right file (server + intermediate + root in one file).
+
+**infratak application missing in Authentik:** After redeploy (or older app.py), visiting `infratak.<fqdn>` showed "Not Found" even though the proxy provider existed. **Cause:** `_ensure_authentik_console_app` fallback search used application slug `infratak` when looking up the provider; provider name is `infra-TAK`, so search failed and app creation was skipped. **Fix:** Use URL-encoded provider *name* for search; add verification pass after loop — if application is missing (404), find provider and recreate application.
+
+**LDAP outpost version drift:** LDAP outpost image was hardcoded (e.g. `2025.12.4`) while Authentik server moved to `2026.2.0`. **Fix:** Read server image tag from docker-compose and use same tag for LDAP outpost; if LDAP container exists but tag differs, update its image.
+
+**Authentik UI — next steps order:** After deploy and on healthy bar, show: (1) Configure SMTP (Email Relay), (2) Deploy TAK Server, (3) Deploy TAK Portal. Buttons added for Email Relay, TAK Server, TAK Portal. Wording changed from "create users" to "make additional Admin users."
+
+**MediaMTX deploy log:** Removed 1.5s auto-reload after deploy. Log stays visible with "✓ Deployment Complete" and "↻ Refresh Page" button (same pattern as other deploy pages).
+
+**Removed:** "Fix LDAP bindings" button on TAK Server page (confusing once LDAP version/flow issues were fixed).
+
+**Justin / TAK Portal feedback (for reference):** Use `takserver.pem` for CA (full chain). Portal may need restart after uploading certs. Future: adopt-existing workflow (detect TAK Server, Authentik, TAK Portal and offer to adopt into console).
+
 ### LDAP Bind Issue — RESOLVED
 
 **Status:** LDAP bind is WORKING. Service account bind, user search, and TAK Server LDAP authentication all confirmed functional.
@@ -142,7 +160,7 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 ### What's Broken (Verified)
 - **LDAP bind fails with "Insufficient access (50)"** — See CRITICAL section above. This blocks TAK Server LDAP auth and QR registration.
 
-### Changes Made to app.py in This Session
+### Changes Made to app.py (Cumulative)
 
 1. **Blueprint fix (CRITICAL)** — Removed `configure_flow`, `password_stage`, `LDAPBackend`, and `email` user field from `tak-ldap-setup.yaml` blueprint definition (lines ~6340-6364). This fixes the root cause of `exceeded stage recursion depth`.
 
@@ -156,8 +174,10 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 
 6. **Self-healing MediaMTX overlay** — `ensure_overlay.py` re-injects overlay on service start if upstream updates overwrite it.
 
+7. **Session 2026-03-02:** Top-level `import re` (fix Authentik Step 6 UnboundLocalError). TAK Portal CA: prefer `takserver.pem`, else build bundle from `ca.pem` + `root-ca.pem`. `_ensure_authentik_console_app`: provider search by name, application verification/recreation. LDAP outpost image tag synced from server tag in compose. MediaMTX deploy log: no auto-reload, Refresh button. Authentik next steps UI: configure SMTP → TAK Server → TAK Portal; "additional Admin users" wording; healthy bar with Email Relay, TAK Server, TAK Portal buttons. Removed "Fix LDAP bindings" button.
+
 ### Key Files Changed
-- `app.py` — Blueprint fix (configure_flow/password_stage removed), LDAP verification, TAK Portal email/URL fixes, MediaMTX self-healing overlay
+- `app.py` — Blueprint fix (configure_flow/password_stage removed), LDAP verification, TAK Portal email/URL fixes, MediaMTX self-healing overlay; plus (2026-03-02) re import, TAK Portal CA bundle/takserver.pem, infratak app creation, LDAP outpost version sync, MediaMTX deploy log UX, Authentik next-steps UI
 - `mediamtx_ldap_overlay.py` — Stream visibility, share links, themed viewer, External Sources UI, Admin Active Streams UI
 
 ### Server Access
@@ -438,6 +458,10 @@ The `ldap-authentication-flow` is defined in `tak-ldap-setup.yaml` blueprint wit
 | 18 | **Blueprint overwrites API fixes** | **`state: present` in blueprint re-applies stage config on every Authentik restart** | **Must fix the blueprint file itself, not just API. Any API-only fix gets overwritten.** |
 | 19 | **Blueprint overwrites service account password** | **`password: !Context password` in user model caused password drift** | **Removed password line from blueprint user model. Password set exclusively via API.** |
 | 20 | **"Access denied for user" after flow fix** | **Likely missing flow bindings or stale permission state after extensive API manipulation** | **IN PROGRESS — see Critical section above** |
+| 21 | Authentik deploy Step 6 crash | `re` used before assignment (inner `import re` in same function) | Top-level `import re`, remove inner import |
+| 22 | TAK Portal dashboard -- / not connected | CA single cert or TRUSTED CERTIFICATE format; missing full chain | Use takserver.pem or ca.pem+root-ca.pem bundle |
+| 23 | infratak app missing after redeploy | Provider search used slug; app never recreated if missing | Search by provider name; verify apps exist, recreate if 404 |
+| 24 | LDAP outpost version mismatch | Hardcoded LDAP image tag | Read server tag from compose, set LDAP image to same |
 
 ---
 
@@ -579,3 +603,15 @@ Error decoding:
 - `Invalid credentials (49)` = password wrong OR flow failed to execute
 - `Insufficient access (50)` / `Access denied for user` = user authenticated but not authorized for LDAP provider
 - `authenticated from session` in logs = using cached bind (may mask underlying flow issues)
+
+---
+
+## 10. Future Work
+
+### Two-server remote deployment (TAK Server DB / core split)
+
+**Goal:** Support deploying TAK Server (and eventually other services) across two machines — e.g. database on one host, TAK Server core on another — with the console managing both.
+
+**Approach:** Implement remote deployment for TAK Server first with an explicit DB vs core split. This will establish the pattern (discovery, credentials, config sync, health checks) for deploying any module remotely. Once that pattern is in place, it can be reused for Authentik, TAK Portal, MediaMTX, etc.
+
+**Status:** To be designed and implemented. Design discussion and decisions should be captured in this doc or a dedicated `docs/REMOTE-SERVICES-DEPLOYMENT.md` so they persist across sessions.
