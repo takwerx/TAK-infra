@@ -7643,7 +7643,7 @@ entries:
         # Regenerate Caddyfile if Caddy is configured
         if settings.get('fqdn'):
             generate_caddyfile(settings)
-            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
             plog(f"  ✓ Caddy config updated for Authentik")
         # If Email Relay is already configured, push SMTP + recovery flow into Authentik now (persistent)
         relay = settings.get('email_relay') or {}
