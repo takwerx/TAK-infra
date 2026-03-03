@@ -277,6 +277,7 @@ def render_sidebar(modules, active_path):
     nr = modules.get('nodered', {})
     if nr.get('installed'):
         parts.append(link('/nodered', f'<img src="{html.escape(NODERED_LOGO_URL)}" alt="" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block"><span>Node-RED</span>'))
+    parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
     email = modules.get('emailrelay', {})
     if email.get('installed'):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
@@ -409,9 +410,10 @@ def marketplace_page():
 @app.route('/help')
 @login_required
 def help_page():
-    """Help: backdoor URL, console password info, reset password."""
+    """Help: backdoor URL, console password info, reset password, hardening."""
     settings = load_settings()
-    return render_template_string(HELP_TEMPLATE, settings=settings, version=VERSION)
+    current_ssh_port = _get_current_ssh_port()
+    return render_template_string(HELP_TEMPLATE, settings=settings, version=VERSION, current_ssh_port=current_ssh_port)
 
 @app.route('/api/update/check')
 @login_required
@@ -529,10 +531,20 @@ def guarddog_page():
     tak = modules.get('takserver', {})
     relay = settings.get('email_relay', {})
     email_relay_configured = bool(relay.get('relay_host') and relay.get('smtp_user'))
+    guarddog_monitors = [
+        {'name': 'Port 8089', 'interval': '1 min', 'desc': 'Checks that TAK Server port 8089 is listening and accepting connections. Auto-restarts TAK Server after 3 consecutive failures.'},
+        {'name': 'Process', 'interval': '1 min', 'desc': 'Verifies all 5 TAK Server Java processes (messaging, api, config, plugins, retention). Auto-restart after 3 consecutive failures.'},
+        {'name': 'Network', 'interval': '1 min', 'desc': 'Pings Cloudflare (1.1.1.1) and Google (8.8.8.8). Alerts only (no restart) after 3 failures — helps distinguish network issues from server issues.'},
+        {'name': 'PostgreSQL', 'interval': '5 min', 'desc': 'Checks that the PostgreSQL service is running. Attempts restart if down; sends alert.'},
+        {'name': 'OOM', 'interval': '1 min', 'desc': 'Scans TAK Server logs for OutOfMemoryError. Auto-restarts TAK Server and sends alert when detected.'},
+        {'name': 'Disk', 'interval': '1 hour', 'desc': 'Checks root and TAK logs filesystem usage. Alert only when usage exceeds 80% (warning) or 90% (critical).'},
+        {'name': 'Certificate', 'interval': 'Daily', 'desc': 'Checks Let\'s Encrypt / TAK Server cert expiry. Alert when less than 40 days remaining.'},
+    ]
     return render_template_string(GUARDDOG_TEMPLATE,
         settings=settings, gd=gd, tak=tak, version=VERSION,
         guarddog_alert_email=settings.get('guarddog_alert_email', ''),
         guarddog_sms=settings.get('guarddog_sms', {}),
+        guarddog_monitors=guarddog_monitors,
         email_relay_configured=email_relay_configured,
         health_url=_guarddog_health_url(settings),
         deploying=guarddog_deploy_status.get('running', False),
@@ -693,6 +705,47 @@ BODY_FILE="$2"
             f.write(content)
         os.chmod(p, 0o755)
 
+def _guarddog_send_sms_now(sms, text):
+    """Send SMS via Twilio or Brevo. sms = settings['guarddog_sms'], text = message body (max 1600 chars). Raises on error."""
+    text = (text or '')[:1600]
+    if sms.get('provider') == 'twilio':
+        import base64
+        account_sid = sms.get('account_sid', '')
+        auth_token = sms.get('auth_token', '')
+        from_num = sms.get('from_number', '')
+        to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+        if not to_list:
+            raise ValueError('No To numbers configured')
+        auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+        for to_num in to_list:
+            req_body = f"To={urllib.parse.quote('+' + to_num.lstrip('+'))}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
+            req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            urllib.request.urlopen(req, timeout=15)
+    else:
+        api_key = sms.get('api_key', '')
+        sender = (sms.get('sender', '') or 'GuardDog')[:11]
+        to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+        if not to_list:
+            raise ValueError('No To numbers configured')
+        for to_num in to_list:
+            payload = json.dumps({'sender': sender, 'recipient': to_num.lstrip('+'), 'content': text, 'type': 'transactional'}).encode()
+            req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=15)
+
+@app.route('/api/guarddog/test-sms', methods=['POST'])
+@login_required
+def guarddog_test_sms():
+    """Send a test SMS using saved Guard Dog SMS config (Twilio or Brevo)."""
+    settings = load_settings()
+    sms = settings.get('guarddog_sms', {})
+    if not sms or sms.get('provider') not in ('twilio', 'brevo'):
+        return jsonify({'success': False, 'error': 'SMS not configured. Save Twilio or Brevo settings first.'}), 400
+    try:
+        _guarddog_send_sms_now(sms, 'Guard Dog test — if you got this, SMS is working.')
+        return jsonify({'success': True, 'message': 'Test SMS sent to configured number(s).'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/guarddog/send-sms', methods=['POST'])
 def guarddog_send_sms():
     """Called by Guard Dog scripts (localhost only) to send SMS via Twilio or Brevo."""
@@ -706,31 +759,7 @@ def guarddog_send_sms():
     if not sms or sms.get('provider') not in ('twilio', 'brevo'):
         return jsonify({'error': 'SMS not configured'}), 400
     try:
-        if sms.get('provider') == 'twilio':
-            import base64
-            account_sid = sms.get('account_sid', '')
-            auth_token = sms.get('auth_token', '')
-            from_num = sms.get('from_number', '')
-            to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
-            if not to_list:
-                return jsonify({'error': 'No To numbers'}), 400
-            text = f"{subj}: {body}"[:1600]
-            auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
-            for to_num in to_list:
-                req_body = f"To={urllib.parse.quote('+' + to_num.lstrip('+'))}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
-                req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
-                urllib.request.urlopen(req, timeout=15)
-        else:
-            api_key = sms.get('api_key', '')
-            sender = (sms.get('sender', '') or 'GuardDog')[:11]
-            to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
-            if not to_list:
-                return jsonify({'error': 'No To numbers'}), 400
-            text = f"{subj}: {body}"[:1600]
-            for to_num in to_list:
-                payload = json.dumps({'sender': sender, 'recipient': to_num.lstrip('+'), 'content': text, 'type': 'transactional'}).encode()
-                req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json'})
-                urllib.request.urlopen(req, timeout=15)
+        _guarddog_send_sms_now(sms, f"{subj}: {body}")
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -5028,15 +5057,19 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
 .form-input{width:100%;max-width:400px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
 .log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;white-space:pre-wrap}
-.guard-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
-.guard-item{background:#0a0e1a;border-radius:8px;padding:12px;font-size:12px}
+.guard-list{display:flex;flex-direction:column;gap:0}
+.guard-item{display:flex;align-items:flex-start;gap:16px;padding:14px 16px;border-bottom:1px solid var(--border);background:#0a0e1a;font-size:13px}
+.guard-item:last-child{border-bottom:none}
+.guard-item-name{font-weight:600;color:var(--cyan);min-width:120px;flex-shrink:0}
+.guard-item-interval{color:var(--text-dim);font-size:11px;min-width:70px;flex-shrink:0}
+.guard-item-desc{color:var(--text-secondary);line-height:1.5;flex:1}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
 </style></head>
 <body>
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1>&#128054; Guard Dog</h1><p>TAK Server health monitoring and auto-recovery (7 monitors + health endpoint)</p></div>
+  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span style="font-size:28px;line-height:1">&#128054;</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery (7 monitors + health endpoint)</p></div>
   {% if gd.running %}<div class="status-banner running"><div class="dot"></div>Guard Dog is running (timers active)</div>
   {% elif gd.installed %}<div class="status-banner stopped"><div class="dot"></div>Guard Dog is installed but timers may be stopped</div>
   {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed</div>{% endif %}
@@ -5051,10 +5084,15 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% if gd.installed %}
   <div class="card"><div class="card-title">Monitors</div>
     <div class="guard-list">
-      <div class="guard-item">Port 8089 (1 min)</div><div class="guard-item">Process (1 min)</div><div class="guard-item">Network (1 min)</div>
-      <div class="guard-item">PostgreSQL (5 min)</div><div class="guard-item">OOM (1 min)</div><div class="guard-item">Disk (1 hr)</div><div class="guard-item">Certificate (daily)</div>
+      {% for m in guarddog_monitors %}
+      <div class="guard-item">
+        <span class="guard-item-name">{{ m.name }}</span>
+        <span class="guard-item-interval">{{ m.interval }}</span>
+        <span class="guard-item-desc">{{ m.desc }}</span>
+      </div>
+      {% endfor %}
     </div>
-    <p style="margin-top:12px;font-size:12px;color:var(--text-dim)">Health endpoint: <code style="color:var(--cyan)">{{ health_url }}</code></p>
+    <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint: <code style="color:var(--cyan)">{{ health_url }}</code></p>
     <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
   </div>
   {% endif %}
@@ -5095,7 +5133,10 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
         <input class="form-input" type="text" id="gd-sms-br-sender" placeholder="Sender (max 11 chars)" value="{{ guarddog_sms.get('sender','') }}" style="margin-bottom:6px">
         <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To number(s) with country code, comma-separated" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
       </div>
-      <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
+        <button class="btn btn-ghost" id="gd-test-sms-btn" onclick="gdTestSms()">Send test SMS</button>
+      </div>
       <div id="gd-sms-msg" style="margin-top:8px;font-size:12px"></div>
     </div>
   </div>
@@ -5131,6 +5172,7 @@ function gdUninstall(){var pw=document.getElementById('gd-uninstall-password');v
 function gdTestEmail(){var el=document.getElementById('gd-test-email-msg');var btn=document.getElementById('gd-test-email-btn');var email=document.getElementById('gd-notify-email');var to=(email&&email.value)?email.value.trim():'';if(!to){el.textContent='Enter an email address.';el.style.color='var(--red)';return;}el.textContent='Sending...';el.style.color='var(--text-dim)';if(btn)btn.disabled=true;fetch('/api/guarddog/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,save:true}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(btn)btn.disabled=false;if(d.success){el.textContent=d.message||'Sent.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){if(btn)btn.disabled=false;el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
 function gdSmsProviderChange(){var p=document.getElementById('gd-sms-provider');var v=p?p.value:'';document.getElementById('gd-sms-twilio').style.display=(v==='twilio')?'block':'none';document.getElementById('gd-sms-brevo').style.display=(v==='brevo')?'block':'none';}
 function gdSmsSave(){var el=document.getElementById('gd-sms-msg');var p=document.getElementById('gd-sms-provider');var provider=(p&&p.value)?p.value.trim():'';var body={provider:provider};if(provider==='twilio'){body.account_sid=document.getElementById('gd-sms-tw-account').value.trim();body.auth_token=document.getElementById('gd-sms-tw-auth').value;body.from_number=document.getElementById('gd-sms-tw-from').value.trim();body.to_numbers=document.getElementById('gd-sms-tw-to').value.trim();}else if(provider==='brevo'){body.api_key=document.getElementById('gd-sms-br-api').value;body.sender=document.getElementById('gd-sms-br-sender').value.trim();body.to_numbers=document.getElementById('gd-sms-br-to').value.trim();}el.textContent='Saving...';el.style.color='var(--text-dim)';fetch('/api/guarddog/sms/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.success){el.textContent=d.message||'Saved.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
+function gdTestSms(){var el=document.getElementById('gd-sms-msg');var btn=document.getElementById('gd-test-sms-btn');if(!el)return;el.textContent='Sending test SMS...';el.style.color='var(--text-dim)';if(btn)btn.disabled=true;fetch('/api/guarddog/test-sms',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(btn)btn.disabled=false;if(d.success){el.textContent=d.message||'Test SMS sent.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){if(btn)btn.disabled=false;el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
 </script>
 </body></html>
 '''
@@ -10026,6 +10068,98 @@ def console_password_reset():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return jsonify({'success': True, 'message': 'Password updated. Console will restart in a few seconds.'})
 
+
+def _get_current_ssh_port():
+    """Read SSH port from /etc/ssh/sshd_config. Default 22 if not set or unreadable."""
+    try:
+        with open('/etc/ssh/sshd_config', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    parts = line.split(None, 1)
+                    if len(parts) >= 2 and parts[0].lower() == 'port':
+                        p = int(parts[1].strip())
+                        if 1 <= p <= 65535:
+                            return p
+    except Exception:
+        pass
+    return 22
+
+
+@app.route('/api/hardening/ssh-port', methods=['GET'])
+@login_required
+def api_hardening_ssh_port_get():
+    """Return current SSH port from sshd_config."""
+    return jsonify({'port': _get_current_ssh_port()})
+
+
+@app.route('/api/hardening/ssh-port', methods=['POST'])
+@login_required
+def api_hardening_ssh_port_post():
+    """Change SSH port: update sshd_config, open firewall, restart sshd. Requires root."""
+    data = request.get_json() or {}
+    try:
+        port = int(data.get('port', 0))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'Invalid port'}), 400
+    if port < 1 or port > 65535:
+        return jsonify({'success': False, 'error': 'Port must be between 1 and 65535'}), 400
+    current = _get_current_ssh_port()
+    if port == current:
+        return jsonify({'success': True, 'message': f'SSH is already on port {port}. No change made.'})
+
+    config_path = '/etc/ssh/sshd_config'
+    try:
+        with open(config_path, 'r') as f:
+            lines = f.readlines()
+    except OSError as e:
+        return jsonify({'success': False, 'error': f'Cannot read sshd_config: {e}'}), 500
+
+    # Replace or add Port line; drop any existing Port / #Port
+    new_lines = []
+    port_line_added = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#'):
+            parts = stripped.split(None, 1)
+            if len(parts) >= 1 and parts[0].lower() == 'port':
+                if not port_line_added:
+                    new_lines.append(f'Port {port}\n')
+                    port_line_added = True
+                continue
+        elif stripped.startswith('#Port') or (stripped.startswith('#') and stripped[1:].strip().lower().startswith('port')):
+            if not port_line_added:
+                new_lines.append(f'Port {port}\n')
+                port_line_added = True
+            continue
+        new_lines.append(line)
+    if not port_line_added:
+        new_lines.append(f'\n# infra-TAK hardening\nPort {port}\n')
+
+    try:
+        with open(config_path, 'w') as f:
+            f.writelines(new_lines)
+    except OSError as e:
+        return jsonify({'success': False, 'error': f'Cannot write sshd_config: {e}'}), 500
+
+    # Allow new port in firewall (ufw)
+    r = subprocess.run(['which', 'ufw'], capture_output=True)
+    if r.returncode == 0:
+        subprocess.run(['ufw', 'allow', f'{port}/tcp'], capture_output=True, timeout=10)
+        subprocess.run(['ufw', 'reload'], capture_output=True, timeout=10)
+
+    # Restart SSH (ssh.service on Debian/Ubuntu, sshd on some others)
+    for svc in ('ssh', 'sshd'):
+        r = subprocess.run(['systemctl', 'restart', svc], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            break
+
+    settings = load_settings()
+    settings['ssh_port'] = port
+    save_settings(settings)
+    return jsonify({'success': True, 'message': f'SSH port set to {port}. Connect using port {port} from now on.'})
+
+
 # === Help Template (sidebar: backdoor, password info, reset) ===
 HELP_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Help — infra-TAK</title>
 <style>
@@ -10064,6 +10198,14 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="help-card">
 <h2>Console password</h2>
 <p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Use the form below if you're logged in; for a full lockout you need the CLI — see the README on the GitHub repo.</p>
+</div>
+<div class="help-card">
+<h2>Server hardening — SSH port</h2>
+<p>Changing the SSH port from the default (22) reduces automated scans and is a common hardening step. <strong>Keep another session open</strong> (e.g. a second SSH or the console in the browser) until you confirm you can connect on the new port, or you may lock yourself out.</p>
+<p style="font-size:12px;color:var(--text-dim)">Current port: <code style="color:var(--cyan)">{{ current_ssh_port }}</code>. We update <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">/etc/ssh/sshd_config</code>, allow the new port in UFW if present, and restart SSH.</p>
+<div class="form-field"><label>SSH port (1–65535)</label><input type="number" id="ssh-port-input" min="1" max="65535" value="{{ current_ssh_port }}" placeholder="22" style="width:100px"></div>
+<button type="button" class="btn btn-primary" onclick="doApplySshPort()">Apply SSH port</button>
+<div id="ssh-port-msg" style="margin-top:12px;font-size:13px;min-height:20px"></div>
 </div>
 <div class="help-card">
 <h2>Reset console password</h2>
@@ -10127,6 +10269,20 @@ async function doResetPassword(){
         var r=await fetch('/api/console/password/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:cur,new_password:neu,new_password_confirm:conf})});
         var d=await r.json();
         if(d.success){msg.style.color='var(--green)';msg.textContent=d.message||'Password updated. Reload in a few seconds.';}
+        else{msg.style.color='var(--red)';msg.textContent=d.error||'Failed';}
+    }catch(e){msg.style.color='var(--red)';msg.textContent=e.message||'Request failed';}
+}
+async function doApplySshPort(){
+    var inp=document.getElementById('ssh-port-input');
+    var msg=document.getElementById('ssh-port-msg');
+    var port=parseInt(inp&&inp.value?inp.value:0,10);
+    msg.textContent='';
+    if(!port||port<1||port>65535){msg.style.color='var(--red)';msg.textContent='Enter a port between 1 and 65535';return;}
+    msg.style.color='var(--cyan)';msg.textContent='Applying...';
+    try{
+        var r=await fetch('/api/hardening/ssh-port',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:port})});
+        var d=await r.json();
+        if(d.success){msg.style.color='var(--green)';msg.textContent=d.message;}
         else{msg.style.color='var(--red)';msg.textContent=d.error||'Failed';}
     }catch(e){msg.style.color='var(--red)';msg.textContent=e.message||'Request failed';}
 }
