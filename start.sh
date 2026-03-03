@@ -1,7 +1,7 @@
 #!/bin/bash
 ##############################################################################
-# TAKWERX Console - Launcher
-# Emergency Services Infrastructure Management Platform
+# infra-TAK - Launcher
+# Team Awareness Kit Infrastructure Platform
 #
 # This is the ONLY script users need to run.
 # Everything else happens in the browser.
@@ -23,10 +23,10 @@ SETTINGS_FILE="$CONFIG_DIR/settings.json"
 
 clear
 echo ""
-echo -e "${CYAN}${BOLD}  ╔════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}  ║         TAKWERX Console                       ║${NC}"
-echo -e "${CYAN}${BOLD}  ║   Emergency Services Infrastructure Platform  ║${NC}"
-echo -e "${CYAN}${BOLD}  ╚════════════════════════════════════════════════╝${NC}"
+echo -e "${CYAN}${BOLD}  ╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}${BOLD}  ║  infra-TAK                                           ║${NC}"
+echo -e "${CYAN}${BOLD}  ║  Team Awareness Kit Infrastructure Platform          ║${NC}"
+echo -e "${CYAN}${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Check if running as root
@@ -240,21 +240,34 @@ generate_self_signed_cert() {
 # ==========================================
 # Create systemd Service
 # ==========================================
+# If the service already exists and points to a directory that has .config/auth.json,
+# keep using that directory so "git pull" or running start.sh from another clone
+# doesn't switch to a path that has no auth (password would stop working).
 create_service() {
-    cat > /etc/systemd/system/takwerx-console.service << EOF
+    SERVICE_FILE="/etc/systemd/system/takwerx-console.service"
+    USE_DIR="$INSTALL_DIR"
+    if [ -f "$SERVICE_FILE" ]; then
+        EXISTING_DIR=$(grep -E '^WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' ')
+        if [ -n "$EXISTING_DIR" ] && [ -d "$EXISTING_DIR" ] && [ -f "$EXISTING_DIR/.config/auth.json" ]; then
+            USE_DIR="$EXISTING_DIR"
+        fi
+    fi
+
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=TAKWERX Console - Infrastructure Management Platform
+Description=infra-TAK - Team Awareness Kit Infrastructure Platform
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/app.py
-WorkingDirectory=$INSTALL_DIR
+ExecStart=$USE_DIR/.venv/bin/python3 $USE_DIR/app.py
+WorkingDirectory=$USE_DIR
 Restart=always
 RestartSec=5
 User=root
 Environment=PYTHONUNBUFFERED=1
+Environment=CONFIG_DIR=$USE_DIR/.config
 
 [Install]
 WantedBy=multi-user.target
@@ -293,9 +306,9 @@ systemctl start takwerx-console
 SERVER_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
-echo -e "${GREEN}${BOLD}  ╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}  ║         TAKWERX Console is running!           ║${NC}"
-echo -e "${GREEN}${BOLD}  ╚════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}${BOLD}  ╔══════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}  ║  infra-TAK is running!                               ║${NC}"
+echo -e "${GREEN}${BOLD}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}Access:${NC} https://$SERVER_IP:5001"
 echo -e "  ${YELLOW}(Accept the self-signed certificate warning in your browser)${NC}"

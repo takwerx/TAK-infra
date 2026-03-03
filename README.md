@@ -18,6 +18,8 @@ A unified web console for deploying and managing TAK ecosystem infrastructure:
 - **Email Relay** — Outbound email for notifications and alerts
 - **Guard Dog** — Network monitoring and intrusion detection *(in development)*
 
+*All modules except Guard Dog are production-ready.*
+
 No more SSH. No more editing XML by hand. No more running scripts and hoping.
 
 ## Quick Start
@@ -33,10 +35,28 @@ The script will:
 1. Detect your OS (Ubuntu 22.04, Rocky 9)
 2. Install Python dependencies
 3. Ask you to set an admin password
-4. Ask if you're using a domain name or IP address
-5. Start the web console
+4. Start the web console
 
 Then open your browser to the URL shown and log in.
+
+**Updating:** After `git pull`, restart the console with `sudo systemctl restart takwerx-console`. Your password and config live in the install directory’s `.config/`. If you run `start.sh` from a different clone or path, the service keeps using the original install directory so your password continues to work.
+
+**Password not working after update?** Use the **backdoor**: **https://&lt;VPS_IP&gt;:5001**. If login spins or fails, on the server run (from the directory where you do `git pull`, e.g. `/root/infra-TAK`): **`sudo ./fix-console-after-pull.sh`** — it pins the config path in the systemd unit and prompts you to set a new password so you can log in again. Alternatively run `sudo ./reset-console-password.sh` from that same directory. After pulling, open the Caddy module and re-save your domain once so the Caddyfile (login bypass) is applied.
+
+## Recovery / backdoor (when Authentik or Caddy is broken)
+
+If Authentik or Caddy is down and you can’t reach **https://infratak.yourdomain.com**:
+
+- **Backdoor:** Open **https://&lt;VPS_IP&gt;:5001** in your browser (use the server’s real IP, not the domain). Log in with the **console password** you set when you ran `start.sh`. That path skips Caddy and Authentik, so you can get back into the console and fix things.
+
+The console password is stored as a **hash** in the install directory at `.config/auth.json` (e.g. `/root/infra-TAK/.config/auth.json`). You **cannot** recover the plaintext password from that file. If you forget it:
+
+```bash
+cd /root/infra-TAK   # or your install path
+sudo ./reset-console-password.sh
+```
+
+Enter a new password twice; the script updates `.config/auth.json` and restarts the console. Then use **https://&lt;VPS_IP&gt;:5001** with the new password. Store the console password somewhere safe (e.g. password manager); it’s your only way in when the domain or Authentik is broken.
 
 ## Deployment Order
 
@@ -45,18 +65,20 @@ Deploy services in this order — each step auto-configures the next:
 ```
 1. Caddy SSL         Set your FQDN, get Let's Encrypt certs (recommended first if using a domain)
          ↓
-2. TAK Server        Upload .deb, deploy, configure ports + certs
+2. Authentik         Identity provider + LDAP outpost (automated deploy)
          ↓
-3. Authentik         Identity provider + LDAP outpost (automated deploy)
-                     Auto-patches CoreConfig.xml with LDAP auth block
+3. Email Relay       Optional; configure SMTP for password recovery
          ↓
-4. TAK Portal        User/cert management portal
-                     Auto-configures Authentik URL, API token, TAK Server certs
+4. TAK Server        Upload .deb, deploy, configure ports + certs
          ↓
-5. Anything else     CloudTAK, Node-RED, MediaMTX, Email Relay — any order
+5. Connect LDAP      On TAK Server page — patches CoreConfig, creates webadmin in Authentik
+         ↓
+6. TAK Portal        User/cert management portal
+         ↓
+7. Anything else     CloudTAK, Node-RED, MediaMTX — any order
 ```
 
-**TAK Server must be deployed before Authentik.** Authentik auto-configures LDAP auth in CoreConfig.xml and restarts TAK Server. TAK Portal auto-detects the Authentik bootstrap token and TAK Server certificates — zero manual configuration required. After TAK Portal, the remaining services can be deployed in any order from the Marketplace.
+**Connect LDAP** runs after TAK Server deploy and wires LDAP auth to CoreConfig. 8446 webadmin login and QR enrollment work immediately after. **For MediaMTX-only (or standalone Authentik):** Deploy Authentik without TAK Server — it skips CoreConfig and webadmin; add TAK Server later and use Connect LDAP.
 
 ## What Gets Automated
 
@@ -90,7 +112,7 @@ start.sh                    ← One CLI command to launch everything
 | Service | Port | Description |
 |---------|------|-------------|
 | TAK-infra Console | 5001 | Management web UI |
-| TAK Server | 8089 | ATAK/TAKAware connections (TLS) |
+| TAK Server | 8089 | TAK client connections (TLS) |
 | TAK Server | 8443 | WebGUI (cert auth) |
 | TAK Server | 8446 | WebGUI (Let's Encrypt, password auth) |
 | Authentik | 9090 | Identity provider |
@@ -101,7 +123,7 @@ start.sh                    ← One CLI command to launch everything
 
 **IP Address Mode** — Self-signed certificate, works anywhere (field deployments, no DNS needed)
 
-**FQDN Mode** — Caddy + Let's Encrypt for proper SSL. Required for ATAK Android QR enrollment. Can upgrade from IP mode through the web console without SSH.
+**FQDN Mode** — Caddy + Let's Encrypt for proper SSL. Required for TAK client QR enrollment. Can upgrade from IP mode through the web console without SSH.
 
 ## QR Code Enrollment
 
@@ -118,14 +140,33 @@ start.sh                    ← One CLI command to launch everything
 - All config files are 600 permissions
 - Authentik bootstrap credentials auto-generated per deployment
 
+## Design notes
+
+- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal’s open request-access page and Email Relay.
+
 ---
 
 ## Changelog
 
+### v0.1.8 — 2026-03-02
+
+**LDAP QR Registration Fix**
+LDAP application was restricted to authentik Admins, blocking QR code enrollment for non-admin users. LDAP is now open to all authenticated users. Connect LDAP / Resync LDAP applies this fix automatically.
+
+**Fresh Deploy Flow**
+8446 webadmin login and QR registration now work on initial deployment without manual Sync webadmin or Resync LDAP. LDAP outpost restart runs at end of TAK Server deploy and during Connect LDAP.
+
+**Authentik Deploy**
+Caddy reload timeout (30s) prevents indefinite hang. Progress message "Updating Caddy config..." before slow steps.
+
+**Recommended deployment order:** Caddy → Authentik → Email Relay → TAK Server → Connect LDAP → TAK Portal → Node-RED / CloudTAK / MediaMTX
+
+---
+
 ### v0.1.7-alpha — 2026-02-24
 
 **Node-RED Authentik Integration**
-Node-RED is now protected behind Authentik forward auth at `console.{fqdn}/nodered/`. Requires Authentik login — same flow as TAK Portal.
+Node-RED is now protected behind Authentik forward auth at `nodered.{fqdn}`. Requires Authentik login — same flow as TAK Portal.
 
 **Bug Fix: Node-RED proxy provider was never created**
 The provider creation payload used `authentication_flow` instead of `authorization_flow` (typo). Every POST returned 400 validation error, not "duplicate" — so the provider was never created. Also added the missing `invalidation_flow` field.

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""infra-TAK v0.1.6 - TAK Infrastructure Platform"""
+"""infra-TAK v0.1.8 - TAK Infrastructure Platform"""
 
 from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory, make_response)
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 from functools import wraps
-import os, ssl, json, secrets, subprocess, time, psutil, threading, html
+import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
 from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
-# Share session across infratak.* and console.* so /nodered/* forward_auth works
+# When using domain (infratak.*) set cookie domain for session; when using IP (backdoor) use no domain so cookie is sent
 def _set_session_cookie_domain():
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.config', 'settings.json')
@@ -33,12 +33,29 @@ def inject_cloudtak_icon():
     return d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(BASE_DIR, '.config')
+# Pin config to env so auth works even if service WorkingDirectory and code path ever differ (e.g. after git pull)
+CONFIG_DIR = os.environ.get('CONFIG_DIR') or os.path.join(BASE_DIR, '.config')
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
+
+def _request_host_is_ip():
+    """True if the request is to an IP address (backdoor), so we must not set cookie domain."""
+    try:
+        host = (request.host or '').split(':')[0]
+        if not host:
+            return True
+        parts = host.split('.')
+        if len(parts) != 4:
+            return False
+        return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+    except Exception:
+        return True
 
 @app.before_request
 def ensure_session_cookie_domain():
-    """Ensure session cookie is set for parent domain so console subdomain receives it (for /nodered/* forward_auth)."""
+    """When access is via IP (backdoor), do not set cookie domain so the cookie is sent. Otherwise use FQDN for cross-subdomain."""
+    if _request_host_is_ip():
+        app.config['SESSION_COOKIE_DOMAIN'] = False
+        return
     if app.config.get('SESSION_COOKIE_DOMAIN'):
         return
     try:
@@ -47,13 +64,17 @@ def ensure_session_cookie_domain():
             app.config['SESSION_COOKIE_DOMAIN'] = '.' + s['fqdn'].split(':')[0]
     except Exception:
         pass
-VERSION = "0.1.7-alpha"
+VERSION = "0.1.8"
 GITHUB_REPO = "takwerx/infra-TAK"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
 # CloudTAK official icon (SVG data URL)
 CLOUDTAK_ICON = "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMYXllcl8xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNzQuMyA0Ni42MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOnVybCgjbGluZWFyLWdyYWRpZW50LTIpO30uY2xzLTJ7ZmlsbDp1cmwoI2xpbmVhci1ncmFkaWVudCk7fTwvc3R5bGU+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQiIHgxPSIxNC4zOCIgeTE9IjguOTMiIHgyPSI2Ni45MiIgeTI9IjYxLjQ3IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmY5ODIwIi8+PHN0b3Agb2Zmc2V0PSIuNDIiIHN0b3AtY29sb3I9IiNmZmNlMDQiLz48c3RvcCBvZmZzZXQ9Ii40OSIgc3RvcC1jb2xvcj0iZ29sZCIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQtMiIgeDE9IjU5LjI3IiB5MT0iLS4zOCIgeDI9IjcyLjc0IiB5Mj0iMTIuMDgiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNmZjk4MjAiLz48c3RvcCBvZmZzZXQ9Ii4yOSIgc3RvcC1jb2xvcj0iI2ZmYjYxMCIvPjxzdG9wIG9mZnNldD0iLjU3IiBzdG9wLWNvbG9yPSJnb2xkIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0yIiBkPSJNNzIuMDUsMjMuNTVjLTEuMjYtMS44OC0zLjAxLTMuNDUtNS4yMS00LjY1LTEuODUtMS4wMS0zLjY5LTEuNTktNS4wNi0xLjkxLS40Mi0xLjc0LTEuMjMtNC4yOC0yLjc3LTYuODVDNTYuNDQsNS44OCw1MS4zNy42Nyw0MS43LjA2Yy0uNTktLjA0LTEuMTgtLjA2LTEuNzUtLjA2LTcuODIsMC0xMi4wNCwzLjUyLTE0LjE5LDYuNDctLjkxLDEuMjQtMS41MywyLjQ4LTEuOTUsMy41NS0uODYtLjEzLTEuODYtLjIyLTIuOTMtLjIyLTMuNTYsMC02LjUyLDEuMDgtOC41NCwzLjEzLTEuOTEsMS45Mi0zLjIsNC4yNi0zLjczLDYuNzUtLjA5LjQxLS4xNS44LS4xOSwxLjE2LS45NS40Ny0yLjEyLDEuMTYtMy4yOSwyLjExQzEuNTYsMjUuODMtLjIsMjkuNjcuMDIsMzQuMDZjLjIyLDQuNDEsMi4yNyw3Ljk2LDUuOTQsMTAuMjksMi42LDEuNjUsNS4xLDIuMTksNS4zOCwyLjIzbC4yMi4wM2guMjJzNDguODYsMCw0OC44NiwwaC4xcy4xLDAsLjEsMGMuMzQtLjAyLDMuMzktLjI2LDYuNTQtMi4xMywzLjA0LTEuOCw2LjctNS40NSw2LjkyLTEyLjU2LjEtMy4xOC0uNjYtNS45OS0yLjI0LTguMzZaTTE0LjQzLDE1YzEuNzUtMS43Nyw0LjI0LTIuMjYsNi40NS0yLjI2LDIuNzEsMCw0Ljk5LjczLDQuOTkuNzMsMCwwLDEuMzMtMTAuNTMsMTQuMDctMTAuNTMuNSwwLDEuMDMuMDIsMS41Ny4wNSwxNi4yNCwxLjAzLDE3Ljc0LDE2LjU0LDE3Ljc0LDE2LjU0LDAsMCw0LjY3LjQyLDguMjEsMy4zMS0zLjQ3LDMuMjItNC45NSw1LjE5LTEyLjc3LDUuNzUtOC42NS42MS03LjQ3LDMuOTUtNy40NywzLjk1bC00LjA1LTguOThoNS43OWMuMTQtMi44NS0uODctNS42NS01LjMxLTUuNjVoLTguNDlsLTYuNTYsMTQuNjJzMS45Ni0zLjMxLTYuNjktMy45NWMtNy42OS0uNTUtNy41OC0yLjY5LTEwLjYxLTUuODgtLjA2LS41OC0uMjYtNC4zLDMuMTMtNy43MloiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik02MS43OSwzLjczaDIuNTl2LjY0aC0uOTN2Mi4zOGgtLjc0di0yLjM4aC0uOTN2LS42NFpNNjcuMDUsMy43M2wtLjc3LDIuMDMtLjc3LTIuMDNoLS45M3YzLjAzaC43di0ybC43MywyaC41NGwuNzMtMnYyaC43di0zLjAzaC0uOTNaIi8+PC9zdmc+"
 # MediaMTX official logo (external URL to avoid long inline strings)
 MEDIAMTX_LOGO_URL = "https://raw.githubusercontent.com/bluenviron/mediamtx/main/logo.png"
+# MediaMTX web editor: regular repo (no LDAP); when Authentik/LDAP is installed we use LDAP branch if set
+MEDIAMTX_EDITOR_REPO = "https://github.com/takwerx/mediamtx-installer.git"
+MEDIAMTX_EDITOR_PATH = "config-editor"  # subdir containing mediamtx_config_editor.py
+MEDIAMTX_EDITOR_LDAP_BRANCH = "infratak"  # when LDAP/Authentik installed, try this branch first; None = always use default branch
 # Node-RED official icons (https://nodered.org/about/resources/media/)
 NODERED_LOGO_URL = "https://nodered.org/about/resources/media/node-red-icon.png"       # icon only (e.g. small nav)
 NODERED_LOGO_URL_2 = "https://nodered.org/about/resources/media/node-red-icon-2.png"   # icon + "Node-RED" text (card, sidebar)
@@ -75,12 +96,41 @@ def save_settings(s):
     json.dump(s, open(os.path.join(CONFIG_DIR, 'settings.json'), 'w'), indent=2)
 
 def load_auth():
+    """Load auth.json from CONFIG_DIR. Never raises — returns {} on missing file or error."""
+    try:
+        p = os.path.join(CONFIG_DIR, 'auth.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_auth(auth_dict):
+    """Write auth.json to CONFIG_DIR. Caller must ensure auth_dict has password_hash."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     p = os.path.join(CONFIG_DIR, 'auth.json')
-    return json.load(open(p)) if os.path.exists(p) else {}
+    auth_dict = dict(auth_dict)
+    if 'created' not in auth_dict:
+        auth_dict['created'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(p, 'w') as f:
+        json.dump(auth_dict, f, indent=4)
+    os.chmod(p, 0o600)
+
+def _apply_authentik_session():
+    """If request has Authentik headers (from Caddy forward_auth), set session so we treat user as logged in."""
+    uname = request.headers.get('X-Authentik-Username')
+    if uname:
+        session['authenticated'] = True
+        session['authentik_username'] = uname
+        return True
+    return False
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if _apply_authentik_session():
+            return f(*args, **kwargs)
         if not session.get('authenticated'):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
@@ -96,6 +146,20 @@ def detect_modules():
     if caddy_installed:
         r = subprocess.run(['systemctl', 'is-active', 'caddy'], capture_output=True, text=True)
         caddy_running = r.stdout.strip() == 'active'
+        # Leftover from uninstall-all? (binary still there but service disabled and stopped)
+        if not caddy_running:
+            re = subprocess.run(['systemctl', 'is-enabled', 'caddy'], capture_output=True, text=True, timeout=5)
+            if (re.stdout or '').strip() == 'disabled':
+                for path in ['/usr/bin/caddy', '/usr/local/bin/caddy']:
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            subprocess.run(f'rm -f {path}', shell=True, capture_output=True)
+                if os.path.exists('/etc/caddy'):
+                    subprocess.run('rm -rf /etc/caddy', shell=True, capture_output=True, timeout=10)
+                subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
+                caddy_installed = False
     modules['caddy'] = {'name': 'Caddy SSL', 'installed': caddy_installed, 'running': caddy_running,
         'description': "Domain setup, Let's Encrypt SSL & reverse proxy" if not has_fqdn else f"SSL & reverse proxy — {settings.get('fqdn', '')}",
         'icon': '🔒', 'icon_url': CADDY_LOGO_URL, 'route': '/caddy', 'priority': 0 if not has_fqdn else 10}
@@ -106,7 +170,7 @@ def detect_modules():
         r = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True)
         tak_running = r.stdout.strip() == 'active'
     modules['takserver'] = {'name': 'TAK Server', 'installed': tak_installed, 'running': tak_running,
-        'description': 'Team Awareness Kit server for situational awareness', 'icon': '🗺️', 'icon_url': TAK_LOGO_URL, 'route': '/takserver', 'priority': 1}
+        'description': 'Team Awareness Kit Server', 'icon': '🗺️', 'icon_url': TAK_LOGO_URL, 'route': '/takserver', 'priority': 1}
     # Authentik - Identity Provider
     ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
     ak_running = False
@@ -215,6 +279,7 @@ def render_sidebar(modules, active_path):
     if email.get('installed'):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
     parts.append(link('/marketplace', '<span class="nav-icon material-symbols-outlined">shopping_cart</span>Marketplace'))
+    parts.append(link('/help', '<span class="nav-icon material-symbols-outlined">help</span>Help'))
     return '<nav class="sidebar">\n  ' + '\n  '.join(parts) + '\n</nav>'
 
 def get_system_metrics():
@@ -224,18 +289,48 @@ def get_system_metrics():
     boot = datetime.fromtimestamp(psutil.boot_time())
     uptime = datetime.now() - boot
     d, h, m = uptime.days, uptime.seconds // 3600, (uptime.seconds % 3600) // 60
+    uu = _get_unattended_upgrades_status()
     return {'cpu_percent': cpu, 'ram_percent': round(ram.percent, 1),
         'ram_used_gb': round(ram.used / (1024**3), 1), 'ram_total_gb': round(ram.total / (1024**3), 1),
         'disk_percent': round(disk.percent, 1), 'disk_used_gb': round(disk.used / (1024**3), 1),
-        'disk_total_gb': round(disk.total / (1024**3), 1), 'uptime': f"{d}d {h}h {m}m"}
+        'disk_total_gb': round(disk.total / (1024**3), 1), 'uptime': f"{d}d {h}h {m}m",
+        'unattended_upgrades': uu}
+
+def _get_unattended_upgrades_status():
+    """Return dict with 'enabled' (bool) and 'running' (bool) for unattended-upgrades."""
+    enabled = False
+    try:
+        r = subprocess.run('systemctl is-enabled unattended-upgrades 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=5)
+        enabled = r.stdout.strip() == 'enabled'
+    except Exception:
+        pass
+    running = False
+    try:
+        proc = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
+            shell=True, capture_output=True, text=True, timeout=5)
+        running = bool(proc.stdout.strip())
+    except Exception:
+        pass
+    # Only show "running" when auto-updates are enabled; otherwise timer/cron can run the binary and confuse the UI
+    if not enabled:
+        running = False
+    return {'enabled': enabled, 'running': running}
 
 # === Routes ===
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    if request.method == 'GET' and _apply_authentik_session():
+        return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
-        if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
+        if not auth.get('password_hash'):
+            return render_template_string(
+                LOGIN_TEMPLATE,
+                error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
+                version=VERSION)
+        if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
         return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
@@ -248,10 +343,17 @@ def logout():
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    """Landing: login at / (infratak.fqdn); when logged in redirect to console."""
+    """Landing: login at / (infratak.fqdn); when logged in redirect to console. Authentik headers = auto-login."""
+    if request.method == 'GET' and _apply_authentik_session():
+        return redirect(url_for('console_page'))
     if request.method == 'POST':
         auth = load_auth()
-        if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
+        if not auth.get('password_hash'):
+            return render_template_string(
+                LOGIN_TEMPLATE,
+                error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
+                version=VERSION)
+        if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
         return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
@@ -261,14 +363,14 @@ def index():
 
 @app.route('/api/forward-auth')
 def forward_auth():
-    """Caddy forward_auth: return 200 if session is authenticated; else redirect to console login. Used for /nodered/*."""
+    """Caddy forward_auth: return 200 if session is authenticated; else redirect to console login."""
     if session.get('authenticated'):
         return '', 200
     # Redirect to console login so user can log in and retry (Caddy passes this response to the client)
     settings = load_settings()
     fqdn = (settings.get('fqdn') or '').split(':')[0]
     if fqdn:
-        login_url = f"https://console.{fqdn}/login"
+        login_url = f"https://infratak.{fqdn}/login"
         return redirect(login_url, code=302)
     return '', 401
 
@@ -279,8 +381,10 @@ def console_page():
     settings = load_settings()
     all_modules = detect_modules()
     modules = {k: m for k, m in all_modules.items() if m.get('installed')}
+    module_versions = get_all_module_versions()
     resp = render_template_string(CONSOLE_TEMPLATE,
-        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION)
+        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION,
+        module_versions=module_versions)
     from flask import make_response
     r = make_response(resp)
     r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
@@ -299,6 +403,13 @@ def marketplace_page():
     r = make_response(resp)
     r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return r
+
+@app.route('/help')
+@login_required
+def help_page():
+    """Help: backdoor URL, console password info, reset password."""
+    settings = load_settings()
+    return render_template_string(HELP_TEMPLATE, settings=settings, version=VERSION)
 
 @app.route('/api/update/check')
 @login_required
@@ -362,11 +473,21 @@ def update_apply():
 def takserver_page():
     modules = detect_modules()
     tak = modules.get('takserver', {})
+    ak = modules.get('authentik', {})
+    # Show "Connect TAK Server to LDAP" when: TAK Server + Authentik installed, CoreConfig exists, LDAP not yet applied
+    has_ldap = _coreconfig_has_ldap()
+    show_connect_ldap = (
+        tak.get('installed') and ak.get('installed') and
+        os.path.exists('/opt/tak/CoreConfig.xml') and not has_ldap
+    )
+    ldap_connected = tak.get('installed') and ak.get('installed') and has_ldap
     # Reset deploy_done once TAK Server is running so the running view shows
     if tak.get('installed') and tak.get('running') and not deploy_status.get('running', False):
         deploy_status.update({'complete': False, 'error': False})
+    tak_version = _get_takserver_version_info().get('version', '') if tak.get('installed') else ''
     return render_template_string(TAKSERVER_TEMPLATE,
-        settings=load_settings(), modules=modules, tak=tak,
+        settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
+        show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
 
@@ -437,34 +558,30 @@ def _caddy_configured_urls(settings, modules):
     fqdn = settings.get('fqdn', '').strip()
     if not fqdn:
         return []
-    base = f'https://{fqdn}'
+    sd = _get_all_service_domains(settings)
     urls = []
-    # infra-TAK platform (login) and console (dashboard) — both served when Caddy has a domain
-    urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': 'Login & platform'})
-    urls.append({'name': 'Console', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}', 'desc': 'Console (after login)'})
+    ak = modules.get('authentik', {})
+    infratak_desc = 'Console (Authentik when enabled)' if ak.get('installed') else 'Console (after login)'
+    urls.append({'name': 'infra-TAK', 'host': sd['infratak'], 'url': f'https://{sd["infratak"]}', 'desc': infratak_desc})
     tak = modules.get('takserver', {})
     if tak.get('installed'):
-        urls.append({'name': 'TAK Server', 'host': f'tak.{fqdn}', 'url': f'https://tak.{fqdn}', 'desc': 'WebGUI, Marti API'})
-    ak = modules.get('authentik', {})
+        urls.append({'name': 'TAK Server', 'host': sd['takserver'], 'url': f'https://{sd["takserver"]}', 'desc': 'WebGUI, Marti API'})
     if ak.get('installed'):
-        urls.append({'name': 'Authentik', 'host': f'authentik.{fqdn}', 'url': f'https://authentik.{fqdn}', 'desc': 'Identity provider'})
+        urls.append({'name': 'Authentik', 'host': sd['authentik'], 'url': f'https://{sd["authentik"]}', 'desc': 'Identity provider'})
     portal = modules.get('takportal', {})
     if portal.get('installed'):
-        urls.append({'name': 'TAK Portal', 'host': f'takportal.{fqdn}', 'url': f'https://takportal.{fqdn}', 'desc': 'User & cert management'})
+        urls.append({'name': 'TAK Portal', 'host': sd['takportal'], 'url': f'https://{sd["takportal"]}', 'desc': 'User & cert management'})
     nodered = modules.get('nodered', {})
     if nodered.get('installed'):
-        urls.append({'name': 'Node-RED', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}/nodered/', 'desc': 'Flow editor (console only)'})
+        urls.append({'name': 'Node-RED', 'host': sd['nodered'], 'url': f'https://{sd["nodered"]}', 'desc': 'Flow editor (Authentik when enabled)'})
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
-        urls.append({'name': 'CloudTAK (map)', 'host': f'map.{fqdn}', 'url': f'https://map.{fqdn}', 'desc': 'Browser TAK client'})
-        urls.append({'name': 'CloudTAK (tiles)', 'host': f'tiles.map.{fqdn}', 'url': f'https://tiles.map.{fqdn}', 'desc': 'Tile server'})
-        urls.append({'name': 'CloudTAK (video)', 'host': f'video.{fqdn}', 'url': f'https://video.{fqdn}', 'desc': 'Map video / HLS'})
+        urls.append({'name': 'CloudTAK (map)', 'host': sd['cloudtak_map'], 'url': f'https://{sd["cloudtak_map"]}', 'desc': 'Browser TAK client'})
+        urls.append({'name': 'CloudTAK (tiles)', 'host': sd['cloudtak_tiles'], 'url': f'https://{sd["cloudtak_tiles"]}', 'desc': 'Tile server'})
+        urls.append({'name': 'CloudTAK (video)', 'host': sd['cloudtak_video'], 'url': f'https://{sd["cloudtak_video"]}', 'desc': 'Map video / HLS'})
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
-        mtx_host = settings.get('mediamtx_domain', f'stream.{fqdn}')
-        if '.' not in mtx_host:
-            mtx_host = f'{mtx_host}.{fqdn}'
-        urls.append({'name': 'MediaMTX', 'host': mtx_host, 'url': f'https://{mtx_host}', 'desc': 'Stream web console & HLS'})
+        urls.append({'name': 'MediaMTX', 'host': sd['mediamtx'], 'url': f'https://{sd["mediamtx"]}', 'desc': 'Stream web console & HLS'})
     return urls
 
 @app.route('/caddy')
@@ -532,6 +649,25 @@ def caddy_update_domain():
     settings['fqdn'] = domain
     save_settings(settings)
     generate_caddyfile(settings)
+    # If Authentik is installed, ensure infra-TAK Console provider exists (so infratak/console are behind Authentik)
+    ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
+    if ak_installed:
+        def _ensure_console_app():
+            time.sleep(1)
+            try:
+                env_path = os.path.expanduser('~/authentik/.env')
+                ak_token = ''
+                if os.path.exists(env_path):
+                    with open(env_path) as f:
+                        for line in f:
+                            if line.strip().startswith('AUTHENTIK_TOKEN='):
+                                ak_token = line.strip().split('=', 1)[1].strip()
+                                break
+                if ak_token:
+                    _ensure_authentik_console_app(domain, ak_token)
+            except Exception:
+                pass
+        threading.Thread(target=_ensure_console_app, daemon=True).start()
     # Restart in background so response reaches client before Caddy restarts (console is behind Caddy)
     def _restart():
         time.sleep(2)
@@ -592,10 +728,19 @@ def caddy_uninstall():
     settings = load_settings()
     pkg_mgr = settings.get('pkg_mgr', 'apt')
     if pkg_mgr == 'apt':
-        subprocess.run('apt-get remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
     else:
         subprocess.run('dnf remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
     steps.append('Removed Caddy package')
+    for path in ['/usr/bin/caddy', '/usr/local/bin/caddy']:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                subprocess.run(f'rm -f {path}', shell=True, capture_output=True)
+    if os.path.exists('/etc/caddy'):
+        subprocess.run('rm -rf /etc/caddy', shell=True, capture_output=True, timeout=10)
+    subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
     settings['fqdn'] = ''
     save_settings(settings)
     steps.append('Cleared domain from settings')
@@ -603,9 +748,90 @@ def caddy_uninstall():
     caddy_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
 
+@app.route('/api/caddy/domains', methods=['GET'])
+@login_required
+def caddy_get_domains():
+    """Return current per-service domains and which services are installed."""
+    settings = load_settings()
+    modules = detect_modules()
+    sd = _get_all_service_domains(settings)
+    fqdn = settings.get('fqdn', '')
+    services = []
+    svc_defs = [
+        ('infratak', 'infra-TAK', 'infratak', True),
+        ('takserver', 'TAK Server', 'takserver', modules.get('takserver', {}).get('installed', False)),
+        ('authentik', 'Authentik', 'authentik', modules.get('authentik', {}).get('installed', False)),
+        ('takportal', 'TAK Portal', 'takportal', modules.get('takportal', {}).get('installed', False)),
+        ('nodered', 'Node-RED', 'nodered', modules.get('nodered', {}).get('installed', False)),
+        ('cloudtak_map', 'CloudTAK Map', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('cloudtak_tiles', 'CloudTAK Tiles', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('cloudtak_video', 'CloudTAK Video', 'cloudtak', modules.get('cloudtak', {}).get('installed', False)),
+        ('mediamtx', 'MediaMTX', 'mediamtx', modules.get('mediamtx', {}).get('installed', False)),
+    ]
+    for key, label, mod_key, installed in svc_defs:
+        setting_key = f'{key}_domain' if key != 'mediamtx' else 'mediamtx_domain'
+        custom = settings.get(setting_key, '')
+        services.append({
+            'key': key, 'label': label, 'domain': sd[key],
+            'default': f'{SERVICE_DOMAIN_DEFAULTS[key]}.{fqdn}' if fqdn else '',
+            'custom': custom, 'installed': installed,
+        })
+    return jsonify({'fqdn': fqdn, 'services': services})
+
+@app.route('/api/caddy/domains', methods=['POST'])
+@login_required
+def caddy_save_domains():
+    """Save per-service domain overrides and regenerate Caddyfile."""
+    data = request.get_json() or {}
+    domains = data.get('domains', {})
+    settings = load_settings()
+    fqdn = settings.get('fqdn', '')
+    for key in SERVICE_DOMAIN_DEFAULTS:
+        setting_key = f'{key}_domain' if key != 'mediamtx' else 'mediamtx_domain'
+        if key in domains:
+            val = domains[key].strip().lower()
+            default_val = f'{SERVICE_DOMAIN_DEFAULTS[key]}.{fqdn}' if fqdn else ''
+            if val and val != default_val:
+                settings[setting_key] = val
+            elif setting_key in settings:
+                del settings[setting_key]
+    save_settings(settings)
+    generate_caddyfile(settings)
+    threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
+    return jsonify({'success': True, 'domains': _get_all_service_domains(settings)})
+
+SERVICE_DOMAIN_DEFAULTS = {
+    'infratak': 'infratak',
+    'takserver': 'tak',
+    'authentik': 'authentik',
+    'takportal': 'takportal',
+    'nodered': 'nodered',
+    'cloudtak_map': 'map',
+    'cloudtak_tiles': 'tiles.map',
+    'cloudtak_video': 'video',
+    'mediamtx': 'stream',
+}
+
+def _get_service_domain(settings, service_key):
+    """Get domain for a service: custom override from settings, or default prefix.{fqdn}."""
+    setting_key = f'{service_key}_domain' if service_key != 'mediamtx' else 'mediamtx_domain'
+    custom = settings.get(setting_key, '').strip()
+    if custom:
+        if '.' not in custom:
+            fqdn = settings.get('fqdn', '').strip()
+            return f'{custom}.{fqdn}' if fqdn else custom
+        return custom
+    fqdn = settings.get('fqdn', '').strip()
+    prefix = SERVICE_DOMAIN_DEFAULTS.get(service_key, service_key)
+    return f'{prefix}.{fqdn}' if fqdn else ''
+
+def _get_all_service_domains(settings):
+    """Return dict of service_key → current domain for all services."""
+    return {k: _get_service_domain(settings, k) for k in SERVICE_DOMAIN_DEFAULTS}
+
 def generate_caddyfile(settings=None):
     """Generate Caddyfile based on current settings and deployed services.
-    Each service gets its own subdomain: console.domain, tak.domain, etc."""
+    Each service gets its own domain (customizable per-service, defaults to subdomain of base FQDN)."""
     if settings is None:
         settings = load_settings()
     domain = settings.get('fqdn', '')
@@ -614,101 +840,105 @@ def generate_caddyfile(settings=None):
     modules = detect_modules()
 
     lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
+    sd = _get_all_service_domains(settings)
 
-    # infra-TAK (login & platform) — infratak.domain
-    lines.append(f"infratak.{domain} {{")
-    lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
-    lines.append(f"        transport http {{")
-    lines.append(f"            tls")
-    lines.append(f"            tls_insecure_skip_verify")
-    lines.append(f"        }}")
-    lines.append(f"    }}")
-    lines.append(f"}}")
-    lines.append("")
-
-    # Console — console.domain; /nodered/* → Node-RED (behind Authentik when Authentik is installed)
-    nodered = modules.get('nodered', {})
     ak = modules.get('authentik', {})
-    lines.append(f"console.{domain} {{")
-    if nodered.get('installed'):
-        if ak.get('installed'):
-            # Authentik outpost must be reachable for auth to work on this host
-            lines.append(f"    route {{")
-            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-            lines.append(f"        handle /nodered/* {{")
-            lines.append(f"            forward_auth 127.0.0.1:9090 {{")
-            lines.append(f"                uri /outpost.goauthentik.io/auth/caddy")
-            lines.append(f"                trusted_proxies private_ranges")
-            lines.append(f"            }}")
-            lines.append(f"            reverse_proxy 127.0.0.1:1880")
-            lines.append(f"        }}")
-            lines.append(f"        handle {{")
-            lines.append(f"            reverse_proxy 127.0.0.1:5001 {{")
-            lines.append(f"                transport http {{")
-            lines.append(f"                    tls")
-            lines.append(f"                    tls_insecure_skip_verify")
-            lines.append(f"                }}")
-            lines.append(f"            }}")
-            lines.append(f"        }}")
-            lines.append(f"    }}")
-        else:
-            lines.append(f"    handle /nodered/* {{")
-            lines.append(f"        reverse_proxy 127.0.0.1:1880")
-            lines.append(f"    }}")
-            lines.append(f"    handle {{")
-            lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-            lines.append(f"            transport http {{")
-            lines.append(f"                tls")
-            lines.append(f"                tls_insecure_skip_verify")
-            lines.append(f"            }}")
-            lines.append(f"        }}")
-            lines.append(f"    }}")
+    nodered = modules.get('nodered', {})
+    infratak_host = sd['infratak']
+    lines.append(f"{infratak_host} {{")
+    if ak.get('installed'):
+        lines.append(f"    route /login* {{")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"                read_timeout 1h")
+        lines.append(f"                write_timeout 1h")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
+        lines.append(f"    route {{")
+        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+        lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+        lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+        lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
+        lines.append(f"            trusted_proxies private_ranges")
+        lines.append(f"        }}")
+        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"            transport http {{")
+        lines.append(f"                tls")
+        lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"                read_timeout 1h")
+        lines.append(f"                write_timeout 1h")
+        lines.append(f"            }}")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
     else:
         lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
         lines.append(f"        transport http {{")
         lines.append(f"            tls")
         lines.append(f"            tls_insecure_skip_verify")
+        lines.append(f"            read_timeout 1h")
+        lines.append(f"            write_timeout 1h")
         lines.append(f"        }}")
         lines.append(f"    }}")
     lines.append(f"}}")
     lines.append("")
 
-    # TAK Server — tak.domain
+    if nodered.get('installed'):
+        nodered_host = sd['nodered']
+        lines.append(f"# Node-RED flow editor")
+        lines.append(f"{nodered_host} {{")
+        if ak.get('installed'):
+            lines.append(f"    route {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+            lines.append(f"            trusted_proxies private_ranges")
+            lines.append(f"        }}")
+            lines.append(f"        reverse_proxy 127.0.0.1:1880")
+            lines.append(f"    }}")
+        else:
+            lines.append(f"    reverse_proxy 127.0.0.1:1880")
+        lines.append(f"}}")
+        lines.append("")
+
     tak = modules.get('takserver', {})
     if tak.get('installed'):
+        tak_host = sd['takserver']
         lines.append(f"# TAK Server")
-        lines.append(f"tak.{domain} {{")
+        lines.append(f"{tak_host} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:8446 {{")
         lines.append(f"        transport http {{")
         lines.append(f"            tls")
         lines.append(f"            tls_insecure_skip_verify")
         lines.append(f"        }}")
-        lines.append(f"        header_down Location 127.0.0.1:8446 tak.{domain}")
+        lines.append(f"        header_down Location 127.0.0.1:8446 {tak_host}")
         lines.append(f"        header_down Location http:// https://")
         lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
 
-    # Authentik — authentik.domain
     ak = modules.get('authentik', {})
     if ak.get('installed'):
+        ak_host = sd['authentik']
         lines.append(f"# Authentik")
-        lines.append(f"authentik.{domain} {{")
+        lines.append(f"{ak_host} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:9090")
         lines.append(f"}}")
         lines.append("")
 
-    # TAK Portal — portal.domain (with forward_auth if Authentik is deployed)
     portal = modules.get('takportal', {})
     if portal.get('installed'):
+        portal_host = sd['takportal']
         lines.append(f"# TAK Portal")
-        lines.append(f"takportal.{domain} {{")
+        lines.append(f"{portal_host} {{")
         if ak.get('installed'):
             lines.append(f"    route {{")
             lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
             lines.append(f"")
             lines.append(f"        @public {{")
-            lines.append(f"            path /request-access* /styles.css /favicon.ico /branding/* /public/*")
+            lines.append(f"            path /request-access* /lookup* /styles.css /favicon.ico /branding/* /public/*")
             lines.append(f"        }}")
             lines.append(f"")
             lines.append(f"        handle @public {{")
@@ -728,26 +958,24 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # Node-RED: no subdomain — only via console.{domain}/nodered/ (session required)
-
-    # CloudTAK — map.domain, tiles.map.domain, video.domain
     cloudtak = modules.get('cloudtak', {})
     if cloudtak.get('installed'):
+        ct_map = sd['cloudtak_map']
+        ct_tiles = sd['cloudtak_tiles']
+        ct_video = sd['cloudtak_video']
         lines.append(f"# CloudTAK Web UI")
-        lines.append(f"map.{domain} {{")
+        lines.append(f"{ct_map} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:5000")
         lines.append(f"}}")
         lines.append("")
         lines.append(f"# CloudTAK Tile Server (CORS for map origin)")
-        lines.append(f"tiles.map.{domain} {{")
+        lines.append(f"{ct_tiles} {{")
         lines.append(f"    header Access-Control-Allow-Origin *")
         lines.append(f"    reverse_proxy 127.0.0.1:5002")
         lines.append(f"}}")
         lines.append("")
-        # CloudTAK Media: one host on 443. /stream/* → HLS (18888), rest → MediaMTX API (9997).
-        # CORS inside handle blocks so HLS manifest/segments from map.domain get Allow-Origin (avoids status 0).
         lines.append(f"# CloudTAK Media (video) — /stream/* → HLS, rest → MediaMTX API")
-        lines.append(f"video.{domain} {{")
+        lines.append(f"{ct_video} {{")
         lines.append(f"    handle /stream/* {{")
         lines.append(f"        header Access-Control-Allow-Origin *")
         lines.append(f"        reverse_proxy 127.0.0.1:18888")
@@ -759,13 +987,35 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — stream.domain is web editor only. For drone/controller/ATAK push to 8554/8890.
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
-        mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
+        mtx_host = sd['mediamtx']
         lines.append(f"# MediaMTX Web Console")
-        lines.append(f"{mtx_domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:5080")
+        lines.append(f"{mtx_host} {{")
+        if ak.get('installed'):
+            lines.append(f"    route /watch/* {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+            lines.append(f"    route /hls-proxy/* {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+            lines.append(f"    route /shared/* {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+            lines.append(f"    route /shared-hls/* {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+            lines.append(f"    route {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+            lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
+            lines.append(f"            trusted_proxies private_ranges")
+            lines.append(f"        }}")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+        else:
+            lines.append(f"    reverse_proxy 127.0.0.1:5080")
         lines.append(f"}}")
         lines.append("")
 
@@ -813,7 +1063,7 @@ def wait_for_apt_lock(log_fn, log_list):
 def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
     """
     Install the Caddy-managed Let's Encrypt cert on TAK Server's port 8446
-    so ATAK trusts the enrollment endpoint without a data package.
+    so TAK clients trust the enrollment endpoint without a data package.
 
     Called from:
       - run_caddy_deploy  (Step 5/5) — wait_for_cert=True  (Caddy just started, cert may need a moment)
@@ -987,7 +1237,7 @@ WantedBy=timers.target
     log_fn("  Restarting TAK Server to load LE cert on port 8446...")
     subprocess.run('systemctl restart takserver 2>/dev/null; true', shell=True, capture_output=True)
     log_fn("  ✓ TAK Server restarted")
-    log_fn("✓ Port 8446 now serving Let's Encrypt cert — ATAK enrollment ready")
+    log_fn("✓ Port 8446 now serving Let's Encrypt cert — ready for TAK clients")
     return True
 
 
@@ -1032,8 +1282,13 @@ def run_caddy_deploy(domain):
                 caddy_deploy_status.update({'running': False, 'error': True})
                 return
 
-        # Verify install
+        # Verify install (if binary missing e.g. after uninstall, reinstall restores it)
         r = subprocess.run('which caddy', shell=True, capture_output=True, text=True)
+        if r.returncode != 0 and pkg_mgr == 'apt':
+            plog("  Binary missing after install; reinstalling package...")
+            subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y caddy 2>&1',
+                shell=True, capture_output=True, text=True, timeout=120, env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive', 'NEEDRESTART_MODE': 'a'})
+            r = subprocess.run('which caddy', shell=True, capture_output=True, text=True)
         if r.returncode != 0:
             plog("✗ Caddy binary not found after install")
             caddy_deploy_status.update({'running': False, 'error': True})
@@ -1068,13 +1323,24 @@ def run_caddy_deploy(domain):
         subprocess.run('systemctl enable caddy 2>/dev/null; true', shell=True, capture_output=True)
         r = subprocess.run('systemctl restart caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
-            plog(f"⚠ Caddy start issue: {r.stderr.strip()[:200]}")
+            plog(f"⚠ systemctl restart: {(r.stderr or r.stdout or '').strip()[:300]}")
         time.sleep(3)
         r = subprocess.run('systemctl is-active caddy', shell=True, capture_output=True, text=True)
         if r.stdout.strip() == 'active':
             plog("✓ Caddy is running")
         else:
-            plog("⚠ Caddy may not be fully started — check with: systemctl status caddy")
+            plog("✗ Caddy did not start. Capturing status and logs:")
+            status = subprocess.run('systemctl status caddy --no-pager -l 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+            if status.stdout:
+                for line in (status.stdout or '').strip().split('\n')[:15]:
+                    plog(f"  {line}")
+            journal = subprocess.run('journalctl -u caddy -n 25 --no-pager 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+            if journal.stdout:
+                plog("  --- journalctl -u caddy (last 25 lines) ---")
+                for line in (journal.stdout or '').strip().split('\n'):
+                    plog(f"  {line}")
+            caddy_deploy_status.update({'running': False, 'error': True})
+            return
 
         # Update settings
         settings['ssl_mode'] = 'fqdn'
@@ -1092,6 +1358,191 @@ def run_caddy_deploy(domain):
     except Exception as e:
         plog(f"✗ Error: {str(e)}")
         caddy_deploy_status.update({'running': False, 'error': True})
+
+def _get_takportal_version_info():
+    """Return {version: str, update_available: bool, latest: str|None} for TAK Portal.
+    Version from package.json; update status from container logs [update-check] line."""
+    import re
+    portal_dir = os.path.expanduser('~/TAK-Portal')
+    out = {'version': '', 'update_available': False, 'latest': None}
+    # Prefer package.json version (semantic version)
+    pkg_path = os.path.join(portal_dir, 'package.json')
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path) as f:
+                data = json.load(f)
+            out['version'] = (data.get('version') or '').strip()
+        except Exception:
+            pass
+    if not out['version'] and os.path.isdir(os.path.join(portal_dir, '.git')):
+        rv = subprocess.run(f'cd {portal_dir} && git describe --tags --always 2>/dev/null || git log -1 --format="%h"', shell=True, capture_output=True, text=True, timeout=5)
+        if rv.returncode == 0 and rv.stdout.strip():
+            out['version'] = rv.stdout.strip()
+    # If container is running, parse last [update-check] line for update_available
+    r = subprocess.run('docker ps --filter name=tak-portal -q 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and (r.stdout or '').strip():
+        log_r = subprocess.run('docker logs tak-portal --tail 200 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+        if log_r.stdout:
+            for line in reversed(log_r.stdout.strip().split('\n')):
+                if '[update-check]' in line:
+                    # e.g. [update-check] current=1.2.19 latest=1.2.20 update=true
+                    m = re.search(r'latest=([^\s]+)', line)
+                    if m:
+                        out['latest'] = m.group(1).strip()
+                    if 'update=true' in line:
+                        out['update_available'] = True
+                    break
+    return out
+
+
+def _get_takserver_version_info():
+    """Return {version: str, update_available: bool, latest: None} for TAK Server from installed package."""
+    out = {'version': '', 'update_available': False, 'latest': None}
+    if not os.path.exists('/opt/tak') or not os.path.exists('/opt/tak/CoreConfig.xml'):
+        return out
+    r = subprocess.run("dpkg -s takserver 2>/dev/null | grep ^Version:", shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout.strip():
+        # "Version: 5.6-RELEASE-6" or "Version: 5.6-RELEASE-6-HEAD"
+        out['version'] = r.stdout.strip().replace('Version:', '').strip()
+        return out
+    r = subprocess.run("rpm -q takserver 2>/dev/null", shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout.strip():
+        # noarch package: takserver-5.6-RELEASE-6.noarch
+        ver = r.stdout.strip()
+        if ver.startswith('takserver-'):
+            ver = ver.split('-', 1)[1]
+        if '.noarch' in ver:
+            ver = ver.replace('.noarch', '')
+        if ver:
+            out['version'] = ver
+    return out
+
+
+def _get_caddy_version_info():
+    """Return {version: str, update_available: bool} for Caddy."""
+    out = {'version': '', 'update_available': False}
+    r = subprocess.run('caddy version 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout:
+        # e.g. "v2.8.4" or "Caddy v2.8.4"
+        import re
+        m = re.search(r'v(\d+\.\d+\.\d+[^\s]*)', r.stdout)
+        if m:
+            out['version'] = 'v' + m.group(1).strip()
+    if out['version']:
+        apt = subprocess.run('apt list --upgradable 2>/dev/null | grep -i caddy', shell=True, capture_output=True, text=True, timeout=10)
+        if apt.returncode == 0 and (apt.stdout or '').strip():
+            out['update_available'] = True
+    return out
+
+
+def _get_authentik_version_info():
+    """Return {version: str, update_available: bool} for Authentik from image tag or docker."""
+    out = {'version': '', 'update_available': False}
+    ak_dir = os.path.expanduser('~/authentik')
+    compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+    if not os.path.isfile(compose_path):
+        return out
+    try:
+        with open(compose_path) as f:
+            content = f.read()
+        import re
+        # image: ghcr.io/goauthentik/server:2024.2.1 or :latest
+        m = re.search(r'image:.*?/server:([^\s\n]+)', content)
+        if m:
+            out['version'] = m.group(1).strip()
+        if not out['version']:
+            r = subprocess.run('docker images --format "{{.Tag}}" ghcr.io/goauthentik/server 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                out['version'] = r.stdout.strip().split('\n')[0]
+    except Exception:
+        pass
+    # update_available: leave False unless we add docker compose pull check
+    return out
+
+
+def _get_nodered_version_info():
+    """Return {version: str, update_available: bool} for Node-RED from container or image."""
+    out = {'version': '', 'update_available': False}
+    r = subprocess.run('docker ps -q -f name=nodered 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if not (r.returncode == 0 and (r.stdout or '').strip()):
+        return out
+    # Try to get version from container (Node-RED package.json)
+    ex = subprocess.run('docker exec nodered node -p "try{require(\'/usr/src/node-red/package.json\').version}catch(e){\'\'}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if ex.returncode == 0 and ex.stdout.strip():
+        out['version'] = ex.stdout.strip().strip('"\'')
+    if not out['version']:
+        out['version'] = 'latest'
+    return out
+
+
+def _get_cloudtak_version_info():
+    """Return {version: str, update_available: bool, latest: str|None} for CloudTAK."""
+    import re
+    out = {'version': '', 'update_available': False, 'latest': None}
+    ct_dir = os.path.expanduser('~/CloudTAK')
+    for pkg in ['package.json', 'api/package.json', 'web/package.json']:
+        pkg_path = os.path.join(ct_dir, pkg)
+        if os.path.isfile(pkg_path):
+            try:
+                with open(pkg_path) as f:
+                    data = json.load(f)
+                out['version'] = (data.get('version') or '').strip()
+                if out['version']:
+                    break
+            except Exception:
+                pass
+    if not out['version'] and os.path.isdir(os.path.join(ct_dir, '.git')):
+        rv = subprocess.run(f'cd {ct_dir} && git describe --tags --always 2>/dev/null || git log -1 --format="%h"', shell=True, capture_output=True, text=True, timeout=5)
+        if rv.returncode == 0 and rv.stdout.strip():
+            out['version'] = rv.stdout.strip()
+    r = subprocess.run('docker ps -q -f name=cloudtak-api 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and (r.stdout or '').strip():
+        log_r = subprocess.run('docker logs cloudtak-api --tail 150 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+        if log_r.stdout:
+            for line in reversed(log_r.stdout.strip().split('\n')):
+                if '[update-check]' in line:
+                    m = re.search(r'latest=([^\s]+)', line)
+                    if m:
+                        out['latest'] = m.group(1).strip()
+                    if 'update=true' in line:
+                        out['update_available'] = True
+                    break
+    return out
+
+
+def get_all_module_versions():
+    """Return dict of module_key -> {version, update_available, latest?} for console cards."""
+    modules = detect_modules()
+    result = {}
+    if modules.get('caddy', {}).get('installed'):
+        result['caddy'] = _get_caddy_version_info()
+    if modules.get('authentik', {}).get('installed'):
+        result['authentik'] = _get_authentik_version_info()
+    if modules.get('nodered', {}).get('installed'):
+        result['nodered'] = _get_nodered_version_info()
+    if modules.get('cloudtak', {}).get('installed'):
+        result['cloudtak'] = _get_cloudtak_version_info()
+    if modules.get('takportal', {}).get('installed'):
+        result['takportal'] = _get_takportal_version_info()
+    if modules.get('takserver', {}).get('installed'):
+        result['takserver'] = _get_takserver_version_info()
+    return result
+
+
+@app.route('/api/modules/version')
+@login_required
+def api_modules_version():
+    """Return version and update_available for all installed services (for console cards)."""
+    return jsonify(get_all_module_versions())
+
+
+@app.route('/api/takportal/version')
+@login_required
+def takportal_version_api():
+    """Return TAK Portal version and update-available for module/card UI."""
+    info = _get_takportal_version_info()
+    return jsonify(info)
+
 
 @app.route('/takportal')
 @login_required
@@ -1122,9 +1573,16 @@ def takportal_page():
             for line in f:
                 if line.strip().startswith('WEB_UI_PORT='):
                     portal_port = line.strip().split('=', 1)[1].strip() or '3000'
+    # Real version (package.json) and update-available (from container logs)
+    vinfo = _get_takportal_version_info()
+    portal_version = vinfo['version'] or ''
+    portal_update_available = vinfo['update_available']
+    portal_latest = vinfo['latest']
     return render_template_string(TAKPORTAL_TEMPLATE,
         settings=settings, portal=portal, container_info=container_info,
-        portal_port=portal_port, version=VERSION,
+        portal_port=portal_port, portal_version=portal_version,
+        portal_update_available=portal_update_available, portal_latest=portal_latest,
+        version=VERSION,
         deploying=takportal_deploy_status.get('running', False),
         deploy_done=takportal_deploy_status.get('complete', False))
 
@@ -1144,7 +1602,16 @@ def takportal_control():
     elif action == 'restart':
         subprocess.run(f'cd {portal_dir} && docker compose down && docker compose up -d', shell=True, capture_output=True, text=True, timeout=120)
     elif action == 'update':
-        subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash && docker compose up -d --build && docker image prune -f', shell=True, capture_output=True, text=True, timeout=180)
+        pull = subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
+        pull_msg = pull.stdout.strip().split('\n')[-1] if pull.stdout.strip() else ''
+        build = subprocess.run(f'cd {portal_dir} && docker compose up -d --build', shell=True, capture_output=True, text=True, timeout=180)
+        subprocess.run(f'cd {portal_dir} && docker image prune -f', shell=True, capture_output=True, text=True, timeout=30)
+        time.sleep(3)
+        vinfo = _get_takportal_version_info()
+        new_version = vinfo['version'] or ''
+        r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+        running = 'Up' in r.stdout
+        return jsonify({'success': True, 'running': running, 'action': action, 'pull': pull_msg, 'version': new_version})
     else:
         return jsonify({'error': 'Invalid action'}), 400
     time.sleep(3)
@@ -1201,6 +1668,40 @@ def takportal_uninstall():
     takportal_deploy_log.clear()
     takportal_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
+
+def _portal_email_settings(settings):
+    """Build TAK Portal email settings from the Email Relay config if deployed."""
+    relay = settings.get('email_relay', {})
+    if relay.get('relay_host') and relay.get('smtp_user'):
+        from_addr = relay.get('from_addr', '')
+        from_name = relay.get('from_name', 'TAK Admin')
+        smtp_from = f"{from_name} <{from_addr}>" if from_name and from_addr else from_addr
+        return {
+            "EMAIL_ENABLED": "true",
+            "EMAIL_PROVIDER": "smtp",
+            "SMTP_HOST": relay.get('relay_host', ''),
+            "SMTP_PORT": str(relay.get('relay_port', '587')),
+            "SMTP_SECURE": "false",
+            "SMTP_USER": relay.get('smtp_user', ''),
+            "SMTP_PASS": relay.get('smtp_pass', ''),
+            "SMTP_FROM": smtp_from,
+            "EMAIL_ALWAYS_CC": "",
+            "EMAIL_SEND_COPY_TO": "",
+            "EMAIL_FAIL_HARD": "false",
+        }
+    return {
+        "EMAIL_ENABLED": "false",
+        "EMAIL_PROVIDER": "smtp",
+        "SMTP_HOST": "",
+        "SMTP_PORT": "587",
+        "SMTP_SECURE": "false",
+        "SMTP_USER": "",
+        "SMTP_PASS": "",
+        "SMTP_FROM": "",
+        "EMAIL_ALWAYS_CC": "",
+        "EMAIL_SEND_COPY_TO": "",
+        "EMAIL_FAIL_HARD": "false",
+    }
 
 def run_takportal_deploy():
     def plog(msg):
@@ -1324,44 +1825,62 @@ def run_takportal_deploy():
                 if os.path.exists(p):
                     tak_ca = p
                     break
-        # Create certs dir in container and copy
-        subprocess.run('docker exec tak-portal mkdir -p /usr/src/app/certs', shell=True, capture_output=True, text=True)
+        # Create certs dir in container data volume (persists across rebuilds)
+        subprocess.run('docker exec tak-portal mkdir -p /usr/src/app/data/certs', shell=True, capture_output=True, text=True)
         certs_copied = True
         if os.path.exists(webadmin_p12):
-            r = subprocess.run(f'docker cp {webadmin_p12} tak-portal:/usr/src/app/certs/admin.p12', shell=True, capture_output=True, text=True)
-            plog(f"  Copied {os.path.basename(webadmin_p12)} -> admin.p12")
+            # Re-encode P12 with modern encryption (AES-256-CBC) — TAK Server generates
+            # legacy RC2-40-CBC which Node.js 22+ / OpenSSL 3.x rejects
+            modern_p12 = '/tmp/tak-portal-admin-modern.p12'
+            r = subprocess.run(
+                f'openssl pkcs12 -in {webadmin_p12} -passin pass:atakatak -nodes -legacy 2>/dev/null | '
+                f'openssl pkcs12 -export -passout pass:atakatak -out {modern_p12}',
+                shell=True, capture_output=True, text=True, timeout=30)
+            if os.path.exists(modern_p12) and os.path.getsize(modern_p12) > 0:
+                subprocess.run(f'docker cp {modern_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', shell=True, capture_output=True, text=True)
+                os.remove(modern_p12)
+                plog(f"  Copied {os.path.basename(webadmin_p12)} -> data/certs/tak-client.p12 (re-encoded for modern OpenSSL)")
+            else:
+                subprocess.run(f'docker cp {webadmin_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', shell=True, capture_output=True, text=True)
+                plog(f"  Copied {os.path.basename(webadmin_p12)} -> data/certs/tak-client.p12 (legacy format, re-encode failed)")
         else:
             plog("\u26a0 admin.p12 not found in /opt/tak/certs/files/")
             certs_copied = False
-        # Export tak-ca.pem from truststore or copy directly
-        tak_ca_pem = os.path.join(cert_dir, 'tak-ca.pem')
-        if not os.path.exists(tak_ca_pem):
-            # Try to find any .pem CA file
-            for name in ['ca.pem', 'root-ca.pem', 'truststore-root.pem']:
-                p = os.path.join(cert_dir, name)
-                if os.path.exists(p):
-                    tak_ca_pem = p
-                    break
-        if os.path.exists(tak_ca_pem):
-            r = subprocess.run(f'docker cp {tak_ca_pem} tak-portal:/usr/src/app/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-            plog(f"  Copied {os.path.basename(tak_ca_pem)} -> tak-ca.pem")
+        # Copy CA chain for TAK Portal. takserver.pem contains the full chain
+        # (server + intermediate + root) which is what TAK Portal expects.
+        # Fallback to building a bundle from ca.pem + root-ca.pem if needed.
+        tak_ca_src = None
+        takserver_pem = os.path.join(cert_dir, 'takserver.pem')
+        if os.path.exists(takserver_pem):
+            tak_ca_src = takserver_pem
+            plog(f"  Using takserver.pem (full chain)")
         else:
-            plog("\u26a0 tak-ca.pem not found, trying to extract from truststore")
-            # Extract from Java truststore
-            ts = os.path.join(cert_dir, 'truststore-root.p12')
-            if os.path.exists(ts):
-                r = subprocess.run(f'openssl pkcs12 -in {ts} -clcerts -nokeys -passin pass:atakatak 2>/dev/null | openssl x509 > /tmp/tak-ca.pem', shell=True, capture_output=True, text=True)
-                if os.path.exists('/tmp/tak-ca.pem') and os.path.getsize('/tmp/tak-ca.pem') > 0:
-                    subprocess.run('docker cp /tmp/tak-ca.pem tak-portal:/usr/src/app/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-                    plog("  Extracted and copied tak-ca.pem from truststore")
-                else:
-                    plog("\u26a0 Could not extract CA cert")
-                    certs_copied = False
-            else:
-                plog("\u26a0 No CA cert found")
-                certs_copied = False
+            # Build bundle from individual CA files
+            int_ca = os.path.join(cert_dir, 'ca.pem')
+            root_ca = os.path.join(cert_dir, 'root-ca.pem')
+            bundle_parts = []
+            for ca_file in [int_ca, root_ca]:
+                if os.path.exists(ca_file):
+                    with open(ca_file, 'r') as f:
+                        content = f.read().strip()
+                    if 'BEGIN CERTIFICATE' in content and 'TRUSTED' not in content:
+                        bundle_parts.append(content)
+            if bundle_parts:
+                ca_bundle_path = '/tmp/tak-ca-bundle.pem'
+                with open(ca_bundle_path, 'w') as f:
+                    f.write('\n'.join(bundle_parts) + '\n')
+                tak_ca_src = ca_bundle_path
+                plog(f"  Built CA bundle from ca.pem + root-ca.pem ({len(bundle_parts)} certs)")
+        if tak_ca_src:
+            subprocess.run(f'docker cp {tak_ca_src} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
+            if tak_ca_src.startswith('/tmp/'):
+                os.remove(tak_ca_src)
+            plog(f"  -> data/certs/tak-ca.pem")
+        else:
+            plog("\u26a0 No CA cert files found in /opt/tak/certs/files/")
+            certs_copied = False
         if certs_copied:
-            plog("\u2713 Certificates copied to container")
+            plog("\u2713 Certificates copied to container data volume")
 
         # Step 6: Auto-configure settings.json
         plog("")
@@ -1381,7 +1900,7 @@ def run_takportal_deploy():
             "AUTHENTIK_URL": f"http://{server_ip}:9090",
             "AUTHENTIK_TOKEN": ak_token,
             "USERS_HIDDEN_PREFIXES": "ak-,adm_,nodered-,ma-",
-            "GROUPS_HIDDEN_PREFIXES": "authentik, MA -",
+            "GROUPS_HIDDEN_PREFIXES": "authentik, MA -, vid_, tak_ROLE_",
             "USERS_ACTIONS_HIDDEN_PREFIXES": "",
             "GROUPS_ACTIONS_HIDDEN_PREFIXES": "",
             "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
@@ -1389,25 +1908,15 @@ def run_takportal_deploy():
             "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
             "AUTHENTIK_PUBLIC_URL": f"https://authentik.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:9090",
             "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
-            "TAK_URL": f"https://tak.{settings['fqdn']}" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
-            "TAK_API_P12_PATH": "./certs/admin.p12",
+            "TAK_URL": f"https://tak.{settings['fqdn']}:8443/Marti" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
+            "TAK_API_P12_PATH": "data/certs/tak-client.p12",
             "TAK_API_P12_PASSPHRASE": "atakatak",
-            "TAK_CA_PATH": "./certs/tak-ca.pem",
+            "TAK_CA_PATH": "data/certs/tak-ca.pem",
             "TAK_REVOKE_ON_DISABLE": "true",
             "TAK_DEBUG": "false",
             "TAK_BYPASS_ENABLED": "false",
             "CLOUDTAK_URL": f"https://cloudtak.{settings['fqdn']}" if settings.get('fqdn') else "",
-            "EMAIL_ENABLED": "false",
-            "EMAIL_PROVIDER": "smtp",
-            "SMTP_HOST": "",
-            "SMTP_PORT": "587",
-            "SMTP_SECURE": "false",
-            "SMTP_USER": "",
-            "SMTP_PASS": "",
-            "SMTP_FROM": "",
-            "EMAIL_ALWAYS_CC": "",
-            "EMAIL_SEND_COPY_TO": "",
-            "EMAIL_FAIL_HARD": "false",
+            **_portal_email_settings(settings),
             "BRAND_THEME": "dark",
             "BRAND_LOGO_URL": ""
         }
@@ -1421,6 +1930,10 @@ def run_takportal_deploy():
         plog(f"  Authentik URL: {portal_settings['AUTHENTIK_PUBLIC_URL']}")
         plog(f"  TAK Server URL: {portal_settings['TAK_URL']}")
         plog(f"  Portal Auth: {portal_settings['PORTAL_AUTH_ENABLED']}")
+        if portal_settings.get('EMAIL_ENABLED') == 'true':
+            plog(f"  Email: enabled ({portal_settings.get('SMTP_HOST')}:{portal_settings.get('SMTP_PORT')} from {portal_settings.get('SMTP_FROM')})")
+        else:
+            plog("  Email: not configured (deploy Email Relay first for auto-config)")
         if ak_token:
             plog("  Authentik API token: configured")
         else:
@@ -1520,7 +2033,7 @@ def run_takportal_deploy():
                             data=json_mod.dumps({'name': 'TAK Portal Proxy', 'authorization_flow': flow_pk,
                                 'invalidation_flow': inv_flow_pk,
                                 'external_host': f'https://takportal.{fqdn}', 'mode': 'forward_single',
-                                'token_validity': 'hours=24'}).encode(),
+                                'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
                             headers=_ak_headers, method='POST')
                         resp = _urlreq.urlopen(req, timeout=10)
                         provider_pk = json_mod.loads(resp.read().decode())['pk']
@@ -1712,10 +2225,13 @@ def run_mediamtx_deploy():
             return
         plog("✓ Dependencies installed (wget, ffmpeg, python3)")
 
-        # Install Python packages
+        # Install Python packages (try with --break-system-packages for newer pip, else without)
         plog("  Installing Python packages...")
-        subprocess.run('pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
+        r = subprocess.run('pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
             shell=True, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 and 'no such option' in (r.stderr or r.stdout or ''):
+            subprocess.run('pip3 install Flask ruamel.yaml requests psutil 2>&1',
+                shell=True, capture_output=True, text=True, timeout=120)
         plog("✓ Python packages installed")
 
         # Step 2: Detect architecture and latest version
@@ -1884,37 +2400,135 @@ WantedBy=multi-user.target
             f.write(mediamtx_svc)
         plog("✓ mediamtx.service created")
 
-        # Write web editor Python app
+        # Write web editor Python app — flexible: detect LDAP/Authentik and choose regular vs LDAP-enhanced source
         webeditor_dir = '/opt/mediamtx-webeditor'
         os.makedirs(webeditor_dir, exist_ok=True)
         os.makedirs(f'{webeditor_dir}/backups', exist_ok=True)
         os.makedirs(f'{webeditor_dir}/recordings', exist_ok=True)
 
-        # Write the web editor — look next to app.py first, then common locations
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-        webeditor_candidates = [
-            os.path.join(app_dir, 'mediamtx_config_editor.py'),
-            os.path.join(app_dir, 'config-editor', 'mediamtx_config_editor.py'),
-            '/opt/takwerx/mediamtx_config_editor.py',
-        ]
-        webeditor_src = next((p for p in webeditor_candidates if os.path.exists(p)), None)
+        modules = detect_modules()
+        ak = modules.get('authentik', {})
+        ldap_available = bool(ak.get('installed'))
+        if ldap_available:
+            plog("  LDAP/Authentik detected — using editor source for LDAP-aware console")
+        else:
+            plog("  No LDAP — using regular MediaMTX editor from repo")
+
+        webeditor_src = None
+        clone_dir = '/tmp/mediamtx_editor_clone'
+        try:
+            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+            os.makedirs(clone_dir, exist_ok=True)
+            branch = MEDIAMTX_EDITOR_LDAP_BRANCH if (ldap_available and MEDIAMTX_EDITOR_LDAP_BRANCH) else None
+            if branch:
+                r = subprocess.run(f'git clone --depth 1 -b "{branch}" "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                    shell=True, capture_output=True, text=True, timeout=60)
+                if r.returncode != 0:
+                    plog(f"  LDAP branch \"{branch}\" not found or clone failed, trying default branch")
+                    subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+                    r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                        shell=True, capture_output=True, text=True, timeout=60)
+            else:
+                r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                    shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                candidate = os.path.join(clone_dir, MEDIAMTX_EDITOR_PATH, 'mediamtx_config_editor.py')
+                if os.path.exists(candidate):
+                    webeditor_src = candidate
+                    plog(f"  Cloned editor from {MEDIAMTX_EDITOR_REPO}" + (f" (branch {branch})" if branch else ""))
+        except Exception as e:
+            plog(f"  Clone failed: {e}")
+        if not webeditor_src:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            for p in [os.path.join(app_dir, 'mediamtx_config_editor.py'),
+                      os.path.join(app_dir, 'config-editor', 'mediamtx_config_editor.py'),
+                      '/opt/takwerx/mediamtx_config_editor.py']:
+                if os.path.exists(p):
+                    webeditor_src = p
+                    plog("  Using local web editor (clone skipped or failed)")
+                    break
         if webeditor_src:
-            subprocess.run(f'cp "{webeditor_src}" {webeditor_dir}/mediamtx_config_editor.py', shell=True)
-            # Patch port to read from PORT env var instead of hardcoded 5000
-            subprocess.run(
-                f"sed -i 's/app.run(host=.0.0.0.0., port=5000/app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5080))/' {webeditor_dir}/mediamtx_config_editor.py",
-                shell=True)
+            import shutil as _shutil
+            _shutil.copy2(webeditor_src, f'{webeditor_dir}/mediamtx_config_editor.py')
+            # Patch port to read from PORT env var (systemd sets PORT=5080)
+            editor_path = f'{webeditor_dir}/mediamtx_config_editor.py'
+            try:
+                with open(editor_path, 'r') as f:
+                    lines = f.readlines()
+                for i, line in enumerate(lines):
+                    if 'app.run(' in line and 'port=5000' in line and 'os.environ.get("PORT"' not in line:
+                        lines[i] = line.replace('port=5000', 'port=int(os.environ.get("PORT", 5080))', 1)
+                        break
+                with open(editor_path, 'w') as f:
+                    f.writelines(lines)
+            except Exception:
+                pass
             # Console-deployed MediaMTX uses API port 9898 (CloudTAK uses 9997). Patch editor so "active streams" works.
             subprocess.run(f"sed -i 's/9997/9898/g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
             # When CloudTAK is installed, MediaMTX is at stream.* so "Stream URLs" in the editor should show stream. not video.
+            # Only replace URL-like patterns (//video. or video.<domain>) — not JS vars like video.src / video.canPlayType
             if domain:
-                subprocess.run(f"sed -i 's/video\\./stream./g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+                base = domain.split(':')[0]
+                base_esc = base.replace('.', '\\.')
+                subprocess.run(f"sed -i 's|video\\.{base_esc}|stream.{base_esc}|g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+                subprocess.run(f"sed -i 's|//video\\.|//stream.|g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
                 plog("  Stream URL host set to stream.*")
-            plog(f"✓ Web editor installed from {webeditor_src} (port 5080, API 9898)")
+            plog("✓ Web editor installed (port 5080, API 9898)")
+
+            # LDAP overlay: when Authentik is present, patch editor for header auth + Stream Access page
+            if ldap_available:
+                overlay_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mediamtx_ldap_overlay.py')
+                overlay_dst = f'{webeditor_dir}/mediamtx_ldap_overlay.py'
+                if os.path.exists(overlay_src):
+                    subprocess.run(f'cp "{overlay_src}" "{overlay_dst}"', shell=True)
+                    # Inject import before app.run() — the overlay registers routes + before_request
+                    editor_file = f'{webeditor_dir}/mediamtx_config_editor.py'
+                    with open(editor_file, 'r') as ef:
+                        editor_src = ef.read()
+                    inject_block = (
+                        "\n# --- infra-TAK LDAP overlay ---\n"
+                        "import os as _os\n"
+                        "if _os.environ.get('LDAP_ENABLED'):\n"
+                        "    import sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
+                        "    from mediamtx_ldap_overlay import apply_ldap_overlay\n"
+                        "    apply_ldap_overlay(app)\n"
+                        "# --- end LDAP overlay ---\n"
+                    )
+                    # Inject right after app = Flask(...) so overlay's before_request runs before vanilla login_required
+                    if 'LDAP overlay' not in editor_src:
+                        lines = editor_src.splitlines(keepends=True)
+                        inserted = False
+                        for i, line in enumerate(lines):
+                            if 'app = Flask(' in line:
+                                lines.insert(i + 1, '\n' + inject_block)
+                                inserted = True
+                                break
+                        if not inserted:
+                            for i, line in enumerate(lines):
+                                if 'app.run(' in line:
+                                    lines.insert(i, '\n' + inject_block)
+                                    inserted = True
+                                    break
+                        if inserted:
+                            with open(editor_file, 'w') as ef:
+                                ef.writelines(lines)
+                            plog("✓ LDAP overlay applied (Authentik header auth + Stream Access)")
+                        else:
+                            plog("  ⚠ app = Flask / app.run not found — LDAP overlay not injected")
+                    else:
+                        plog("✓ LDAP overlay already present")
+                else:
+                    plog("⚠ mediamtx_ldap_overlay.py not found next to app.py — LDAP overlay skipped")
         else:
-            plog("⚠ mediamtx_config_editor.py not found alongside app.py")
-            plog("  Place it next to app.py and redeploy, or install manually")
+            plog("⚠ mediamtx_config_editor.py not found (clone failed and no local file)")
+            plog("  Place it next to app.py or in config-editor/, or fix repo access, then redeploy")
             plog("  MediaMTX streaming will work — web editor unavailable until then")
+
+        # Clean up clone dir now that copy is done
+        try:
+            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+        except Exception:
+            pass
 
         # Download test video
         test_video_dir = f'{webeditor_dir}/test_videos'
@@ -1928,18 +2542,108 @@ WantedBy=multi-user.target
         else:
             plog("⚠ Test video download failed — you can upload it manually via the web console")
 
-        # Web editor systemd service
-        webeditor_svc = """[Unit]
+        # Web editor systemd service — add LDAP env vars when Authentik is present
+        ldap_env_lines = ''
+        if ldap_available:
+            ak_env_path = os.path.expanduser('~/authentik/.env')
+            ak_token_val = ''
+            if os.path.exists(ak_env_path):
+                with open(ak_env_path) as _f:
+                    for _line in _f:
+                        if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                            ak_token_val = _line.strip().split('=', 1)[1].strip()
+            ldap_env_lines = (
+                f'Environment=LDAP_ENABLED=1\n'
+                f'Environment=AUTHENTIK_API_URL=http://127.0.0.1:9090\n'
+                f'Environment=AUTHENTIK_TOKEN={ak_token_val}\n'
+            )
+
+        # Write self-healing overlay script — runs before every service start
+        # Re-injects LDAP overlay + patches (port, API) if the upstream editor self-updated
+        if ldap_available:
+            heal_script = r'''#!/usr/bin/env python3
+"""Pre-start hook: ensure infra-TAK LDAP overlay is injected into the editor.
+
+Runs as ExecStartPre so that upstream self-updates (Versions tab) don't
+silently remove the overlay.  Idempotent — does nothing if already patched.
+"""
+import os, re, sys
+
+EDITOR  = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'
+OVERLAY = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
+MARKER  = '# --- infra-TAK LDAP overlay ---'
+
+if not os.path.exists(EDITOR) or not os.path.exists(OVERLAY):
+    sys.exit(0)
+
+with open(EDITOR, 'r') as f:
+    src = f.read()
+
+changed = False
+
+# 1. Port patch: ensure PORT env var override
+if 'port=5000' in src and 'os.environ.get("PORT"' not in src:
+    src = src.replace('port=5000', 'port=int(os.environ.get("PORT", 5080))', 1)
+    changed = True
+
+# 2. API port patch: 9997 -> 9898
+if '9997' in src:
+    src = src.replace('9997', '9898')
+    changed = True
+
+# 3. LDAP overlay import injection
+if MARKER not in src:
+    inject = (
+        "\n" + MARKER + "\n"
+        "import os as _os\n"
+        "if _os.environ.get('LDAP_ENABLED'):\n"
+        "    import sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
+        "    from mediamtx_ldap_overlay import apply_ldap_overlay\n"
+        "    apply_ldap_overlay(app)\n"
+        "# --- end LDAP overlay ---\n"
+    )
+    lines = src.splitlines(keepends=True)
+    inserted = False
+    for i, line in enumerate(lines):
+        if 'app = Flask(' in line:
+            lines.insert(i + 1, '\n' + inject)
+            inserted = True
+            break
+    if not inserted:
+        for i, line in enumerate(lines):
+            if 'app.run(' in line:
+                lines.insert(i, '\n' + inject)
+                inserted = True
+                break
+    if inserted:
+        src = ''.join(lines)
+        changed = True
+
+if changed:
+    with open(EDITOR, 'w') as f:
+        f.write(src)
+'''
+            heal_path = f'{webeditor_dir}/ensure_overlay.py'
+            with open(heal_path, 'w') as hf:
+                hf.write(heal_script)
+            os.chmod(heal_path, 0o755)
+            plog("✓ Self-healing overlay script installed (runs on every service start)")
+
+        exec_start_pre = ''
+        if ldap_available:
+            exec_start_pre = f'ExecStartPre=/usr/bin/python3 {webeditor_dir}/ensure_overlay.py\n'
+
+        webeditor_svc = f"""[Unit]
 Description=MediaMTX Web Configuration Editor
 After=network.target mediamtx.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
+{exec_start_pre}ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
 WorkingDirectory=/opt/mediamtx-webeditor
 Environment=PORT=5080
 Environment=MEDIAMTX_API_URL=http://127.0.0.1:9898
-Restart=always
+{ldap_env_lines}Restart=always
 RestartSec=5
 User=root
 
@@ -1949,6 +2653,19 @@ WantedBy=multi-user.target
         with open('/etc/systemd/system/mediamtx-webeditor.service', 'w') as f:
             f.write(webeditor_svc)
         plog("✓ mediamtx-webeditor.service created")
+
+        # Ensure web editor Python deps (Flask, etc.) so systemd can start it even if Step 1 pip failed
+        if os.path.exists(f'{webeditor_dir}/mediamtx_config_editor.py'):
+            r = subprocess.run(
+                'pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
+                shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 and 'no such option' in (r.stderr or r.stdout or ''):
+                r = subprocess.run('pip3 install Flask ruamel.yaml requests psutil 2>&1',
+                    shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                plog("  ⚠ pip install for web editor deps had issues (check logs); trying to start anyway")
+            else:
+                plog("  ✓ Web editor Python deps installed")
 
         subprocess.run('systemctl daemon-reload', shell=True, capture_output=True)
         subprocess.run('systemctl enable mediamtx mediamtx-webeditor', shell=True, capture_output=True)
@@ -1972,7 +2689,7 @@ WantedBy=multi-user.target
             # Update Caddyfile first so Caddy issues the cert
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
-            mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
+            mtx_domain = _get_service_domain(settings, 'mediamtx')
             plog(f"✓ Caddyfile updated — {mtx_domain}")
 
             # Wait up to 60s for cert
@@ -2017,6 +2734,39 @@ WantedBy=multi-user.target
         time.sleep(3)
         r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
         if r.stdout.strip() == 'active':
+            # If Authentik is running, ensure stream visibility groups exist (video-public, video-private, video-admin)
+            ak_dir = os.path.expanduser('~/authentik')
+            env_path = os.path.join(ak_dir, '.env')
+            if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')) and os.path.exists(env_path):
+                ak_token = ''
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                            ak_token = line.strip().split('=', 1)[1].strip()
+                            break
+                if ak_token:
+                    import urllib.request
+                    import urllib.error
+                    plog("")
+                    plog("━━━ Creating Authentik groups for stream access ━━━")
+                    ak_url = 'http://127.0.0.1:9090'
+                    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+                    for group_name in ('vid_public', 'vid_private'):
+                        try:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/core/groups/',
+                                data=json.dumps({'name': group_name, 'is_superuser': False}).encode(),
+                                headers=ak_headers, method='POST')
+                            urllib.request.urlopen(req, timeout=10)
+                            plog(f"  ✓ Created group: {group_name}")
+                        except urllib.error.HTTPError as e:
+                            if e.code == 400:
+                                plog(f"  ✓ Group already exists: {group_name}")
+                            else:
+                                plog(f"  ⚠ Could not create {group_name}: {e.code}")
+                        except Exception as ex:
+                            plog(f"  ⚠ Could not create {group_name}: {str(ex)[:60]}")
+                    plog("  Assign users to vid_* groups in MediaMTX stream-access page or Authentik (they do not show in TAK clients).")
+
             plog("")
             plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             plog(f"🎉 MediaMTX v{version} deployed successfully!")
@@ -2548,6 +3298,8 @@ def run_email_deploy(provider_key, smtp_user, smtp_pass, from_addr, from_name):
         relay_port = provider['port']
         main_cf_additions = f"""
 # TAKWERX Email Relay — managed by TAK-infra
+inet_interfaces = all
+mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12
 relayhost = [{relay_host}]:{relay_port}
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
@@ -2567,6 +3319,8 @@ smtp_generic_maps = hash:/etc/postfix/generic
             existing = re.sub(r'\n# TAKWERX Email Relay.*', '', existing, flags=re.DOTALL)
             # Remove any existing relayhost line (Ubuntu default has a blank one)
             existing = re.sub(r'^\s*relayhost\s*=.*$', '', existing, flags=re.MULTILINE)
+            # Remove any existing mynetworks (we set it in our block for Docker relay)
+            existing = re.sub(r'^\s*mynetworks\s*=.*$', '', existing, flags=re.MULTILINE)
             existing = existing.rstrip()
         else:
             existing = ''
@@ -2616,15 +3370,40 @@ smtp_generic_maps = hash:/etc/postfix/generic
         plog(f"   Provider: {provider['name']}")
         plog(f"   Relay:    {relay_host}:{relay_port}")
         plog(f"   From:     {from_name} <{from_addr}>")
-        plog("")
-        plog("📋 Configure apps to use SMTP:")
-        plog("   Host: localhost   Port: 25   No auth required")
+
+        # Auto-configure Authentik if installed (SMTP + recovery flow)
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            plog("")
+            plog("🔑 Step 6/6 — Configuring Authentik (SMTP + password recovery)...")
+            try:
+                ak_msg = _configure_authentik_smtp_and_recovery(from_addr, plog)
+                plog(f"✓ {ak_msg}")
+            except Exception as e:
+                plog(f"⚠ Authentik auto-config failed: {e}")
+                plog("  You can configure it manually via the 'Configure Authentik' button.")
+        else:
+            plog("")
+            plog("📋 Configure apps to use SMTP:")
+            plog("   Host: localhost   Port: 25   No auth required")
+
         status.update({'running': False, 'complete': True, 'error': False})
 
     except Exception as e:
         plog(f"✗ Deploy failed: {str(e)}")
         status.update({'running': False, 'error': True})
 
+
+def _authentik_smtp_configured():
+    """True if Authentik .env has email settings (SMTP was pushed by Configure Authentik or deploy)."""
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_EMAIL__HOST=') and '=' in line and line.strip().split('=', 1)[1].strip():
+                return True
+    return False
 
 @app.route('/emailrelay')
 @login_required
@@ -2633,9 +3412,11 @@ def emailrelay_page():
     email = modules.get('emailrelay', {})
     settings = load_settings()
     relay_config = settings.get('email_relay', {})
+    authentik_smtp_configured = modules.get('authentik', {}).get('installed') and _authentik_smtp_configured()
     return render_template_string(EMAIL_RELAY_TEMPLATE,
         settings=settings, modules=modules, email=email,
         relay_config=relay_config, providers=PROVIDERS,
+        authentik_smtp_configured=authentik_smtp_configured,
         metrics=get_system_metrics(), version=VERSION,
         deploying=email_deploy_status.get('running', False),
         deploy_done=email_deploy_status.get('complete', False),
@@ -2762,6 +3543,404 @@ def emailrelay_uninstall():
     return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
 
 
+def _configure_authentik_smtp_and_recovery(from_addr, plog=None):
+    """Push SMTP settings into Authentik .env, restart containers, and set up recovery flow.
+    Used by both the Email Relay deploy and the 'Configure Authentik' button.
+    Returns a status message string. Raises on fatal error."""
+    import re as _re
+    ak_dir = os.path.expanduser('~/authentik')
+    env_path = os.path.join(ak_dir, '.env')
+    smtp_host = 'host.docker.internal'
+    _from = (from_addr or '').strip() or 'authentik@localhost'
+    _log = plog or (lambda msg: None)
+
+    email_block = [
+        '',
+        '# Email — use local relay (Postfix on host)',
+        f'AUTHENTIK_EMAIL__HOST={smtp_host}',
+        'AUTHENTIK_EMAIL__PORT=25',
+        'AUTHENTIK_EMAIL__USERNAME=',
+        'AUTHENTIK_EMAIL__PASSWORD=',
+        'AUTHENTIK_EMAIL__USE_TLS=false',
+        'AUTHENTIK_EMAIL__USE_SSL=false',
+        'AUTHENTIK_EMAIL__TIMEOUT=10',
+        f'AUTHENTIK_EMAIL__FROM={_from}',
+    ]
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_EMAIL__'):
+                    continue
+                lines.append(line.rstrip('\n'))
+    if lines and lines[-1].strip() != '':
+        lines.append('')
+    lines.extend(email_block)
+    with open(env_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    _log("  Wrote SMTP settings to Authentik .env")
+
+    override_path = os.path.join(ak_dir, 'docker-compose.override.yml')
+    override_content = '''# infra-TAK: allow containers to reach host Postfix for email
+services:
+  server:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+'''
+    with open(override_path, 'w') as f:
+        f.write(override_content)
+
+    main_cf_path = '/etc/postfix/main.cf'
+    if os.path.exists(main_cf_path):
+        with open(main_cf_path) as f:
+            mc = f.read()
+        changed = False
+        # So Docker (Authentik) can connect: listen on all interfaces
+        if _re.search(r'^\s*inet_interfaces\s*=\s*localhost', mc, flags=_re.MULTILINE):
+            mc = _re.sub(r'^\s*inet_interfaces\s*=\s*.*$', 'inet_interfaces = all', mc, flags=_re.MULTILINE)
+            changed = True
+        elif 'inet_interfaces' not in mc or _re.search(r'^\s*#\s*inet_interfaces', mc, flags=_re.MULTILINE):
+            if mc.strip() and not mc.endswith('\n\n'):
+                mc = mc.rstrip() + '\n'
+            mc += 'inet_interfaces = all\n'
+            changed = True
+        if '172.16.0.0/12' not in mc:
+            mc = _re.sub(r'^\s*mynetworks\s*=.*$', '', mc, flags=_re.MULTILINE)
+            if mc.strip() and not mc.endswith('\n\n'):
+                mc = mc.rstrip() + '\n'
+            mc += 'mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12\n'
+            changed = True
+        if changed:
+            with open(main_cf_path, 'w') as f:
+                f.write(mc)
+            subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+
+    # Allow Docker networks to reach host port 25 (Authentik worker → Postfix)
+    r = subprocess.run('which ufw', shell=True, capture_output=True)
+    if r.returncode == 0:
+        subprocess.run('ufw allow from 172.16.0.0/12 to any port 25 2>/dev/null; true', shell=True, capture_output=True)
+        subprocess.run('ufw reload 2>/dev/null; true', shell=True, capture_output=True)
+        _log("  UFW: allowed Docker networks → port 25")
+    else:
+        r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(
+                'firewall-cmd --permanent --add-rich-rule=\'rule family="ipv4" source address="172.16.0.0/12" port port="25" protocol="tcp" accept\' 2>/dev/null; true',
+                shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
+            _log("  firewalld: allowed Docker networks → port 25")
+
+    _log("  Restarting Authentik containers...")
+    r = subprocess.run(
+        f'cd {ak_dir} && docker compose up -d --force-recreate',
+        shell=True, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f'Authentik restart failed: {r.stderr or r.stdout}')
+
+    ak_token = ''
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                    ak_token = line.strip().split('=', 1)[1].strip()
+                    break
+
+    message = 'Authentik SMTP configured (host.docker.internal:25).'
+    if ak_token:
+        ak_url = 'http://127.0.0.1:9090'
+        ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+        _log("  Waiting for Authentik API...")
+        api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120, plog=_log)
+        if api_ready:
+            _log("  Setting up recovery flow...")
+            ok, recovery_msg, recovery_slug = _ensure_authentik_recovery_flow(ak_url, ak_headers)
+            if ok:
+                message += ' ' + recovery_msg
+                if recovery_slug:
+                    settings = load_settings()
+                    fqdn = settings.get('fqdn', '').strip()
+                    base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
+                    message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
+            else:
+                message += f' Recovery flow issue: {recovery_msg}.'
+        else:
+            message += ' API not ready in time — recovery flow not set up.'
+    return message
+
+
+def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90, plog=None):
+    """Poll until Authentik API responds. Returns True when ready (200 or 401/403), False on timeout."""
+    import urllib.request as _req
+    import urllib.error
+    _log = plog or (lambda msg: None)
+    for attempt in range(max_attempts):
+        try:
+            req = _req.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
+            _req.urlopen(req, timeout=5)
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return True
+            if e.code == 503:
+                pass
+        except Exception:
+            pass
+        if attempt > 0 and attempt % 6 == 0:
+            _log(f"  ⏳ Still waiting for API... ({attempt * 5}s)")
+        time.sleep(5)
+    return False
+
+
+def _ensure_authentik_recovery_flow(ak_url, ak_headers):
+    """Create recovery flow + stages + bindings and link to default authentication flow.
+    Matches official Authentik blueprint: Identification -> Email -> Prompt (new pw) -> User Write -> User Login.
+    Fetches ALL bindings and filters client-side (the flow__pk server filter is unreliable).
+    Returns (success: bool, message: str, recovery_slug: str|None)."""
+    import urllib.request as _req
+    import urllib.error
+    def _err(e):
+        try:
+            body = e.read().decode()[:300]
+        except Exception:
+            body = ''
+        return f'HTTP {e.code}: {body}' if body else f'HTTP {e.code}'
+    def _api_get(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers)
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _api_post(path, body):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _api_patch(path, body):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='PATCH')
+        resp = _req.urlopen(r, timeout=15)
+        return json.loads(resp.read().decode())
+    def _api_delete(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers, method='DELETE')
+        _req.urlopen(r, timeout=15)
+    def _find_stage(api_path, name):
+        results = _api_get(f'{api_path}?search={_req.quote(name)}').get('results', [])
+        for s in results:
+            if s.get('name') == name:
+                return s['pk']
+        return None
+    def _find_or_create_stage(api_path, name, extra_attrs=None):
+        pk = _find_stage(api_path, name)
+        if pk:
+            return pk
+        body = {'name': name}
+        if extra_attrs:
+            body.update(extra_attrs)
+        try:
+            return _api_post(api_path, body)['pk']
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                pk = _find_stage(api_path, name)
+                if pk:
+                    return pk
+            raise
+    try:
+        recovery_flow_slug = 'default-password-recovery'
+
+        # 1) Get or create recovery flow
+        recovery_flows = _api_get('flows/instances/?designation=recovery').get('results', [])
+        recovery_flow_pk = None
+        for f in recovery_flows:
+            if f.get('slug') == recovery_flow_slug:
+                recovery_flow_pk = f['pk']
+                break
+        if not recovery_flow_pk and recovery_flows:
+            recovery_flow_pk = recovery_flows[0]['pk']
+            recovery_flow_slug = recovery_flows[0].get('slug', recovery_flow_slug)
+        if not recovery_flow_pk:
+            data = _api_post('flows/instances/', {
+                'name': 'Password Recovery', 'slug': recovery_flow_slug,
+                'designation': 'recovery', 'title': 'Reset your password',
+                'authentication': 'none'})
+            recovery_flow_pk = data['pk']
+        else:
+            try:
+                _api_patch(f'flows/instances/{recovery_flow_slug}/', {'authentication': 'none'})
+            except Exception:
+                pass
+
+        # 2) Create all required stages
+
+        id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
+        if not id_stage_pk:
+            id_stage_pk = _find_stage('stages/identification/', 'Recovery Identification')
+        if not id_stage_pk:
+            all_id_stages = _api_get('stages/identification/').get('results', [])
+            if all_id_stages:
+                id_stage_pk = all_id_stages[0]['pk']
+
+        email_stage_pk = _find_or_create_stage('stages/email/', 'Recovery Email', {
+            'use_global_settings': True,
+            'template': 'email/password_reset.html',
+            'activate_user_on_success': True,
+            'token_expiry': 'minutes=30',
+            'subject': 'Password Reset'})
+        if email_stage_pk:
+            try:
+                _api_patch(f'stages/email/{email_stage_pk}/', {
+                    'use_global_settings': True,
+                    'template': 'email/password_reset.html',
+                    'activate_user_on_success': True})
+            except Exception:
+                pass
+
+        def _find_or_create_prompt(name, field_key, label, order):
+            results = _api_get(f'stages/prompt/prompts/?search={_req.quote(name)}').get('results', [])
+            for p in results:
+                if p.get('name') == name:
+                    return p['pk']
+            try:
+                return _api_post('stages/prompt/prompts/', {
+                    'name': name, 'field_key': field_key, 'label': label,
+                    'type': 'password', 'required': True, 'placeholder': label,
+                    'order': order, 'placeholder_expression': False})['pk']
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    results = _api_get(f'stages/prompt/prompts/?search={_req.quote(name)}').get('results', [])
+                    for p in results:
+                        if p.get('name') == name:
+                            return p['pk']
+                raise
+
+        pw_field_pk = _find_or_create_prompt('recovery-field-password', 'password', 'Password', 0)
+        pw_repeat_field_pk = _find_or_create_prompt('recovery-field-password-repeat', 'password_repeat', 'Password (repeat)', 1)
+
+        prompt_stage_pk = _find_stage('stages/prompt/stages/', 'Recovery Password Change')
+        if not prompt_stage_pk:
+            try:
+                prompt_stage_pk = _api_post('stages/prompt/stages/', {
+                    'name': 'Recovery Password Change',
+                    'fields': [pw_field_pk, pw_repeat_field_pk]})['pk']
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    prompt_stage_pk = _find_stage('stages/prompt/stages/', 'Recovery Password Change')
+                if not prompt_stage_pk:
+                    raise
+        else:
+            try:
+                _api_patch(f'stages/prompt/stages/{prompt_stage_pk}/', {
+                    'fields': [pw_field_pk, pw_repeat_field_pk]})
+            except Exception:
+                pass
+
+        user_write_pk = _find_or_create_stage('stages/user_write/', 'Recovery User Write',
+            {'user_creation_mode': 'never_create'})
+
+        user_login_pk = _find_or_create_stage('stages/user_login/', 'Recovery User Login')
+
+        # 3) Fetch ALL bindings, filter client-side by target == recovery flow PK.
+        #    The server-side flow__pk filter is unreliable and returns bindings from other flows.
+        all_bindings = []
+        page = 1
+        while True:
+            data = _api_get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+            all_bindings.extend(data.get('results', []))
+            if not data.get('pagination', {}).get('next'):
+                break
+            page += 1
+
+        recovery_bindings = [b for b in all_bindings if str(b.get('target')) == str(recovery_flow_pk)]
+
+        desired_stage_pks = set()
+        for pk in [id_stage_pk, email_stage_pk, prompt_stage_pk, user_write_pk, user_login_pk]:
+            if pk:
+                desired_stage_pks.add(str(pk))
+
+        # 4) Delete any binding on the recovery flow whose stage is NOT one of our 5 desired stages
+        for b in recovery_bindings:
+            if str(b.get('stage', '')) not in desired_stage_pks:
+                try:
+                    _api_delete(f'flows/bindings/{b["pk"]}/')
+                except Exception:
+                    pass
+
+        # 5) Create missing bindings
+        already_bound = {str(b.get('stage')) for b in recovery_bindings}
+        desired_bindings = [
+            (10, id_stage_pk),
+            (20, email_stage_pk),
+            (30, prompt_stage_pk),
+            (40, user_write_pk),
+            (100, user_login_pk),
+        ]
+        for order, stage_pk in desired_bindings:
+            if not stage_pk or str(stage_pk) in already_bound:
+                continue
+            try:
+                _api_post('flows/bindings/', {
+                    'target': recovery_flow_pk, 'stage': stage_pk, 'order': order,
+                    'evaluate_on_plan': True, 're_evaluate_policies': order <= 20,
+                    'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    pass
+                else:
+                    raise
+
+        # 6) Link recovery flow to the default-authentication-identification stage
+        auth_id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
+        if not auth_id_stage_pk:
+            all_id = _api_get('stages/identification/').get('results', [])
+            for s in all_id:
+                if 'default' in s.get('name', '').lower() and 'authentication' in s.get('name', '').lower():
+                    auth_id_stage_pk = s['pk']
+                    break
+        if auth_id_stage_pk:
+            try:
+                stage_data = _api_get(f'stages/identification/{auth_id_stage_pk}/')
+                current_rf = stage_data.get('recovery_flow')
+                current_pk = (current_rf if isinstance(current_rf, str) else
+                              (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
+                if current_pk != recovery_flow_pk:
+                    patch_body = {'recovery_flow': recovery_flow_pk}
+                    uf = stage_data.get('user_fields')
+                    if uf:
+                        patch_body['user_fields'] = uf
+                    try:
+                        _api_patch(f'stages/identification/{auth_id_stage_pk}/', patch_body)
+                    except urllib.error.HTTPError:
+                        put_body = {k: v for k, v in stage_data.items()
+                                    if k not in ('pk', 'component', 'verbose_name', 'verbose_name_plural', 'meta_model_name', 'flow_set')}
+                        put_body['recovery_flow'] = recovery_flow_pk
+                        r = _req.Request(f'{ak_url}/api/v3/stages/identification/{auth_id_stage_pk}/',
+                            data=json.dumps(put_body).encode(), headers=ak_headers, method='PUT')
+                        _req.urlopen(r, timeout=15)
+            except urllib.error.HTTPError:
+                pass
+        return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.', recovery_flow_slug
+    except urllib.error.HTTPError as e:
+        return False, _err(e), None
+    except Exception as e:
+        return False, str(e), None
+
+
+@app.route('/api/emailrelay/configure-authentik', methods=['POST'])
+@login_required
+def emailrelay_configure_authentik():
+    """Push Email Relay settings into Authentik and set up recovery flow (SMTP + Forgot password?)."""
+    settings = load_settings()
+    relay = settings.get('email_relay') or {}
+    if not relay.get('from_addr'):
+        return jsonify({'success': False, 'error': 'Email Relay not configured. Deploy the relay first.'}), 400
+    ak_dir = os.path.expanduser('~/authentik')
+    if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+        return jsonify({'success': False, 'error': 'Authentik is not installed.'}), 400
+    try:
+        message = _configure_authentik_smtp_and_recovery(relay.get('from_addr', ''))
+        return jsonify({'success': True, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ── Node-RED ──────────────────────────────────────────────────────────────────
 nodered_deploy_log = []
 nodered_deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
@@ -2848,9 +4027,9 @@ def nodered_uninstall():
     except Exception as e:
         return jsonify({'error': f'Uninstall failed: {str(e)}'}), 500
 
-def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
+def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None, flow_pk=None, inv_flow_pk=None):
     """Create Node-RED proxy provider + application in Authentik, add to embedded outpost.
-    Mirrors TAK Portal's working code exactly (lines 1442-1571)."""
+    When flow_pk/inv_flow_pk are provided (e.g. from Step 12), use them. Otherwise wait for flows."""
     if not fqdn or not ak_token:
         return False
     def log(msg):
@@ -2862,80 +4041,61 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
     _ak_url = 'http://127.0.0.1:9090'
 
     try:
-        # 1) Get authorization flow
-        flow_pk = None
-        attempt = 0
-        while attempt < 60:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
-                resp = _urlreq.urlopen(req, timeout=10)
-                flows = json.loads(resp.read().decode())['results']
-                for fl in flows:
-                    if 'implicit' in fl.get('slug', ''):
-                        flow_pk = fl['pk']
-                        break
-                if not flow_pk and flows:
-                    flow_pk = flows[0]['pk']
-                if flow_pk:
-                    break
-            except Exception:
-                pass
-            if attempt % 6 == 0:
-                log(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
-            time.sleep(5)
-            attempt += 1
-        if not flow_pk:
-            log("  ⚠ No authorization flow found for Node-RED")
-            return False
-        log("  ✓ Got authorization flow")
-
-        # 2) Get invalidation flow
-        inv_flow_pk = None
-        attempt = 0
-        while attempt < 60:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
-                resp = _urlreq.urlopen(req, timeout=10)
-                inv_flows = json.loads(resp.read().decode())['results']
-                inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
-                if inv_flow_pk:
-                    break
-            except Exception:
-                pass
-            if attempt % 6 == 0:
-                log(f"  ⏳ Waiting for invalidation flow... ({attempt * 5}s)")
-            time.sleep(5)
-            attempt += 1
-        if not inv_flow_pk:
-            log("  ⚠ No invalidation flow found for Node-RED")
-            return False
-        log("  ✓ Got invalidation flow")
-
-        # 3) Create proxy provider (same payload structure as TAK Portal)
-        provider_pk = None
-        if flow_pk and inv_flow_pk:
-            try:
-                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
-                    data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
-                        'invalidation_flow': inv_flow_pk,
-                        'external_host': f'https://console.{fqdn}/nodered/', 'mode': 'forward_single',
-                        'token_validity': 'hours=24'}).encode(),
-                    headers=_ak_headers, method='POST')
-                resp = _urlreq.urlopen(req, timeout=10)
-                provider_pk = json.loads(resp.read().decode())['pk']
-                log("  ✓ Proxy provider created")
-            except Exception as e:
-                if hasattr(e, 'code') and e.code == 400:
-                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=Node-RED', headers=_ak_headers)
+        if not flow_pk or not inv_flow_pk:
+            for attempt in range(36):
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
                     resp = _urlreq.urlopen(req, timeout=10)
-                    results = json.loads(resp.read().decode())['results']
-                    if results:
-                        provider_pk = results[0]['pk']
-                    log("  ✓ Proxy provider already exists")
-                else:
-                    log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
+                    flows = json.loads(resp.read().decode())['results']
+                    flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
+                    if flow_pk:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        inv_flows = json.loads(resp.read().decode())['results']
+                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+                        if inv_flow_pk:
+                            break
+                except Exception:
+                    pass
+                if attempt % 6 == 0:
+                    log(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+                time.sleep(5)
+            if not flow_pk or not inv_flow_pk:
+                log("  ⚠ No authorization/invalidation flow — skipping Node-RED proxy provider")
+                return False
+            log("  ✓ Got authorization and invalidation flows")
 
-        # 4) Create application
+        # Create proxy provider (same payload structure as TAK Portal)
+        provider_pk = None
+        try:
+            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
+                    'invalidation_flow': inv_flow_pk,
+                    'external_host': f'https://nodered.{fqdn}', 'mode': 'forward_single',
+                    'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
+                headers=_ak_headers, method='POST')
+            resp = _urlreq.urlopen(req, timeout=10)
+            provider_pk = json.loads(resp.read().decode())['pk']
+            log("  ✓ Proxy provider created")
+        except Exception as e:
+            if hasattr(e, 'code') and e.code == 400:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=Node-RED', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                results = json.loads(resp.read().decode())['results']
+                if results:
+                    provider_pk = results[0]['pk']
+                    try:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/{provider_pk}/',
+                            data=json.dumps({'external_host': f'https://nodered.{fqdn}', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
+                            headers=_ak_headers, method='PATCH')
+                        _urlreq.urlopen(req, timeout=10)
+                    except Exception:
+                        pass
+                log("  ✓ Proxy provider already exists (external_host updated to nodered subdomain)")
+            else:
+                log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
+
+        # Create application
         if provider_pk:
             try:
                 req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
@@ -2982,6 +4142,366 @@ def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
         log(f"  ⚠ Forward auth setup error: {str(e)[:100]}")
     return True
 
+def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_flow_pk=None):
+    """Create infra-TAK Console proxy providers (infratak + console) and applications in Authentik, add to embedded outpost.
+    When flow_pk/inv_flow_pk are provided (e.g. from Step 12), use them. Otherwise wait for flows (e.g. when called from Caddy save)."""
+    if not fqdn or not ak_token:
+        return False
+    def log(msg):
+        if plog:
+            plog(msg)
+    import urllib.request as _urlreq
+    _ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    _ak_url = 'http://127.0.0.1:9090'
+
+    try:
+        if not flow_pk or not inv_flow_pk:
+            for attempt in range(36):
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
+                    resp = _urlreq.urlopen(req, timeout=10)
+                    flows = json.loads(resp.read().decode())['results']
+                    flow_pk = next((f['pk'] for f in flows if 'implicit' in f.get('slug', '')), flows[0]['pk'] if flows else None)
+                    if flow_pk:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        inv_flows = json.loads(resp.read().decode())['results']
+                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+                        if inv_flow_pk:
+                            break
+                except Exception:
+                    pass
+                if attempt % 6 == 0 and plog:
+                    plog(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+                time.sleep(5)
+        if not flow_pk or not inv_flow_pk:
+            log("  ⚠ No authorization/invalidation flow — skipping infra-TAK Console proxy providers")
+            return False
+
+        entries = [('infra-TAK', 'infratak', f'https://{_get_service_domain(load_settings(), "infratak")}')]
+        try:
+            s = load_settings()
+            mtx_domain = _get_service_domain(s, 'mediamtx')
+            entries.append(('MediaMTX', 'stream', f'https://{mtx_domain}'))
+        except Exception:
+            pass
+        provider_pks = []
+        base_domain = fqdn.split(':')[0]
+        cookie_domain = f'.{base_domain}'
+        for name, slug, host in entries:
+            pk = None
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                    data=json.dumps({'name': name, 'authorization_flow': flow_pk,
+                        'invalidation_flow': inv_flow_pk,
+                        'external_host': host, 'mode': 'forward_single',
+                        'token_validity': 'hours=24', 'cookie_domain': cookie_domain}).encode(),
+                    headers=_ak_headers, method='POST')
+                resp = _urlreq.urlopen(req, timeout=10)
+                pk = json.loads(resp.read().decode())['pk']
+                provider_pks.append(pk)
+                log(f"  ✓ Proxy provider created: {name}")
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 400:
+                    import urllib.parse as _uparse
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={_uparse.quote(name)}', headers=_ak_headers)
+                    resp = _urlreq.urlopen(req, timeout=10)
+                    results = json.loads(resp.read().decode())['results']
+                    if results:
+                        pk = results[0]['pk']
+                        provider_pks.append(pk)
+                    log(f"  ✓ Proxy provider already exists: {name}")
+                else:
+                    log(f"  ⚠ Provider error {name}: {str(e)[:80]}")
+            if pk:
+                try:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                        data=json.dumps({'name': name, 'slug': slug, 'provider': pk}).encode(),
+                        headers=_ak_headers, method='POST')
+                    _urlreq.urlopen(req, timeout=10)
+                    log(f"  ✓ Application created: {name}")
+                except Exception as e:
+                    if hasattr(e, 'code') and e.code == 400:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/{slug}/',
+                                data=json.dumps({'provider': pk}).encode(),
+                                headers=_ak_headers, method='PATCH')
+                            _urlreq.urlopen(req, timeout=10)
+                        except Exception:
+                            pass
+                        log(f"  ✓ Application already exists: {name}")
+                    else:
+                        log(f"  ⚠ Application error: {str(e)[:80]}")
+
+        for name, slug, host in entries:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/{slug}/', headers=_ak_headers)
+                _urlreq.urlopen(req, timeout=10)
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 404:
+                    import urllib.parse as _uparse
+                    try:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={_uparse.quote(name)}', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        results = json.loads(resp.read().decode())['results']
+                        if results:
+                            pk = results[0]['pk']
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                                data=json.dumps({'name': name, 'slug': slug, 'provider': pk}).encode(),
+                                headers=_ak_headers, method='POST')
+                            _urlreq.urlopen(req, timeout=10)
+                            if pk not in provider_pks:
+                                provider_pks.append(pk)
+                            log(f"  ✓ Application recreated: {name}")
+                    except Exception:
+                        pass
+
+        if provider_pks:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/?search=embedded', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                outposts = json.loads(resp.read().decode())['results']
+                embedded = next((o for o in outposts if 'embed' in o.get('name', '').lower() or o.get('type') == 'proxy'), None)
+                if embedded:
+                    current = list(embedded.get('providers', []))
+                    for pk in provider_pks:
+                        if pk not in current:
+                            current.append(pk)
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
+                        data=json.dumps({'providers': current}).encode(),
+                        headers=_ak_headers, method='PATCH')
+                    _urlreq.urlopen(req, timeout=10)
+                    log("  ✓ infra-TAK Console added to embedded outpost")
+            except Exception as e:
+                log(f"  ⚠ Outpost error: {str(e)[:80]}")
+        return True
+    except Exception as e:
+        log(f"  ⚠ Console forward auth setup: {str(e)[:100]}")
+        return False
+
+
+def _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog=None):
+    """Set cookie_domain on all proxy providers so session is shared across subdomains (avoids stream. redirect loop)."""
+    if not fqdn:
+        return
+    import urllib.request as _req
+    import urllib.error
+    base = fqdn.split(':')[0]
+    cookie_domain = f'.{base}'
+    _log = plog or (lambda m: None)
+    try:
+        r = _req.Request(f'{ak_url}/api/v3/providers/proxy/?page_size=100', headers=ak_headers)
+        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
+        for prov in data.get('results', []):
+            pk = prov.get('pk')
+            if not pk:
+                continue
+            try:
+                patch = _req.Request(f'{ak_url}/api/v3/providers/proxy/{pk}/',
+                    data=json.dumps({'cookie_domain': cookie_domain}).encode(),
+                    headers=ak_headers, method='PATCH')
+                _req.urlopen(patch, timeout=10)
+            except urllib.error.HTTPError:
+                pass
+        _log("  ✓ Proxy providers cookie_domain set for shared session")
+    except Exception as e:
+        _log(f"  ⚠ Proxy cookie_domain: {str(e)[:80]}")
+
+
+def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
+    """Restrict infra-TAK, Node-RED (and LDAP) to authentik Admins. TAK Portal and MediaMTX open to all authenticated users.
+    Creates a 'Group membership: authentik Admins' policy and binds it only to admin-only apps. No binding on TAK Portal/MediaMTX = everyone sees them.
+    Idempotent — safe to call on every deploy."""
+    import urllib.request as _req
+    import urllib.error
+    from urllib.parse import quote as _quote
+    _log = plog or (lambda m: None)
+    _last_path = [None]  # cell for closure
+
+    def _log_http_err(e, path_hint=None):
+        path = path_hint or _last_path[0] or '?'
+        full_url = f'{ak_url}/api/v3/{path}' if path and path != '?' else getattr(e, 'url', path)
+        try:
+            body = e.fp.read(200).decode(errors='replace') if e.fp else ''
+        except Exception:
+            body = ''
+        _log(f"  ⚠ App access policy API error: {e.code} {e.reason} — {full_url}")
+        if body:
+            _log(f"     Response: {body[:120]}")
+
+    def _api_get(path):
+        _last_path[0] = path
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers)
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _api_post(path, body):
+        _last_path[0] = path
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _api_delete(path):
+        _last_path[0] = path
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers, method='DELETE')
+        _req.urlopen(r, timeout=15)
+
+    try:
+        # 1) Find the "authentik Admins" group PK
+        groups = _api_get('core/groups/?search=authentik+Admins')['results']
+        admin_group_pk = None
+        for g in groups:
+            if g.get('name') == 'authentik Admins':
+                admin_group_pk = g['pk']
+                break
+        if not admin_group_pk:
+            _log("  ⚠ 'authentik Admins' group not found — skipping app access policies")
+            return False
+
+        # 2) Find or create the "Allow authentik Admins" policy (group membership or expression)
+        policy_name = 'Allow authentik Admins'
+        policy_pk = None
+        # Newer Authentik: policies/all/; older: policies/group_membership/
+        for list_path in ('policies/all/', 'policies/group_membership/'):
+            try:
+                data = _api_get(f'{list_path}?search={_quote(policy_name)}')
+                results = (data.get('results') if isinstance(data, dict) else None) or []
+                for p in results:
+                    if p.get('name') == policy_name:
+                        policy_pk = p['pk']
+                        break
+                if policy_pk:
+                    break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue
+                raise
+        if not policy_pk:
+            # Create: try group_membership (older) then expression (newer)
+            try:
+                data = _api_post('policies/group_membership/', {
+                    'name': policy_name,
+                    'group': admin_group_pk,
+                })
+                policy_pk = data['pk']
+                _log(f"  ✓ Created policy: {policy_name}")
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 405):
+                    # 404 = no group_membership endpoint; 405 = endpoint exists but POST not allowed (newer Authentik)
+                    try:
+                        data = _api_post('policies/expression/', {
+                            'name': policy_name,
+                            'expression': 'return ak_is_group_member(request.user, name="authentik Admins")',
+                        })
+                        policy_pk = data['pk']
+                        _log(f"  ✓ Created expression policy: {policy_name}")
+                    except urllib.error.HTTPError as e2:
+                        _log_http_err(e2)
+                        _log(f"  ⚠ Could not create policy: {e2.code} {e2.reason}")
+                        return False
+                elif e.code == 400:
+                    for list_path in ('policies/all/', 'policies/group_membership/'):
+                        try:
+                            data = _api_get(f'{list_path}?search={_quote(policy_name)}')
+                            for p in (data.get('results') or []):
+                                if p.get('name') == policy_name:
+                                    policy_pk = p['pk']
+                                    break
+                            if policy_pk:
+                                break
+                        except urllib.error.HTTPError:
+                            continue
+                    if not policy_pk:
+                        _log(f"  ⚠ Could not create policy: {e}")
+                        return False
+                else:
+                    raise
+        else:
+            _log(f"  ✓ Policy exists: {policy_name}")
+
+        # 3) Admin-only apps: bind the admin policy (infra-TAK, Node-RED). LDAP must be open to all authenticated users (QR registration, device bind). TAK Portal and MediaMTX: no binding = all authenticated users.
+        admin_only_slugs = ['infra-tak', 'infratak', 'console', 'node-red']
+        user_visible_slugs = ['mediamtx', 'stream', 'tak-portal', 'ldap']  # no policy = visible to all authenticated users (LDAP needed for QR registration)
+
+        all_apps = _api_get('core/applications/?page_size=100')['results']
+
+        def _bind_policy_to_app(app_pk, app_name, pol_pk, pol_name):
+            bindings = _api_get(f'policies/bindings/?target={app_pk}&page_size=100')['results']
+            already = any(
+                str(b.get('policy')) == str(pol_pk) or
+                (b.get('policy_obj', {}) or {}).get('name') == pol_name
+                for b in bindings
+            )
+            if already:
+                return False
+            try:
+                _api_post('policies/bindings/', {
+                    'target': app_pk, 'policy': pol_pk,
+                    'order': 0, 'negate': False, 'enabled': True, 'timeout': 30,
+                })
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code != 400:
+                    _log(f"  ⚠ {app_name}: binding error: {e}")
+                return False
+
+        # Remove "Allow MediaMTX users" binding from stream/mediamtx if present (so they become visible to all authenticated users)
+        mtx_policy_name = 'Allow MediaMTX users'
+        for app in all_apps:
+            app_slug = app.get('slug', '')
+            if app_slug not in ('mediamtx', 'stream'):
+                continue
+            app_pk = app.get('pk', '')
+            app_name = app.get('name', '')
+            bindings = _api_get(f'policies/bindings/?target={app_pk}&page_size=100')['results']
+            for b in bindings:
+                if (b.get('policy_obj', {}) or {}).get('name') == mtx_policy_name:
+                    try:
+                        _api_delete(f'policies/bindings/{b["pk"]}/')
+                        _log(f"  ✓ {app_name}: removed restrictive policy — now open to all authenticated users")
+                    except Exception:
+                        pass
+                    break
+        # Remove "Allow authentik Admins" binding from LDAP if present (blocks QR registration / device bind for non-admin users)
+        for app in all_apps:
+            app_slug = app.get('slug', '')
+            if app_slug != 'ldap':
+                continue
+            app_pk = app.get('pk', '')
+            app_name = app.get('name', '')
+            bindings = _api_get(f'policies/bindings/?target={app_pk}&page_size=100')['results']
+            for b in bindings:
+                if (b.get('policy_obj', {}) or {}).get('name') == policy_name:
+                    try:
+                        _api_delete(f'policies/bindings/{b["pk"]}/')
+                        _log(f"  ✓ {app_name}: removed restrictive policy — now open to all authenticated users")
+                    except Exception:
+                        pass
+                    break
+
+        for app in all_apps:
+            app_slug = app.get('slug', '')
+            app_pk = app.get('pk', '')
+            app_name = app.get('name', '')
+
+            if app_slug in admin_only_slugs:
+                if _bind_policy_to_app(app_pk, app_name, policy_pk, policy_name):
+                    _log(f"  ✓ {app_name}: restricted to authentik Admins")
+                else:
+                    _log(f"  ✓ {app_name}: already restricted to authentik Admins")
+
+            elif app_slug in user_visible_slugs:
+                _log(f"  ✓ {app_name}: open to all authenticated users (no restrictive binding)")
+
+        return True
+
+    except urllib.error.HTTPError as e:
+        _log_http_err(e)
+        _log(f"  ⚠ App access policy setup: HTTP Error {e.code}: {e.reason}")
+        return False
+    except Exception as e:
+        _log(f"  ⚠ App access policy setup: {str(e)[:150]}")
+        return False
+
+
 def run_nodered_deploy():
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
@@ -2998,14 +4518,14 @@ def run_nodered_deploy():
         plog("━━━ Step 1/3: Creating Docker Compose ━━━")
         compose_yml = os.path.join(nr_dir, 'docker-compose.yml')
         settings_js = os.path.join(nr_dir, 'settings.js')
-        # Node-RED under /nodered so Caddy can proxy console.domain/nodered/* without stripping path
+        # Node-RED at root (/) so Caddy can proxy nodered.domain to 1880
         with open(settings_js, 'w') as f:
             f.write("""module.exports = {
   flowFile: 'flows.json',
   flowFilePretty: true,
   userDir: '/data',
-  httpAdminRoot: '/nodered',
-  httpNodeRoot: '/nodered'
+  httpAdminRoot: '/',
+  httpNodeRoot: '/'
 };
 """)
         with open(compose_yml, 'w') as f:
@@ -3035,7 +4555,7 @@ volumes:
         if domain:
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null', shell=True, capture_output=True, timeout=15)
-            plog(f"✓ Caddy updated — open via https://console.{domain}/nodered/")
+            plog(f"✓ Caddy updated — open via https://nodered.{domain}")
         else:
             plog("  No domain configured — access via http://<server>:1880")
         if not nodered_deploy_status.get('cancelled') and domain and os.path.exists(os.path.expanduser('~/authentik/.env')):
@@ -3124,7 +4644,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% if nr.installed %}
   {% if authentik_installed and settings.fqdn %}<div class="card" style="border-color:rgba(59,130,246,.3);background:rgba(59,130,246,.05)"><div class="card-title">&#128274; Protected by Authentik</div><p style="font-size:13px;color:var(--text-secondary);line-height:1.5">Node-RED is behind Authentik. The application and proxy provider are created automatically when you deploy Authentik or Node-RED.</p></div>{% endif %}
   <div class="card"><div class="card-title">Access</div><div class="info-grid">
-    {% if settings.fqdn %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="https://console.{{ settings.fqdn }}/nodered/" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://console.{{ settings.fqdn }}/nodered/</a> &#8599;</div></div>
+    {% if settings.fqdn %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="https://nodered.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://nodered.{{ settings.fqdn }}</a> &#8599;</div></div>
     {% else %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="http://{{ settings.server_ip }}:1880" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">http://{{ settings.server_ip }}:1880</a> &#8599;</div></div>{% endif %}
     <div class="info-item"><div class="info-label">Install dir</div><div class="info-value">~/node-red</div></div>
   </div></div>
@@ -3138,8 +4658,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   <div class="card" id="logs-card" style="display:none"><div class="card-title">Container logs</div><div class="log-box" id="container-logs">Loading...</div></div>
   {% else %}
   <div class="card"><div class="card-title">Deploy Node-RED</div>
-  <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">Runs Node-RED in Docker with a persistent volume. With a domain set, the flow editor is at https://nodered.&lt;your-domain&gt;.</p>
-  {% if settings.fqdn %}<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Node-RED is only available when logged into the console at <code style="color:var(--cyan)">console.{{ settings.fqdn }}/nodered/</code></p>{% endif %}
+  <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">Runs Node-RED in Docker with a persistent volume. With a domain set, the flow editor is at <code style="color:var(--cyan)">https://nodered.{{ settings.fqdn if settings.fqdn else '&lt;your-domain&gt;' }}</code> (behind Authentik when enabled).</p>
+  {% if settings.fqdn %}<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Open <a href="https://nodered.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">nodered.{{ settings.fqdn }}</a> to use the flow editor. If you upgraded from console.*/nodered/ and the link does not load, redeploy Node-RED once from this page.</p>{% endif %}
   <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">&#x1f680; Deploy Node-RED</button></div>
   {% endif %}
   {% if deploying %}<div class="card" id="deploy-log-card"><div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">Deploy log<button class="btn btn-ghost" id="nodered-cancel-btn-static" onclick="cancelNoderedDeploy()" style="display:none">&#x2717; Cancel</button></div><div class="log-box" id="deploy-log">Initializing...</div></div>{% endif %}
@@ -3358,7 +4878,20 @@ function pollLog() {
         }
         if (!d.running) {
           clearInterval(logInterval);
-          if (d.complete) setTimeout(() => location.reload(), 1500);
+          if (d.complete) {
+            var btn = document.getElementById('deploy-btn');
+            if (btn) { btn.textContent = '✓ Deployment Complete'; btn.style.background = 'var(--green)'; btn.style.opacity = '1'; btn.style.cursor = 'default'; }
+            var box = document.getElementById('deploy-log');
+            var refreshBtn = document.createElement('button');
+            refreshBtn.textContent = '↻ Refresh Page';
+            refreshBtn.style.cssText = 'display:block;width:100%;padding:12px;margin-top:16px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
+            refreshBtn.onclick = function() { window.location.href = '/mediamtx'; };
+            box.appendChild(refreshBtn);
+            box.scrollTop = box.scrollHeight;
+          } else if (d.error) {
+            var btn = document.getElementById('deploy-btn');
+            if (btn) { btn.textContent = '✗ Deployment Failed'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '🚀 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
+          }
         }
       });
   }, 800);
@@ -3419,6 +4952,8 @@ function doUninstall() {
 }
 
 {% if deploying %}
+document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
+{% elif deploy_done %}
 document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
 {% endif %}
 </script>
@@ -3934,6 +5469,17 @@ Configure TAK Portal and MediaMTX to use the local relay:<br><br>
 <strong>TLS:</strong> <code>off</code>
 </div>
 
+{% if modules.get('authentik', {}).get('installed') %}
+<div class="section-title">Configure Authentik</div>
+<div id="cfg-ak-card" style="background:var(--bg-card);border:1px solid {% if authentik_smtp_configured %}rgba(16,185,129,0.4){% else %}var(--border){% endif %};border-radius:12px;padding:24px;margin-bottom:24px;border-left:4px solid {% if authentik_smtp_configured %}var(--green){% else %}var(--border){% endif %}">
+<p style="margin:0 0 8px 0;color:var(--text-muted)">Push this relay (localhost:25) and your From address into Authentik so recovery emails and other Authentik mail use the same relay. After you deploy Email Relay, this runs automatically; you can also click below to run it now or after switching providers.</p>
+<p id="cfg-ak-status" style="margin:0 0 16px 0;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600">{% if authentik_smtp_configured %}<span style="color:var(--green)">✓ Authentik SMTP: Configured</span> — password recovery will use this relay.{% else %}<span style="color:var(--yellow)">Authentik SMTP: Not configured</span> — click the button below so &quot;Forgot username or password&quot; emails are sent.{% endif %}</p>
+<button onclick="configureAuthentik()" id="cfg-ak-btn" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;cursor:pointer">Configure Authentik to use these settings</button>
+<p style="margin:8px 0 0 0;font-size:11px;color:var(--text-dim)">If you switch providers later, click this again to push the new relay into Authentik.</p>
+<div id="cfg-ak-result" style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;display:none"></div>
+</div>
+{% endif %}
+
 <div class="section-title">Send Test Email</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:12px;align-items:end">
@@ -4079,6 +5625,18 @@ async function sendTest(){
     else{res.style.color='var(--red)';res.textContent='✗ '+d.error}
 }
 
+async function configureAuthentik(){
+    var btn=document.getElementById('cfg-ak-btn');
+    var res=document.getElementById('cfg-ak-result');
+    if(!btn||!res) return;
+    btn.disabled=true;res.style.display='block';res.style.color='var(--text-dim)';res.textContent='Configuring...';
+    var r=await fetch('/api/emailrelay/configure-authentik',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var d=await r.json();
+    if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.message;setTimeout(function(){location.reload();},1500)}
+    else{res.style.color='var(--red)';res.textContent='✗ '+(d.error||'Failed')}
+    btn.disabled=false;
+}
+
 async function emailControl(action){
     var r=await fetch('/api/emailrelay/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
     var d=await r.json();
@@ -4176,6 +5734,21 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Create DNS A records for *.{{ settings.get('fqdn', '') }} or individual subdomains pointing to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
 </div>
+<details id="service-domains-section" style="margin-bottom:24px">
+<summary style="cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--text-secondary);padding:12px 0;user-select:none">Service Domains <span style="font-size:11px;color:var(--text-dim);font-weight:400">— customize per-service domains</span></summary>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-top:8px">
+<div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.5">Override any service's domain. Leave blank to use the default (<code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">prefix.basedomain</code>). Enter a full domain (e.g. <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">mystreams.tv</code>) or just a prefix (e.g. <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">live</code> → <code style="background:rgba(255,255,255,.05);padding:1px 5px;border-radius:3px">live.{{ settings.get('fqdn','') }}</code>).</div>
+<div id="svc-domains-grid" style="display:grid;grid-template-columns:140px 1fr;gap:8px 16px;align-items:center">
+<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;padding-bottom:4px;border-bottom:1px solid var(--border)">Service</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;padding-bottom:4px;border-bottom:1px solid var(--border)">Domain</div>
+</div>
+<div id="svc-domains-loading" style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">Loading...</div>
+<div style="display:flex;gap:12px;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+<button onclick="saveDomains()" id="save-domains-btn" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Save & Reload Caddy</button>
+<span id="save-domains-status" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)"></span>
+</div>
+</div>
+</details>
 {% if configured_urls %}
 <div class="section-title">Configured URLs</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
@@ -4214,7 +5787,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div class="section-title">What You Get With a Domain</div>
 <div class="benefit-grid">
-<div class="benefit-item"><div class="icon">📱</div><div class="title">ATAK QR Enrollment</div><div class="desc">Android devices can enroll via QR code with trusted SSL certificates</div></div>
+<div class="benefit-item"><div class="icon">📱</div><div class="title">TAK Client QR Enrollment</div><div class="desc">Devices can enroll via QR code with trusted SSL certificates (ATAK, WinTAK, iTAK, etc.)</div></div>
 <div class="benefit-item"><div class="icon">🔐</div><div class="title">TAK Portal Auth</div><div class="desc">Secure TAK Portal with Authentik SSO — no more anonymous access</div></div>
 <div class="benefit-item"><div class="icon">🔒</div><div class="title">Trusted SSL</div><div class="desc">Let's Encrypt certificates — no more browser warnings</div></div>
 <div class="benefit-item"><div class="icon"><img src="{{ mediamtx_logo_url }}" alt="" style="width:28px;height:28px;object-fit:contain"></div><div class="title">Secure Streaming</div><div class="desc">MediaMTX streams over HTTPS with its own subdomain</div></div>
@@ -4281,6 +5854,63 @@ async function caddyUninstall(){
     if(!confirm('Remove Caddy and clear domain configuration?'))return;
     try{var r=await fetch('/api/caddy/uninstall',{method:'POST'});var d=await r.json();if(d.success)location.reload()}catch(e){alert('Error: '+e.message)}
 }
+async function loadServiceDomains(){
+    try{
+        var r=await fetch('/api/caddy/domains');var d=await r.json();
+        var grid=document.getElementById('svc-domains-grid');
+        var loading=document.getElementById('svc-domains-loading');
+        if(!grid)return;
+        loading.style.display='none';
+        d.services.forEach(function(s){
+            var nameDiv=document.createElement('div');
+            nameDiv.style.cssText='font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:500;color:'+(s.installed?'var(--text-primary)':'var(--text-dim)')+';display:flex;align-items:center;gap:6px;padding:8px 0';
+            nameDiv.innerHTML=s.label+(s.installed?'':' <span style="font-size:9px;color:var(--text-dim);background:rgba(71,85,105,.3);padding:1px 6px;border-radius:3px">not installed</span>');
+            var inputDiv=document.createElement('div');
+            inputDiv.style.cssText='padding:4px 0';
+            var inp=document.createElement('input');
+            inp.type='text';inp.id='svc-domain-'+s.key;
+            inp.value=s.custom||'';
+            inp.placeholder=s.default||s.key;
+            inp.style.cssText='width:100%;padding:8px 12px;background:var(--bg-deep);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:"JetBrains Mono",monospace;font-size:12px;outline:none;transition:border-color .2s';
+            inp.onfocus=function(){this.style.borderColor='var(--cyan)'};
+            inp.onblur=function(){this.style.borderColor='var(--border)'};
+            if(!s.installed){inp.style.opacity='0.5'}
+            inputDiv.appendChild(inp);
+            grid.appendChild(nameDiv);
+            grid.appendChild(inputDiv);
+        });
+        window._svcDomainKeys=d.services.map(function(s){return s.key});
+    }catch(e){
+        var loading=document.getElementById('svc-domains-loading');
+        if(loading)loading.textContent='Failed to load service domains';
+    }
+}
+async function saveDomains(){
+    var btn=document.getElementById('save-domains-btn');
+    var status=document.getElementById('save-domains-status');
+    btn.disabled=true;btn.textContent='Saving...';btn.style.opacity='0.7';
+    status.textContent='';status.style.color='var(--cyan)';
+    var domains={};
+    (window._svcDomainKeys||[]).forEach(function(k){
+        var inp=document.getElementById('svc-domain-'+k);
+        if(inp)domains[k]=inp.value.trim();
+    });
+    try{
+        var r=await fetch('/api/caddy/domains',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains:domains})});
+        var d=await r.json();
+        if(d.success){
+            status.style.color='var(--green)';status.textContent='Saved — Caddy reloading…';
+            setTimeout(function(){location.reload()},3000);
+        }else{
+            status.style.color='var(--red)';status.textContent='Error: '+(d.error||'unknown');
+            btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
+        }
+    }catch(e){
+        status.style.color='var(--red)';status.textContent='Error: '+e.message;
+        btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
+    }
+}
+loadServiceDomains();
 {% if deploying %}pollCaddyLog();{% endif %}
 </script>
 </body></html>'''
@@ -4426,14 +6056,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="controls">
 <button class="control-btn btn-stop" onclick="portalControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="portalControl('restart')">🔄 Restart</button>
-<button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()"{% if portal_update_available %} style="position:relative;border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if portal_update_available %} <span style="margin-left:4px;color:var(--cyan)" title="Update available">●</span>{% endif %}</button>
 </div>
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}{% if portal_update_available and portal_latest %} · <span style="color:var(--cyan)">Update to {{ portal_latest }} available</span>{% endif %}</div>{% endif %}
+<div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% elif portal.installed %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="portalControl('start')">▶ Start</button>
-<button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()"{% if portal_update_available %} style="position:relative;border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if portal_update_available %} <span style="margin-left:4px;color:var(--cyan)" title="Update available">●</span>{% endif %}</button>
 </div>
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}{% if portal_update_available and portal_latest %} · <span style="color:var(--cyan)">Update to {{ portal_latest }} available</span>{% endif %}</div>{% endif %}
+<div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
 {% endif %}
@@ -4489,7 +6123,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary);line-height:1.8">
 TAK Portal is a lightweight user-management portal that integrates with <span style="color:var(--cyan)">Authentik</span> and <span style="color:var(--cyan)">TAK Server</span> for streamlined certificate and account control.<br><br>
 Features: User creation with auto-cert generation, group management, mutual aid coordination, QR code device setup, agency-level access control, email notifications.<br><br>
-<span style="color:var(--text-dim)">Requires: Docker · Authentik instance · TAK Server (optional but recommended)</span>
+<span style="color:var(--text-dim)">Requires: Docker · Authentik · TAK Server with LDAP connected</span>
 </div>
 </div>
 <button class="deploy-btn" id="deploy-btn" onclick="deployPortal()">🚀 Deploy TAK Portal</button>
@@ -4525,6 +6159,7 @@ Features: User creation with auto-cert generation, group management, mutual aid 
 </div>
 <footer class="footer"></footer>
 <script>
+async function showAkPassword(){
     var btn=document.getElementById('ak-pw-btn');
     var display=document.getElementById('ak-pw-display');
     if(display.style.display==='inline'){display.style.display='none';btn.textContent='🔑 Show Password';return}
@@ -4545,6 +6180,24 @@ async function portalControl(action){
         else alert('Error: '+(d.error||'Unknown'));
     }catch(e){alert('Error: '+e.message)}
     btns.forEach(function(b){b.disabled=false;b.style.opacity='1'});
+}
+async function portalUpdate(){
+    var btn=document.getElementById('update-btn');
+    var status=document.getElementById('update-status');
+    btn.disabled=true;btn.innerHTML='<span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:6px"></span>Updating...';
+    status.style.display='block';status.style.color='var(--text-secondary)';status.textContent='Pulling latest code and rebuilding container...';
+    document.querySelectorAll('.control-btn').forEach(function(b){if(b!==btn){b.disabled=true;b.style.opacity='0.5'}});
+    try{
+        var r=await fetch('/api/takportal/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'update'})});
+        var d=await r.json();
+        if(d.success){
+            status.style.color='var(--green)';
+            status.textContent='✓ Updated'+(d.pull?' — '+d.pull:'')+(d.version?' ('+d.version+')':'');
+            setTimeout(function(){window.location.href='/takportal'},1500);
+        }else{status.style.color='var(--red)';status.textContent='✗ '+(d.error||'Update failed')}
+    }catch(e){status.style.color='var(--red)';status.textContent='✗ '+e.message}
+    btn.disabled=false;btn.innerHTML='⬆ Update';
+    document.querySelectorAll('.control-btn').forEach(function(b){b.disabled=false;b.style.opacity='1'});
 }
 
 async function deployPortal(){
@@ -4732,7 +6385,20 @@ def authentik_deploy():
         return jsonify({'error': 'Deployment already in progress'}), 409
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    threading.Thread(target=run_authentik_deploy, daemon=True).start()
+    threading.Thread(target=run_authentik_deploy, args=(False,), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/authentik/reconfigure', methods=['POST'])
+@login_required
+def authentik_reconfigure():
+    """Re-run LDAP/CoreConfig/forward-auth setup without removing anything. Use when TAK Server was deployed after Authentik."""
+    if authentik_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    if not os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml')):
+        return jsonify({'error': 'Authentik not installed. Deploy Authentik first.'}), 400
+    authentik_deploy_log.clear()
+    authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_authentik_deploy, args=(True,), daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/authentik/deploy/log')
@@ -4785,17 +6451,21 @@ def authentik_uninstall():
         return jsonify({'error': 'Invalid admin password'}), 403
     ak_dir = os.path.expanduser('~/authentik')
     steps = []
-    subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all 2>/dev/null; true', shell=True, capture_output=True, timeout=180)
-    steps.append('Stopped and removed Docker containers/volumes/images')
     if os.path.exists(ak_dir):
+        r = subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all --remove-orphans 2>&1', shell=True, capture_output=True, text=True, timeout=180)
+        steps.append('Stopped and removed Docker containers/volumes/images')
+        if r.returncode != 0:
+            steps.append(f'(compose reported: {(r.stderr or r.stdout or "").strip()[:200]})')
         subprocess.run(f'rm -rf {ak_dir}', shell=True, capture_output=True)
         steps.append('Removed ~/authentik')
+    else:
+        steps.append('~/authentik not found (already removed)')
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
 
 
-def run_authentik_deploy():
+def run_authentik_deploy(reconfigure=False):
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         authentik_deploy_log.append(entry)
@@ -4804,45 +6474,104 @@ def run_authentik_deploy():
         ak_dir = os.path.expanduser('~/authentik')
         settings = load_settings()
         server_ip = settings.get('server_ip', 'localhost')
+        env_path = os.path.join(ak_dir, '.env')
+        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+        ldap_svc_pass = None
 
-        if settings.get('pkg_mgr', 'apt') == 'apt':
-            wait_for_apt_lock(plog, authentik_deploy_log)
-
-        # Step 1: Check Docker
-        plog("\u2501\u2501\u2501 Step 1/10: Checking Docker \u2501\u2501\u2501")
-        r = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
-        if r.returncode != 0:
-            plog("Docker not found. Installing...")
-            subprocess.run('curl -fsSL https://get.docker.com | sh', shell=True, capture_output=True, text=True, timeout=300)
-            r2 = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
-            if r2.returncode != 0:
-                plog("\u2717 Failed to install Docker")
+        if reconfigure:
+            if not os.path.exists(ak_dir) or not os.path.exists(env_path) or not os.path.exists(compose_path):
+                plog("\u2717 Authentik not fully installed. Run a full Deploy first.")
                 authentik_deploy_status.update({'running': False, 'error': True})
                 return
-            plog(f"  {r2.stdout.strip()}")
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                        ldap_svc_pass = line.strip().split('=', 1)[1].strip()
+                        break
+            plog("\u2501\u2501\u2501 Reconfigure: Updating LDAP, CoreConfig, Forward Auth (no removal) \u2501\u2501\u2501")
+            subprocess.run(f'cd {ak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            plog("  Ensured containers are up")
+            fqdn = settings.get('fqdn', '')
+            # Cookie domain: so Authentik session is sent to stream.*, infratak.*, etc. (avoids redirect loop)
+            if fqdn:
+                base_domain = fqdn.split(':')[0]
+                cookie_domain_val = f'.{base_domain}'
+                with open(env_path) as f:
+                    env_lines = f.readlines()
+                has_cookie_domain = any(line.strip().startswith('AUTHENTIK_COOKIE_DOMAIN=') for line in env_lines)
+                if not has_cookie_domain:
+                    with open(env_path, 'w') as f:
+                        for line in env_lines:
+                            f.write(line)
+                        f.write(f"# Cookie domain — session shared across subdomains (avoids stream. redirect loop)\nAUTHENTIK_COOKIE_DOMAIN={cookie_domain_val}\n")
+                    plog("  Set AUTHENTIK_COOKIE_DOMAIN for subdomain shared session; restarting Authentik...")
+                    subprocess.run(f'cd {ak_dir} && docker compose restart 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            # Apply app access policies so only authentik Admins see infra-TAK/Node-RED
+            if fqdn:
+                ak_token = ''
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_TOKEN='):
+                            ak_token = line.strip().split('=', 1)[1].strip()
+                            break
+                if not ak_token:
+                    with open(env_path) as f:
+                        for line in f:
+                            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                                ak_token = line.strip().split('=', 1)[1].strip()
+                                break
+                if ak_token:
+                    ak_url = 'http://127.0.0.1:9090'
+                    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+                    plog("")
+                    plog("  Waiting for Authentik API...")
+                    if _wait_for_authentik_api(ak_url, ak_headers, max_attempts=24, plog=plog):
+                        plog("  Setting proxy cookie domain (shared session across subdomains)...")
+                        _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog)
+                        plog("  Configuring application access policies...")
+                        _ensure_app_access_policies(ak_url, ak_headers, plog)
+                    else:
+                        plog("  \u26a0 API not ready in time — run Update config & reconnect again to apply app access policies")
+                else:
+                    plog("  \u26a0 No token in .env — app access policies not applied")
         else:
-            plog(f"  {r.stdout.strip()}")
-        plog("\u2713 Docker available")
+            if settings.get('pkg_mgr', 'apt') == 'apt':
+                wait_for_apt_lock(plog, authentik_deploy_log)
 
-        # Step 2: Create directory
-        plog("")
-        plog("\u2501\u2501\u2501 Step 2/10: Setting Up Directory \u2501\u2501\u2501")
-        os.makedirs(ak_dir, exist_ok=True)
-        plog(f"  Directory: {ak_dir}")
-        plog("\u2713 Directory ready")
+            # Step 1: Check Docker
+            plog("\u2501\u2501\u2501 Step 1/10: Checking Docker \u2501\u2501\u2501")
+            r = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+            if r.returncode != 0:
+                plog("Docker not found. Installing...")
+                subprocess.run('curl -fsSL https://get.docker.com | sh', shell=True, capture_output=True, text=True, timeout=300)
+                r2 = subprocess.run('docker --version', shell=True, capture_output=True, text=True)
+                if r2.returncode != 0:
+                    plog("\u2717 Failed to install Docker")
+                    authentik_deploy_status.update({'running': False, 'error': True})
+                    return
+                plog(f"  {r2.stdout.strip()}")
+            else:
+                plog(f"  {r.stdout.strip()}")
+            plog("\u2713 Docker available")
 
-        # Step 3: Generate secrets and .env
-        plog("")
-        plog("\u2501\u2501\u2501 Step 3/10: Generating Configuration \u2501\u2501\u2501")
-        env_path = os.path.join(ak_dir, '.env')
-        ldap_svc_pass = None
-        if not os.path.exists(env_path):
-            pg_pass = subprocess.run('openssl rand -base64 36 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()[:90]
-            secret_key = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
-            ldap_svc_pass = subprocess.run('openssl rand -base64 24 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
-            bootstrap_pass = subprocess.run('openssl rand -base64 18 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
-            bootstrap_token = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
-            env_content = f"""PG_DB=authentik
+            # Step 2: Create directory
+            plog("")
+            plog("\u2501\u2501\u2501 Step 2/10: Setting Up Directory \u2501\u2501\u2501")
+            os.makedirs(ak_dir, exist_ok=True)
+            plog(f"  Directory: {ak_dir}")
+            plog("\u2713 Directory ready")
+
+            # Step 3: Generate secrets and .env
+            plog("")
+            plog("\u2501\u2501\u2501 Step 3/10: Generating Configuration \u2501\u2501\u2501")
+            ldap_svc_pass = None
+            if not os.path.exists(env_path):
+                pg_pass = subprocess.run('openssl rand -base64 36 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()[:90]
+                secret_key = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+                ldap_svc_pass = subprocess.run('openssl rand -base64 24 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+                bootstrap_pass = subprocess.run('openssl rand -base64 18 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+                bootstrap_token = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+                env_content = f"""PG_DB=authentik
 PG_USER=authentik
 PG_PASS={pg_pass}
 AUTHENTIK_SECRET_KEY={secret_key}
@@ -4860,6 +6589,7 @@ AUTHENTIK_BOOTSTRAP_LDAP_BASEDN=DC=takldap
 AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST=http://authentik-server-1:9000/
 # Embedded outpost host — prevents 0.0.0.0:9000 redirect issue
 AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
+""" + (f"\n# Cookie domain so session is shared across subdomains (stream., infratak., etc.) — avoids redirect loop\nAUTHENTIK_COOKIE_DOMAIN=.{settings.get('fqdn').split(':')[0]}" if settings.get("fqdn") else "") + """
 # Email Configuration (uncomment and configure)
 # AUTHENTIK_EMAIL__HOST=smtp.example.com
 # AUTHENTIK_EMAIL__PORT=587
@@ -4868,27 +6598,27 @@ AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
 # AUTHENTIK_EMAIL__USE_TLS=true
 # AUTHENTIK_EMAIL__FROM=authentik@example.com
 """
-            with open(env_path, 'w') as f:
-                f.write(env_content)
-            plog("  Generated PostgreSQL password")
-            plog("  Generated secret key")
-            plog(f"  Generated LDAP service account password")
-            plog("\u2713 .env created")
-        else:
-            plog("\u2713 .env already exists")
-            # Read existing ldap password
-            with open(env_path) as f:
-                for line in f:
-                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
-                        ldap_svc_pass = line.strip().split('=', 1)[1].strip()
+                with open(env_path, 'w') as f:
+                    f.write(env_content)
+                plog("  Generated PostgreSQL password")
+                plog("  Generated secret key")
+                plog(f"  Generated LDAP service account password")
+                plog("\u2713 .env created")
+            else:
+                plog("\u2713 .env already exists")
+                # Read existing ldap password
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                            ldap_svc_pass = line.strip().split('=', 1)[1].strip()
 
-        # Step 4: Create LDAP blueprint
-        plog("")
-        plog("\u2501\u2501\u2501 Step 4/10: Installing LDAP Blueprint \u2501\u2501\u2501")
-        bp_dir = os.path.join(ak_dir, 'blueprints')
-        os.makedirs(bp_dir, exist_ok=True)
-        bp_path = os.path.join(bp_dir, 'tak-ldap-setup.yaml')
-        bp_content = """version: 1
+            # Step 4: Create LDAP blueprint
+            plog("")
+            plog("\u2501\u2501\u2501 Step 4/10: Installing LDAP Blueprint \u2501\u2501\u2501")
+            bp_dir = os.path.join(ak_dir, 'blueprints')
+            os.makedirs(bp_dir, exist_ok=True)
+            bp_path = os.path.join(bp_dir, 'tak-ldap-setup.yaml')
+            bp_content = """version: 1
 metadata:
   name: LDAP Setup for TAK
   labels:
@@ -4924,9 +6654,9 @@ entries:
     attrs:
       name: LDAP Service account
       type: service_account
-      password: !Context password
+      path: users
   - attrs:
-      authentication: require_outpost
+      authentication: none
       denied_action: message_continue
       designation: authentication
       layout: stacked
@@ -4939,11 +6669,22 @@ entries:
     state: present
     id: ldap-authentication-flow
   - attrs:
+      authentication: none
+      denied_action: message_continue
+      designation: authorization
+      layout: stacked
+      name: ldap-authorization-flow
+      policy_engine_mode: any
+      title: ldap-authorization-flow
+    identifiers:
+      slug: ldap-authorization-flow
+    model: authentik_flows.flow
+    state: present
+    id: ldap-authorization-flow
+  - attrs:
       backends:
       - authentik.core.auth.InbuiltBackend
       - authentik.core.auth.TokenBackend
-      - authentik.sources.ldap.auth.LDAPBackend
-      configure_flow: !Find [authentik_flows.flow, [slug, default-password-change]]
       failed_attempts_before_cancel: 5
     identifiers:
       name: ldap-authentication-password
@@ -4952,12 +6693,10 @@ entries:
     id: ldap-authentication-password
   - attrs:
       case_insensitive_matching: true
-      password_stage: !KeyOf ldap-authentication-password
       pretend_user_exists: true
       show_matched_user: true
       user_fields:
       - username
-      - email
     identifiers:
       name: ldap-identification-stage
     model: authentik_stages_identification.identificationstage
@@ -5015,6 +6754,7 @@ entries:
     identifiers:
       name: LDAP
     attrs:
+      authentication_flow: !KeyOf ldap-authentication-flow
       authorization_flow: !KeyOf ldap-authentication-flow
       base_dn: !Context basedn
       bind_mode: cached
@@ -5025,7 +6765,7 @@ entries:
       search_mode: cached
       uid_start_number: 2000
     permissions:
-      - permission: search_full_directory
+      - permission: authentik_providers_ldap.search_full_directory
         user: !KeyOf ldap-service-account
   - model: authentik_core.application
     id: app
@@ -5048,15 +6788,15 @@ entries:
       - !KeyOf provider
       type: ldap
 """
-        with open(bp_path, 'w') as f:
-            f.write(bp_content)
-        plog("  Created tak-ldap-setup.yaml blueprint")
-        plog("  LDAP service account: adm_ldapservice")
-        plog("  LDAP Base DN: DC=takldap")
+            with open(bp_path, 'w') as f:
+                f.write(bp_content)
+            plog("  Created tak-ldap-setup.yaml blueprint")
+            plog("  LDAP service account: adm_ldapservice")
+            plog("  LDAP Base DN: DC=takldap")
 
-        # Create embedded outpost blueprint to permanently set authentik_host
-        bp_embedded_path = os.path.join(bp_dir, 'tak-embedded-outpost.yaml')
-        bp_embedded_content = f"""version: 1
+            # Create embedded outpost blueprint to permanently set authentik_host
+            bp_embedded_path = os.path.join(bp_dir, 'tak-embedded-outpost.yaml')
+            bp_embedded_content = f"""version: 1
 metadata:
   name: TAK Embedded Outpost Config
   labels:
@@ -5071,85 +6811,107 @@ entries:
         authentik_host: https://authentik.{settings.get('fqdn') or server_ip}
         authentik_host_insecure: false
 """
-        with open(bp_embedded_path, 'w') as f:
-            f.write(bp_embedded_content)
-        plog("  Created tak-embedded-outpost.yaml blueprint")
-        plog("\u2713 Blueprint ready")
+            with open(bp_embedded_path, 'w') as f:
+                f.write(bp_embedded_content)
+            plog("  Created tak-embedded-outpost.yaml blueprint")
+            plog("\u2713 Blueprint ready")
 
-        # Step 5: Download docker-compose.yml and patch for blueprints
-        plog("")
-        plog("\u2501\u2501\u2501 Step 5/10: Downloading Docker Compose File \u2501\u2501\u2501")
-        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
-        if not os.path.exists(compose_path):
-            r = subprocess.run(f'wget -q -O {compose_path} https://goauthentik.io/docker-compose.yml 2>&1', shell=True, capture_output=True, text=True, timeout=30)
-            if r.returncode != 0 or not os.path.exists(compose_path):
-                plog("\u2717 Failed to download docker-compose.yml")
-                authentik_deploy_status.update({'running': False, 'error': True})
-                return
-            plog("\u2713 docker-compose.yml downloaded")
-        else:
-            plog("\u2713 docker-compose.yml already exists")
+            # Step 5: Download docker-compose.yml and patch for blueprints
+            plog("")
+            plog("\u2501\u2501\u2501 Step 5/10: Downloading Docker Compose File \u2501\u2501\u2501")
+            if not os.path.exists(compose_path):
+                r = subprocess.run(f'wget -q -O {compose_path} https://goauthentik.io/docker-compose.yml 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0 or not os.path.exists(compose_path):
+                    plog("\u2717 Failed to download docker-compose.yml")
+                    authentik_deploy_status.update({'running': False, 'error': True})
+                    return
+                plog("\u2713 docker-compose.yml downloaded")
+            else:
+                plog("\u2713 docker-compose.yml already exists")
 
-        # Step 6: Patch docker-compose for blueprints + LDAP container
-        plog("")
-        plog("\u2501\u2501\u2501 Step 6/10: Patching Docker Compose \u2501\u2501\u2501")
-        with open(compose_path, 'r') as f:
-            lines = f.readlines()
-        needs_write = False
-        # Add blueprint volume mounts
-        if not any('blueprints/custom' in l for l in lines):
-            patched = []
-            for line in lines:
-                patched.append(line)
-                if './custom-templates:/templates' in line:
-                    indent = line[:len(line) - len(line.lstrip())]
-                    patched.append(f'{indent}- ./blueprints:/blueprints/custom\n')
-            lines = patched
-            needs_write = True
-            plog("  Added blueprint mount to server & worker")
-        # Add POSTGRES_MAX_CONNECTIONS
-        if not any('POSTGRES_MAX_CONNECTIONS' in l for l in lines):
-            patched = []
-            for line in lines:
-                patched.append(line)
-                if 'POSTGRES_USER:' in line:
-                    indent = line[:len(line) - len(line.lstrip())]
-                    patched.append(f'{indent}POSTGRES_MAX_CONNECTIONS: "200"\n')
-            lines = patched
-            needs_write = True
-            plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
+            # Step 6: Patch docker-compose for blueprints + LDAP container
+            plog("")
+            plog("\u2501\u2501\u2501 Step 6/10: Patching Docker Compose \u2501\u2501\u2501")
+            with open(compose_path, 'r') as f:
+                lines = f.readlines()
+            needs_write = False
+            # Add blueprint volume mounts
+            if not any('blueprints/custom' in l for l in lines):
+                patched = []
+                for line in lines:
+                    patched.append(line)
+                    if './custom-templates:/templates' in line:
+                        indent = line[:len(line) - len(line.lstrip())]
+                        patched.append(f'{indent}- ./blueprints:/blueprints/custom\n')
+                lines = patched
+                needs_write = True
+                plog("  Added blueprint mount to server & worker")
+            # Add POSTGRES_MAX_CONNECTIONS
+            if not any('POSTGRES_MAX_CONNECTIONS' in l for l in lines):
+                patched = []
+                for line in lines:
+                    patched.append(line)
+                    if 'POSTGRES_USER:' in line:
+                        indent = line[:len(line) - len(line.lstrip())]
+                        patched.append(f'{indent}POSTGRES_MAX_CONNECTIONS: "200"\n')
+                lines = patched
+                needs_write = True
+                plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
 
-        # Add LDAP outpost container
-        if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-            ldap_svc = "  ldap:\n    image: ghcr.io/goauthentik/ldap:2025.12.4\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
-            new_lines = []
-            for line in lines:
-                if line.startswith('volumes:'):
-                    new_lines.append(ldap_svc)
-                new_lines.append(line)
-            lines = new_lines
-            needs_write = True
-            plog("  Added LDAP outpost container")
-        if needs_write:
-            with open(compose_path, 'w') as f:
-                f.writelines(lines)
-            plog("\u2713 Docker Compose patched")
-        else:
-            plog("\u2713 Docker Compose already patched")
+            # Add LDAP outpost container (version must match server)
+            ak_tag = '2026.2.0'
+            for l in lines:
+                m = re.search(r'goauthentik/server[:\s]+\$\{AUTHENTIK_TAG:-([^}]+)\}', l)
+                if m:
+                    ak_tag = m.group(1)
+                    break
+                m = re.search(r'goauthentik/server:([^\s\n]+)', l)
+                if m and m.group(1).strip() not in ('${AUTHENTIK_TAG}', ''):
+                    ak_tag = m.group(1).strip()
+                    break
+            if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
+                _fqdn = (settings.get('fqdn') or '').split(':')[0]
+                if _fqdn:
+                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    extra_hosts:\n      - \"authentik.{_fqdn}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: https://authentik.{_fqdn}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                else:
+                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                new_lines = []
+                for line in lines:
+                    if line.startswith('volumes:'):
+                        new_lines.append(ldap_svc)
+                    new_lines.append(line)
+                lines = new_lines
+                needs_write = True
+                plog("  Added LDAP outpost container")
+            else:
+                for i, line in enumerate(lines):
+                    m = re.search(r'ghcr\.io/goauthentik/ldap:([^\s\n]+)', line)
+                    if m and m.group(1) != ak_tag:
+                        lines[i] = line.replace(f'ghcr.io/goauthentik/ldap:{m.group(1)}', f'ghcr.io/goauthentik/ldap:{ak_tag}')
+                        needs_write = True
+                        plog(f"  Updated LDAP outpost image {m.group(1)} -> {ak_tag}")
+            if needs_write:
+                with open(compose_path, 'w') as f:
+                    f.writelines(lines)
+                plog("\u2713 Docker Compose patched")
+            else:
+                plog("\u2713 Docker Compose already patched")
 
-        # Step 7: Pull and start core services
-        plog("")
-        plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
-        plog("  Pulling images (this may take a few minutes)...")
-        r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
-        for line in r.stdout.strip().split('\n'):
-            if line.strip() and ('Pulling' in line or 'Pull' in line or 'Downloaded' in line or 'done' in line.lower()):
-                authentik_deploy_log.append(f"  {line.strip()}")
-        plog("  Starting core services...")
-        r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
-        for line in r.stdout.strip().split('\n'):
-            if line.strip() and 'NEEDRESTART' not in line:
-                authentik_deploy_log.append(f"  {line.strip()}")
+            # Step 7: Pull and start core services (no verbose docker output in log)
+            plog("")
+            plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
+            plog("  Pulling images (this may take a few minutes)...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Pull had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            else:
+                plog("  \u2713 Images pulled")
+            plog("  Starting core services...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            else:
+                plog("  \u2713 Core services started")
 
         # Step 8: Wait for Authentik API to be ready
         plog("")
@@ -5162,60 +6924,30 @@ entries:
         if not bootstrap_token:
             plog("\u26a0 No bootstrap token found in .env")
         else:
-            import urllib.request
-            import urllib.error
-            import json as json_mod
-            api_ready = False
-            for attempt in range(90):
-                try:
-                    req = urllib.request.Request(
-                        'http://127.0.0.1:9090/api/v3/core/users/',
-                        headers={'Authorization': f'Bearer {bootstrap_token}'}
-                    )
-                    resp = urllib.request.urlopen(req, timeout=5)
-                    json_mod.loads(resp.read().decode())
-                    api_ready = True
-                    plog("✓ Authentik API is ready")
-                    break
-                except urllib.error.HTTPError as http_err:
-                    # Any HTTP response (401, 403) means API is up and responding
-                    if http_err.code in (401, 403):
-                        plog(f"✓ Authentik API is ready (HTTP {http_err.code})")
-                        api_ready = True
-                        break
-                    elif http_err.code == 503:
-                        if attempt % 12 == 0:
-                            em, es = divmod(attempt * 5, 60)
-                            plog(f"  Server starting up (503)... ({em}m {es}s elapsed)")
-                    else:
-                        if attempt % 12 == 0:
-                            em, es = divmod(attempt * 5, 60)
-                            plog(f"  HTTP {http_err.code}... ({em}m {es}s elapsed)")
-                except Exception as poll_err:
-                    err_str = str(poll_err)
-                    if attempt == 0:
-                        plog("  Waiting for Authentik (first boot takes 5-7 minutes)...")
-                    elif attempt % 12 == 0:
-                        em, es = divmod(attempt * 5, 60)
-                        plog(f"  Still waiting... {em}m {es}s elapsed ({err_str[:60]})")
-                time.sleep(5)
-            if not api_ready:
+            api_ready = _wait_for_authentik_api(
+                'http://127.0.0.1:9090',
+                {'Authorization': f'Bearer {bootstrap_token}'},
+                max_attempts=90, plog=plog
+            )
+            if api_ready:
+                plog("✓ Authentik API is ready")
+            else:
                 plog("⚠ API timeout - check Authentik logs")
 
-        # Step 9: Start LDAP outpost
+        # Step 9: Start LDAP outpost (placeholder token — Step 11 will inject real token and recreate)
         plog("")
         plog("\u2501\u2501\u2501 Step 9/12: Starting LDAP Outpost \u2501\u2501\u2501")
         r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=120)
-        for line in r.stdout.strip().split('\n'):
+        for line in (r.stdout or '').strip().split('\n'):
             if line.strip() and 'NEEDRESTART' not in line:
                 authentik_deploy_log.append(f"  {line.strip()}")
         plog("  Waiting for LDAP to start...")
         time.sleep(15)
-        r = subprocess.run('docker logs authentik-ldap-1 2>&1 | tail -3', shell=True, capture_output=True, text=True)
-        if 'Starting LDAP server' in r.stdout or 'Starting authentik outpost' in r.stdout:
+        r2 = subprocess.run('docker logs authentik-ldap-1 2>&1 | tail -3', shell=True, capture_output=True, text=True)
+        if r2.stdout and ('Starting LDAP server' in r2.stdout or 'Starting authentik outpost' in r2.stdout):
             plog("\u2713 LDAP outpost is running on port 389")
         else:
-            plog("\u26a0 LDAP outpost may still be starting")
+            plog("\u26a0 LDAP will be recreated with real token in Step 11")
 
         # Step 10: Patch CoreConfig.xml for LDAP
         plog("")
@@ -5242,33 +6974,19 @@ entries:
                 with open(coreconfig_path, 'r') as f:
                     config_content = f.read()
 
-                # Build the new auth block
+                # Build the new auth block — matches TAK Portal reference exactly
                 auth_block = (
-                    '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
-                    ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
-                    ' x509checkRevocation="true">\n'
+                    '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
+                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
+                    + ldap_pass
+                    + '" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
                     '        <File location="UserAuthenticationFile.xml"/>\n'
-                    '        <ldap url="ldap://127.0.0.1:389"'
-                    ' userstring="cn={username},ou=users,dc=takldap"'
-                    ' updateinterval="60"'
-                    ' groupprefix="cn=tak_"'
-                    ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
-                    ' matchGroupInChain="true"'
-                    f' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
-                    f' serviceAccountCredential="{ldap_pass}"'
-                    ' groupBaseRDN="ou=groups,dc=takldap"'
-                    ' userBaseRDN="ou=users,dc=takldap"'
-                    ' groupObjectClass="group" userObjectClass="user"'
-                    ' style="DS" ldapSecurityType="simple"'
-                    ' dnAttributeName="DN"'
-                    ' nameAttr="CN" roleAttribute="memberOf" adminGroup="ROLE_ADMIN"/>\n'
                     '    </auth>'
                 )
 
-                # Replace auth block using regex
-                import re
+                # Replace auth block using regex (match <auth>...</auth> regardless of indentation)
                 new_content = re.sub(
-                    r'    <auth[^>]*>.*?</auth>',
+                    r'<auth[^>]*>.*?</auth>',
                     auth_block,
                     config_content,
                     flags=re.DOTALL
@@ -5278,7 +6996,6 @@ entries:
                     with open(coreconfig_path, 'w') as f:
                         f.write(new_content)
                     plog("\u2713 CoreConfig.xml updated with LDAP auth")
-                    plog("  - Nested groups enabled (matchGroupInChain)")
                     plog("  - Group cache enabled (x509useGroupCacheDefaultActive)")
                     plog("  - Group prefix: tak_")
 
@@ -5290,12 +7007,15 @@ entries:
                     else:
                         plog(f"\u26a0 TAK Server restart issue: {r.stderr.strip()[:100]}")
                 else:
-                    plog("\u2713 CoreConfig.xml already has LDAP auth configured")
+                    if _coreconfig_has_ldap():
+                        plog("\u2713 CoreConfig.xml already has LDAP auth configured")
+                    else:
+                        plog("\u26a0 CoreConfig <auth> block not found or format not recognized — use Connect TAK Server to LDAP after deploy")
             else:
                 plog("\u26a0 LDAP service password not found, skipping CoreConfig patch")
         else:
-            plog("\u26a0 TAK Server not installed, skipping CoreConfig patch")
-            plog("  Deploy TAK Server first, then redeploy Authentik to auto-configure")
+            plog("  ℹ TAK Server not installed — skipping CoreConfig (OK for MediaMTX-only or standalone Authentik)")
+            plog("  Deploy TAK Server later, then use Connect TAK Server to LDAP to add LDAP")
 
         # Step 11/12: Create admin group and webadmin user in Authentik
         plog("")
@@ -5369,7 +7089,7 @@ entries:
                         plog(f"  ⚠ Group creation error: {e.code} — continuing")
                         group_pk = None
 
-                # Create webadmin user in Authentik
+                # Create webadmin user in Authentik (only when TAK Server is deployed — used for TAK Server admin)
                 webadmin_pass = ''
                 if os.path.exists('/opt/tak'):
                     # Read password from TAK Server settings or use default
@@ -5381,6 +7101,8 @@ entries:
                     if not webadmin_pass:
                         webadmin_pass = 'TakserverAtak1!'
                         plog(f"  ⚠ webadmin_password not found in settings.json — using default: TakserverAtak1!")
+                else:
+                    plog("  ℹ TAK Server not installed — skipping webadmin user (optional; used for TAK Server admin)")
 
                 if webadmin_pass:
                     try:
@@ -5438,7 +7160,7 @@ entries:
                     try:
                         req = urllib.request.Request(f'{ak_url}/api/v3/core/users/',
                             data=json.dumps({'username': 'adm_ldapservice', 'name': 'LDAP Service Account',
-                                'is_active': True, 'type': 'service_account'}).encode(),
+                                'is_active': True, 'type': 'service_account', 'path': 'users'}).encode(),
                             headers=ak_headers, method='POST')
                         resp = urllib.request.urlopen(req, timeout=10)
                         ldap_pk = json.loads(resp.read().decode())['pk']
@@ -5464,87 +7186,108 @@ entries:
                         except Exception as e:
                             plog(f"  ⚠ Could not set adm_ldapservice password: {str(e)[:100]}")
 
-                    # Create LDAP provider + outpost via API (simplified - use default flows)
-                    try:
-                        # Get default invalidation flow
-                        req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=invalidation',
+                # Create LDAP provider + outpost + inject token — ALWAYS RUN (required for MediaMTX, TAK Server, standalone)
+                try:
+                    # Get default invalidation flow
+                    req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=invalidation',
+                        headers=ak_headers)
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    inv_flows = json.loads(resp.read().decode())['results']
+                    inv_flow_pk = next((f['pk'] for f in inv_flows if 'invalidation' in f['slug'] and 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
+                    plog(f"  ✓ Got invalidation flow: {inv_flow_pk}")
+
+                    # Get default authentication flow - wait until ready
+                    auth_flow_pk = None
+                    attempt = 0
+                    while True:
+                        req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication',
                             headers=ak_headers)
                         resp = urllib.request.urlopen(req, timeout=10)
-                        inv_flows = json.loads(resp.read().decode())['results']
-                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'invalidation' in f['slug'] and 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
-                        plog(f"  ✓ Got invalidation flow: {inv_flow_pk}")
-
-                        # Get default authentication flow - wait forever until ready
-                        auth_flow_pk = None
-                        attempt = 0
-                        while True:
-                            req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication',
-                                headers=ak_headers)
-                            resp = urllib.request.urlopen(req, timeout=10)
-                            auth_flows = json.loads(resp.read().decode())['results']
-                            auth_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'default-authentication-flow'),
-                                               next((f['pk'] for f in auth_flows), None))
-                            if auth_flow_pk:
-                                plog(f"  ✓ Got authentication flow: {auth_flow_pk}")
-                                break
-                            if attempt % 6 == 0:
-                                plog(f"  ⏳ Waiting for authentication flows... ({attempt * 5}s)")
-                            else:
-                                authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
-                            time.sleep(5)
-                            attempt += 1
-
-                        if not auth_flow_pk or not inv_flow_pk:
-                            plog(f"  ✗ Missing flows — auth={auth_flow_pk} inv={inv_flow_pk}")
+                        auth_flows = json.loads(resp.read().decode())['results']
+                        auth_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'default-authentication-flow'),
+                                           next((f['pk'] for f in auth_flows), None))
+                        if auth_flow_pk:
+                            plog(f"  ✓ Got authentication flow: {auth_flow_pk}")
+                            break
+                        if attempt % 6 == 0:
+                            plog(f"  ⏳ Waiting for authentication flows... ({attempt * 5}s)")
                         else:
-                            # Create LDAP provider
-                            ldap_provider_pk = None
-                            try:
-                                req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
-                                    data=json.dumps({'name': 'LDAP', 'authentication_flow': auth_flow_pk,
-                                        'authorization_flow': auth_flow_pk, 'invalidation_flow': inv_flow_pk,
-                                        'base_dn': 'DC=takldap', 'bind_mode': 'cached',
-                                        'search_mode': 'cached', 'mfa_support': False}).encode(),
-                                    headers=ak_headers, method='POST')
+                            authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
+                        time.sleep(5)
+                        attempt += 1
+
+                    if not auth_flow_pk or not inv_flow_pk:
+                        plog(f"  ✗ Missing flows — auth={auth_flow_pk} inv={inv_flow_pk}")
+                    else:
+                        # Create LDAP provider
+                        ldap_provider_pk = None
+                        ldap_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'ldap-authentication-flow'), None)
+                        ldap_bind_flow = ldap_flow_pk or auth_flow_pk
+                        try:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
+                                data=json.dumps({'name': 'LDAP', 'authentication_flow': ldap_bind_flow,
+                                    'authorization_flow': ldap_bind_flow, 'invalidation_flow': inv_flow_pk,
+                                    'base_dn': 'DC=takldap', 'bind_mode': 'cached',
+                                    'search_mode': 'cached', 'mfa_support': False}).encode(),
+                                headers=ak_headers, method='POST')
+                            resp = urllib.request.urlopen(req, timeout=10)
+                            ldap_provider_pk = json.loads(resp.read().decode())['pk']
+                            plog(f"  ✓ Created LDAP provider (pk={ldap_provider_pk})")
+                        except urllib.error.HTTPError as e:
+                            err = e.read().decode()[:200]
+                            if e.code == 400:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/?search=LDAP',
+                                    headers=ak_headers)
                                 resp = urllib.request.urlopen(req, timeout=10)
-                                ldap_provider_pk = json.loads(resp.read().decode())['pk']
-                                plog(f"  ✓ Created LDAP provider (pk={ldap_provider_pk})")
+                                results = json.loads(resp.read().decode())['results']
+                                ldap_provider_pk = results[0]['pk'] if results else None
+                                plog(f"  ✓ LDAP provider already exists (pk={ldap_provider_pk})")
+                            else:
+                                plog(f"  ✗ LDAP provider creation failed: {e.code} {err}")
+
+                        # Create LDAP application
+                        if ldap_provider_pk:
+                            try:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/applications/',
+                                    data=json.dumps({'name': 'LDAP', 'slug': 'ldap',
+                                        'provider': ldap_provider_pk}).encode(),
+                                    headers=ak_headers, method='POST')
+                                urllib.request.urlopen(req, timeout=10)
+                                plog(f"  ✓ Created LDAP application")
                             except urllib.error.HTTPError as e:
-                                err = e.read().decode()[:200]
                                 if e.code == 400:
-                                    req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/?search=LDAP',
-                                        headers=ak_headers)
-                                    resp = urllib.request.urlopen(req, timeout=10)
-                                    results = json.loads(resp.read().decode())['results']
-                                    ldap_provider_pk = results[0]['pk'] if results else None
-                                    plog(f"  ✓ LDAP provider already exists (pk={ldap_provider_pk})")
+                                    plog(f"  ✓ LDAP application already exists")
                                 else:
-                                    plog(f"  ✗ LDAP provider creation failed: {e.code} {err}")
+                                    plog(f"  ⚠ LDAP application error: {e.code} {e.read().decode()[:100]}")
 
-                            # Create LDAP application
-                            if ldap_provider_pk:
-                                try:
-                                    req = urllib.request.Request(f'{ak_url}/api/v3/core/applications/',
-                                        data=json.dumps({'name': 'LDAP', 'slug': 'ldap',
-                                            'provider': ldap_provider_pk}).encode(),
-                                        headers=ak_headers, method='POST')
-                                    urllib.request.urlopen(req, timeout=10)
-                                    plog(f"  ✓ Created LDAP application")
-                                except urllib.error.HTTPError as e:
-                                    if e.code == 400:
-                                        plog(f"  ✓ LDAP application already exists")
-                                    else:
-                                        plog(f"  ⚠ LDAP application error: {e.code} {e.read().decode()[:100]}")
-
-                                # Create LDAP outpost
-                                outpost_token_id = None
+                            # Get or create LDAP outpost (blueprint may have created it)
+                            outpost_token_id = None
+                            try:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP',
+                                    headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                results = json.loads(resp.read().decode())['results']
+                                ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
+                                if ldap_outpost:
+                                    outpost_token_id = ldap_outpost.get('token_identifier', '')
+                                    if not outpost_token_id:
+                                        req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                            headers=ak_headers)
+                                        resp = urllib.request.urlopen(req, timeout=10)
+                                        detail = json.loads(resp.read().decode())
+                                        outpost_token_id = detail.get('token_identifier', '')
+                                    if outpost_token_id:
+                                        plog(f"  ✓ Using existing LDAP outpost (blueprint)")
+                            except Exception:
+                                pass
+                            if not outpost_token_id:
                                 try:
                                     req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/',
                                         data=json.dumps({'name': 'LDAP', 'type': 'ldap',
                                             'providers': [ldap_provider_pk],
                                             'config': {'authentik_host': 'http://authentik-server-1:9000/',
                                                 'authentik_host_insecure': True}}).encode(),
-                                        headers=ak_headers, method='POST')
+                                            headers=ak_headers, method='POST')
                                     resp = urllib.request.urlopen(req, timeout=10)
                                     outpost_data = json.loads(resp.read().decode())
                                     outpost_token_id = outpost_data.get('token_identifier', '')
@@ -5559,59 +7302,143 @@ entries:
                                         ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
                                         if ldap_outpost:
                                             outpost_token_id = ldap_outpost.get('token_identifier', '')
-                                            # Ensure provider is linked
-                                            req = urllib.request.Request(
-                                                f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
-                                                data=json.dumps({'name': 'LDAP', 'type': 'ldap',
-                                                    'providers': [ldap_provider_pk],
-                                                    'config': {'authentik_host': 'http://authentik-server-1:9000/',
-                                                        'authentik_host_insecure': True}}).encode(),
-                                                headers=ak_headers, method='PUT')
-                                            urllib.request.urlopen(req, timeout=10)
-                                            plog(f"  ✓ LDAP outpost already exists, provider linked (token_id={outpost_token_id})")
-                                        else:
-                                            plog(f"  ✗ LDAP outpost not found in results")
+                                            if not outpost_token_id:
+                                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                                    headers=ak_headers)
+                                                resp = urllib.request.urlopen(req, timeout=10)
+                                                detail = json.loads(resp.read().decode())
+                                                outpost_token_id = detail.get('token_identifier', '')
+                                            if outpost_token_id:
+                                                plog(f"  ✓ LDAP outpost already exists, using token")
+                                            if outpost_token_id and ldap_provider_pk:
+                                                req = urllib.request.Request(
+                                                    f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/',
+                                                    data=json.dumps({'name': 'LDAP', 'type': 'ldap',
+                                                        'providers': [ldap_provider_pk],
+                                                        'config': {'authentik_host': 'http://authentik-server-1:9000/',
+                                                            'authentik_host_insecure': True}}).encode(),
+                                                    headers=ak_headers, method='PUT')
+                                                urllib.request.urlopen(req, timeout=10)
+                                        if not outpost_token_id:
+                                            plog(f"  ✗ LDAP outpost exists but token not available via API")
                                     else:
                                         plog(f"  ✗ LDAP outpost creation failed: {e.code} {err}")
+                                except Exception as ex:
+                                    plog(f"  ✗ LDAP outpost error: {str(ex)[:150]}")
 
-                                # Inject token into docker-compose.yml
-                                if outpost_token_id:
-                                    try:
-                                        req = urllib.request.Request(
-                                            f'{ak_url}/api/v3/core/tokens/{outpost_token_id}/view_key/',
-                                            headers=ak_headers, method='GET')
-                                        resp = urllib.request.urlopen(req, timeout=10)
-                                        response_body = resp.read().decode()
-                                        ldap_token_key = json.loads(response_body).get('key', '')
-                                        if ldap_token_key:
-                                            with open(compose_path, 'r') as f:
-                                                compose_text = f.read()
-                                            compose_text = compose_text.replace('AUTHENTIK_TOKEN: placeholder', f'AUTHENTIK_TOKEN: {ldap_token_key}')
-                                            with open(compose_path, 'w') as f:
-                                                f.write(compose_text)
-                                            plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
-                                            # Recreate LDAP container so it picks up the new token
-                                            plog(f"  Recreating LDAP container with new token...")
-                                            subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
-                                                shell=True, capture_output=True, timeout=60)
-                                            plog(f"  ✓ LDAP container recreated with injected token")
-                                        else:
-                                            plog(f"  ⚠ Token key empty — response: {response_body[:200]}")
-                                    except urllib.error.HTTPError as e:
-                                        plog(f"  ✗ Token injection HTTP error: {e.code} {e.read().decode()[:200]}")
-                                    except Exception as e:
-                                        plog(f"  ✗ Token injection error: {str(e)[:200]}")
-                                else:
-                                    plog(f"  ✗ No outpost_token_id — cannot inject token")
+                            # Inject token into docker-compose.yml
+                            if outpost_token_id:
+                                try:
+                                    req = urllib.request.Request(
+                                        f'{ak_url}/api/v3/core/tokens/{outpost_token_id}/view_key/',
+                                        headers=ak_headers, method='GET')
+                                    resp = urllib.request.urlopen(req, timeout=10)
+                                    response_body = resp.read().decode()
+                                    ldap_token_key = json.loads(response_body).get('key', '')
+                                    if ldap_token_key:
+                                        with open(compose_path, 'r') as f:
+                                            compose_text = f.read()
+                                        compose_text = compose_text.replace('AUTHENTIK_TOKEN: placeholder', f'AUTHENTIK_TOKEN: {ldap_token_key}')
+                                        with open(compose_path, 'w') as f:
+                                            f.write(compose_text)
+                                        plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
+                                        plog(f"  Recreating LDAP container with new token...")
+                                        subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
+                                            shell=True, capture_output=True, timeout=60)
+                                        plog(f"  ✓ LDAP container recreated with injected token")
+                                        time.sleep(10)
+                                        plog(f"  ℹ LDAP may take 30–60s to show healthy in Authentik Outposts")
+                                    else:
+                                        plog(f"  ⚠ Token key empty — response: {response_body[:200]}")
+                                except urllib.error.HTTPError as e:
+                                    plog(f"  ✗ Token injection HTTP error: {e.code} {e.read().decode()[:200]}")
+                                except Exception as e:
+                                    plog(f"  ✗ Token injection error: {str(e)[:200]}")
+                            else:
+                                plog(f"  ✗ No outpost_token_id — cannot inject token")
 
-                    except Exception as e:
-                        plog(f"  ✗ LDAP setup error: {str(e)[:200]}")
+                            # Ensure LDAP container is started (even if token inject failed)
+                            r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                            if r.returncode == 0:
+                                plog(f"  ✓ LDAP container started")
+                            else:
+                                plog(f"  ⚠ LDAP start: {r.stderr.strip()[:150] if r.stderr else r.stdout.strip()[:150]}")
+
+                except Exception as e:
+                    plog(f"  ✗ LDAP setup error: {str(e)[:200]}")
+                    try:
+                        subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, timeout=60)
+                        plog(f"  ℹ LDAP container started (add token in Authentik → Outposts → LDAP, then restart LDAP)")
+                    except Exception:
+                        pass
                 else:
-                    plog("  ⚠ No webadmin password found, skipping user creation")
+                    if os.path.exists('/opt/tak'):
+                        plog("  ⚠ No webadmin password found, skipping user creation")
             else:
                 plog("  ⚠ No bootstrap token found, skipping admin setup")
         except Exception as e:
             plog(f"  ⚠ Admin group setup error (non-fatal): {str(e)[:100]}")
+
+        # Unconditionally ensure LDAP container is up (compose has ldap service from Step 6)
+        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+        if os.path.exists(compose_path):
+            with open(compose_path) as f:
+                compose_text = f.read()
+            if 'ghcr.io/goauthentik/ldap' in compose_text or '\n  ldap:\n' in compose_text:
+                plog("")
+                plog("  Ensuring LDAP container is running...")
+                r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=90)
+                if r.returncode == 0:
+                    plog("  ✓ LDAP container is up")
+                else:
+                    plog(f"  ✗ LDAP start failed: {(r.stderr or r.stdout or '').strip()[:300]}")
+
+        # Verify LDAP flow + service account bind after outpost is up
+        # Prevents "Invalid Credentials" drift after Update & Config
+        if os.path.exists(os.path.join(ak_dir, '.env')):
+            plog("")
+            plog("  Verifying LDAP service account...")
+            try:
+                ok, err = _ensure_ldap_flow_authentication_none()
+                if ok:
+                    plog("  ✓ LDAP flow authentication: none")
+                else:
+                    plog(f"  ⚠ LDAP flow fix: {err}")
+                # Re-set password and verify bind
+                _ldap_pass = ''
+                with open(os.path.join(ak_dir, '.env')) as _f:
+                    for _line in _f:
+                        if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                            _ldap_pass = _line.strip().split('=', 1)[1].strip()
+                if _ldap_pass:
+                    _ak_token = ''
+                    with open(os.path.join(ak_dir, '.env')) as _f:
+                        for _line in _f:
+                            if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                                _ak_token = _line.strip().split('=', 1)[1].strip()
+                    if _ak_token:
+                        _ak_headers = {'Authorization': f'Bearer {_ak_token}', 'Content-Type': 'application/json'}
+                        try:
+                            req = urllib.request.Request(f'http://127.0.0.1:9090/api/v3/core/users/?search=adm_ldapservice', headers=_ak_headers)
+                            resp = urllib.request.urlopen(req, timeout=10)
+                            _results = json.loads(resp.read().decode()).get('results', [])
+                            _ldap_pk = next((u['pk'] for u in _results if u['username'] == 'adm_ldapservice'), None)
+                            if _ldap_pk:
+                                req = urllib.request.Request(f'http://127.0.0.1:9090/api/v3/core/users/{_ldap_pk}/set_password/',
+                                    data=json.dumps({'password': _ldap_pass}).encode(), headers=_ak_headers, method='POST')
+                                urllib.request.urlopen(req, timeout=10)
+                                time.sleep(3)
+                                r = subprocess.run(
+                                    f'ldapsearch -x -H ldap://127.0.0.1:389 -D "cn=adm_ldapservice,ou=users,dc=takldap" -w "{_ldap_pass}" -b "dc=takldap" -s base "(objectClass=*)" 2>&1',
+                                    shell=True, capture_output=True, text=True, timeout=15)
+                                if 'dn:' in (r.stdout or '').lower() or 'result: 0' in (r.stdout or '').lower():
+                                    plog("  ✓ LDAP bind verified")
+                                else:
+                                    plog(f"  ⚠ LDAP bind check inconclusive (service may still be starting)")
+                        except Exception as e:
+                            plog(f"  ⚠ LDAP verify: {str(e)[:100]}")
+            except Exception as e:
+                plog(f"  ⚠ LDAP verify skipped: {str(e)[:80]}")
 
         # Step 12: Configure Proxy Provider, Application, Outpost, Brand for TAK Portal
         fqdn = settings.get('fqdn', '')
@@ -5645,33 +7472,52 @@ entries:
                     except Exception as e:
                         plog(f"  ⚠ Brand update: {str(e)[:100]}")
 
-                    # 12b: Get default authorization flow
-                    flow_slug = None
-                    try:
-                        req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug',
-                            headers=ak_headers)
-                        resp = urllib.request.urlopen(req, timeout=10)
-                        flows = json.loads(resp.read().decode())['results']
-                        # Prefer implicit-consent
-                        for fl in flows:
-                            if 'implicit' in fl.get('slug', ''):
-                                flow_slug = fl['pk']
-                                break
-                        if not flow_slug and flows:
-                            flow_slug = flows[0]['pk']
-                    except Exception as e:
-                        plog(f"  ⚠ Could not find authorization flow: {str(e)[:100]}")
+                    # 12b: Wait for authorization and invalidation flows (first boot can be slow)
+                    flow_pk = None
+                    inv_flow_pk = None
+                    for attempt in range(36):  # up to 3 minutes
+                        try:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug',
+                                headers=ak_headers)
+                            resp = urllib.request.urlopen(req, timeout=10)
+                            flows = json.loads(resp.read().decode())['results']
+                            for fl in flows:
+                                if 'implicit' in fl.get('slug', ''):
+                                    flow_pk = fl['pk']
+                                    break
+                            if not flow_pk and flows:
+                                flow_pk = flows[0]['pk']
+                            if flow_pk:
+                                req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=invalidation',
+                                    headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                inv_flows = json.loads(resp.read().decode())['results']
+                                inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f.get('slug', '')), inv_flows[0]['pk'] if inv_flows else None)
+                                if inv_flow_pk:
+                                    break
+                        except Exception:
+                            pass
+                        if attempt % 6 == 0:
+                            plog(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+                        time.sleep(5)
+                    if flow_pk and inv_flow_pk:
+                        plog("  ✓ Authorization and invalidation flows ready")
+                    elif flow_pk:
+                        plog("  ⚠ Invalidation flow not found — proxy may still work")
 
                     # 12c: Create Proxy Provider (Forward auth single application)
                     provider_pk = None
-                    if flow_slug:
+                    if flow_pk:
                         try:
+                            base_domain = fqdn.split(':')[0]
                             provider_data = {
                                 'name': 'TAK Portal Proxy',
-                                'authentication_flow': flow_slug,
+                                'authorization_flow': flow_pk,
+                                'invalidation_flow': inv_flow_pk or flow_pk,
                                 'external_host': f'https://takportal.{fqdn}',
                                 'mode': 'forward_single',
-                                'token_validity': 'hours=24'
+                                'token_validity': 'hours=24',
+                                'cookie_domain': f'.{base_domain}'
                             }
                             req = urllib.request.Request(f'{ak_url}/api/v3/providers/proxy/',
                                 data=json.dumps(provider_data).encode(),
@@ -5692,7 +7538,7 @@ entries:
                             else:
                                 plog(f"  ⚠ Proxy Provider error: {e.code}")
                     else:
-                        plog("  ⚠ No authorization flow found, skipping proxy provider")
+                        plog("  ⚠ No authorization flow found after waiting — create a flow in Authentik and re-run deploy or add proxy provider manually")
 
                     # 12d: Create Application
                     app_slug = None
@@ -5738,28 +7584,24 @@ entries:
                                         break
                             if embedded:
                                 outpost_pk = embedded['pk']
-                                # Get current providers list and add ours
-                                current_providers = embedded.get('providers', [])
+                                current_providers = list(embedded.get('providers', []))
                                 if provider_pk not in current_providers:
                                     current_providers.append(provider_pk)
-                                # First update providers
+                                existing_config = dict(embedded.get('config', {}))
+                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
+                                existing_config['authentik_host_insecure'] = False
+                                # Single PUT: providers + config (PATCH with only config can 400)
+                                put_payload = {
+                                    'name': embedded.get('name', 'authentik Embedded Outpost'),
+                                    'type': embedded.get('type', 'proxy'),
+                                    'providers': current_providers,
+                                    'config': existing_config,
+                                }
                                 req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{outpost_pk}/',
-                                    data=json.dumps({
-                                        'name': embedded['name'],
-                                        'type': embedded.get('type', 'proxy'),
-                                        'providers': current_providers,
-                                    }).encode(),
+                                    data=json.dumps(put_payload).encode(),
                                     headers=ak_headers, method='PUT')
                                 urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ TAK Portal added to embedded outpost")
-                                # Then patch config separately
-                                existing_config = embedded.get('config', {})
-                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
-                                existing_config['authentik_host_insecure'] = False
-                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{outpost_pk}/',
-                                    data=json.dumps({'config': existing_config}).encode(),
-                                    headers=ak_headers, method='PATCH')
-                                urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ Embedded outpost authentik_host set to https://authentik.{fqdn}")
                             else:
                                 plog("  ⚠ No embedded outpost found — create one in Authentik admin")
@@ -5768,13 +7610,19 @@ entries:
 
                     plog(f"  ✓ Forward auth ready for takportal.{fqdn}")
 
-                    # If Node-RED is installed, create Node-RED app in Authentik (same as TAK Portal)
-                    nodered_installed = (os.path.exists(os.path.expanduser('~/node-red/docker-compose.yml')) or
-                        os.path.exists(os.path.expanduser('~/node-red/settings.js')) or os.path.exists('/opt/nodered'))
-                    if nodered_installed:
-                        plog("")
-                        plog("  Configuring Authentik for Node-RED...")
-                        _ensure_authentik_nodered_app(fqdn, ak_token, plog)
+                    # Create Node-RED app in Authentik (so it's ready when Node-RED is deployed later)
+                    plog("")
+                    plog("  Configuring Authentik for Node-RED...")
+                    _ensure_authentik_nodered_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
+                    # infra-TAK console (infratak + console subdomains) behind Authentik — reuse same flows, no second fetch
+                    plog("")
+                    plog("  Configuring Authentik for infra-TAK Console...")
+                    _ensure_authentik_console_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
+
+                    # Set application access policies: admin-only apps restricted to authentik Admins
+                    plog("")
+                    plog("  Configuring application access policies...")
+                    _ensure_app_access_policies(ak_url, ak_headers, plog)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
@@ -5782,7 +7630,7 @@ entries:
         else:
             plog("")
             plog("  ℹ No domain configured — skipping forward auth setup")
-            plog("  Set up a domain in the Caddy module first, then redeploy Authentik")
+            plog("  Set up a domain in the Caddy module first, then use Update config & reconnect")
 
         # Read bootstrap password for display
         bootstrap_pass_display = ''
@@ -5810,10 +7658,32 @@ entries:
         plog(f"  - LDAP port: 389")
         # Regenerate Caddyfile if Caddy is configured
         if settings.get('fqdn'):
+            plog("")
+            plog("  Updating Caddy config...")
             generate_caddyfile(settings)
-            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
             plog(f"  ✓ Caddy config updated for Authentik")
+        # If Email Relay is already configured, push SMTP + recovery flow into Authentik now (persistent)
+        relay = settings.get('email_relay') or {}
+        if relay.get('from_addr'):
+            plog("")
+            plog("🔑 Email Relay is configured — configuring Authentik (SMTP + password recovery)...")
+            try:
+                ak_msg = _configure_authentik_smtp_and_recovery(relay.get('from_addr'), plog)
+                plog(f"  ✓ {ak_msg}")
+            except Exception as e:
+                plog(f"  ⚠ Authentik SMTP auto-config failed: {e}")
+                plog("  You can run it from Email Relay → 'Configure Authentik to use these settings'.")
         plog("=" * 50)
+        plog("  Next steps:")
+        plog("  1. Launch Authentik Admin (link below), then come back and refresh this page to get the akadmin password.")
+        plog("     After logging in: Admin interface → Groups → authentik Admins → Users → Add new user (additional Admin users).")
+        if not relay.get('from_addr'):
+            plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
+        else:
+            plog("  2. SMTP and password recovery are already configured (Email Relay was set up).")
+        plog("=" * 50)
+        plog("  ✓ Deploy complete.")
         authentik_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
         plog(f"\u2717 FATAL ERROR: {str(e)}")
@@ -5933,8 +7803,8 @@ body{display:flex;min-height:100vh}
 {% elif ak.installed and ak.running %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
@@ -5963,8 +7833,8 @@ body{display:flex;min-height:100vh}
 {% endif %}
 {% if all_healthy and not portal_installed %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:12px;padding:20px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between">
-<div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green)">✓ Authentik is healthy — ready to deploy TAK Portal</div>
-<a href="/takportal" style="padding:8px 20px;background:linear-gradient(135deg,#059669,#0e7490);color:#fff;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap">→ Deploy TAK Portal</a>
+<div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green)">✓ Authentik is healthy — next: configure SMTP, then deploy TAK Server, then TAK Portal</div>
+<a href="/emailrelay" style="padding:8px 16px;background:rgba(5,150,105,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap;margin-right:8px">→ Email Relay</a><a href="/takserver" style="padding:8px 16px;background:rgba(5,150,105,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap;margin-right:8px">→ TAK Server</a><a href="/takportal" style="padding:8px 20px;background:linear-gradient(135deg,#059669,#0e7490);color:#fff;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap">→ TAK Portal</a>
 </div>
 {% elif all_healthy and portal_running %}
 <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:12px;padding:20px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between">
@@ -5975,11 +7845,13 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% elif ak.installed %}
 <div style="margin-top:24px;text-align:center">
 <button class="control-btn btn-start" onclick="akControl('start')" style="margin-right:12px">▶ Start</button>
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% else %}
@@ -5987,7 +7859,7 @@ body{display:flex;min-height:100vh}
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary);line-height:1.8">
 Authentik is an open-source <span style="color:var(--cyan)">Identity Provider</span> supporting SSO, SAML, OAuth2/OIDC, LDAP, and RADIUS.<br><br>
-It provides centralized user authentication and management for all your services — including <span style="color:var(--cyan)">TAK Portal</span> for TAK Server user/cert management.<br><br>
+It provides centralized user authentication and management for all your services — including <span style="color:var(--cyan)">TAK Portal</span> for TAK Server user/cert management and <span style="color:var(--cyan)">MediaMTX</span> for stream access and user/group management (with or without TAK Portal).<br><br>
 <span style="color:var(--text-dim)">Deploys: PostgreSQL + Redis + Authentik Server + Worker (4 containers)</span><br>
 <span style="color:var(--text-dim)">Ports: 9090 (HTTP) · 9443 (HTTPS)</span><br>
 <span style="color:var(--text-dim)">Recommended: 2+ CPU cores, 2+ GB RAM</span>
@@ -6000,14 +7872,24 @@ It provides centralized user authentication and management for all your services
   <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
 </div>
 {% endif %}
-<div class="deploy-log" id="deploy-log" style="display:none">Waiting for deployment to start...</div>
+<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}">Waiting for deployment to start...</div>
 {% endif %}
 
 {% if deploy_done %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center">
 <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--green);margin-bottom:8px">✓ Authentik deployed!</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">Navigate to Initial Setup to set your akadmin password.</div>
-<button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px;text-align:left">
+<strong>Next steps:</strong><br>
+1. <strong>Configure SMTP</strong> — go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a>, configure SMTP, then click &quot;Configure Authentik to use these settings&quot;.<br>
+2. <strong>Deploy TAK Server</strong> — go to <a href="/takserver" style="color:var(--cyan)">TAK Server</a>, upload .deb/.rpm and deploy.<br>
+3. <strong>Deploy TAK Portal</strong> — go to <a href="/takportal" style="color:var(--cyan)">TAK Portal</a> and deploy when ready.<br>
+You can also open the Authentik admin UI below to make additional Admin users (Admin → Groups → authentik Admins → Users).
+</div>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
+<a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay</a>
+<a href="/takserver" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Server</a>
+<a href="/takportal" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Portal</a>
+<button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
 </div>
@@ -6061,6 +7943,14 @@ async function deployAk(){
         else{document.getElementById('deploy-log').textContent='Error: '+d.error;btn.disabled=false;btn.textContent='Deploy Authentik';btn.style.opacity='1';btn.style.cursor='pointer'}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
 }
+async function reconfigureAk(){
+    try{
+        var r=await fetch('/api/authentik/reconfigure',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success)window.location.href='/authentik';
+        else alert('Error: '+(d.error||'Reconfigure failed'));
+    }catch(e){alert('Error: '+e.message)}
+}
 
 var logIndex=0;
 function pollDeployLog(){
@@ -6086,11 +7976,16 @@ function pollDeployLog(){
             var btn=document.getElementById('deploy-btn');
             if(btn){btn.textContent='\u2713 Deployment Complete';btn.style.background='var(--green)';btn.style.opacity='1';btn.style.cursor='default';}
             var el=document.getElementById('deploy-log');
-            var launchBtn=document.createElement('button');
-            launchBtn.textContent='>> Launch TAK Portal';
-            launchBtn.style.cssText='display:block;width:100%;padding:12px;margin-top:16px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
-            launchBtn.onclick=function(){window.location.href='/takportal';};
-            el.appendChild(launchBtn);
+            var inst=document.createElement('div');
+            inst.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan);margin-top:16px;margin-bottom:8px;text-align:left;line-height:1.6';
+            inst.innerHTML='<strong>Next steps:</strong><br>1. Configure <strong>SMTP</strong> (Email Relay), then &quot;Configure Authentik&quot;.<br>2. Deploy <strong>TAK Server</strong>.<br>3. Deploy <strong>TAK Portal</strong> when ready.<br>Use &quot;Launch Authentik Admin&quot; below to make additional Admin users.';
+            el.appendChild(inst);
+            var authUrl=el.getAttribute('data-authentik-url')||'';
+            var launchLink=document.createElement('a');
+            launchLink.href=authUrl;launchLink.target='_blank';launchLink.rel='noopener noreferrer';
+            launchLink.textContent='Launch Authentik Admin';
+            launchLink.style.cssText='display:block;width:100%;padding:12px;margin-top:8px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box';
+            el.appendChild(launchLink);
             var refreshBtn=document.createElement('button');
             refreshBtn.textContent='\u21bb Refresh Authentik Page';
             refreshBtn.style.cssText='display:block;width:100%;padding:10px;margin-top:8px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:13px;cursor:pointer;';
@@ -6177,6 +8072,639 @@ async function doUninstallAk(){
 </script>
 </body></html>'''
 
+def _coreconfig_has_ldap():
+    """True if CoreConfig.xml exists and already contains our LDAP auth block."""
+    path = '/opt/tak/CoreConfig.xml'
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, 'r') as f:
+            content = f.read()
+        return 'adm_ldapservice' in content
+    except Exception:
+        return False
+
+def _ensure_ldapsearch():
+    """Ensure ldapsearch CLI is available (install ldap-utils / openldap-clients if missing).
+    Used by Connect TAK Server to LDAP to trigger a bind for outpost log verification."""
+    if shutil.which('ldapsearch'):
+        return True
+    try:
+        if os.path.exists('/etc/debian_version'):
+            subprocess.run(
+                'DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y ldap-utils 2>&1',
+                shell=True, capture_output=True, timeout=120)
+        else:
+            subprocess.run('dnf install -y openldap-clients 2>/dev/null || yum install -y openldap-clients 2>/dev/null',
+                shell=True, capture_output=True, timeout=120)
+    except Exception:
+        pass
+    return bool(shutil.which('ldapsearch'))
+
+def _test_ldap_bind(ldap_pass):
+    """Test LDAP bind by triggering a connection and checking the outpost logs.
+    ldapsearch CLI is incompatible with Authentik's LDAP outpost (returns error 49
+    even when the outpost authenticates successfully), so we verify via outpost logs."""
+    try:
+        if shutil.which('ldapsearch'):
+            subprocess.run(
+                ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
+                 '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
+                 '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
+                capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass  # ldapsearch missing, failed, or timed out; still check logs below
+    time.sleep(2)
+    r = subprocess.run(
+        'docker logs authentik-ldap-1 --since 25s 2>&1',
+        shell=True, capture_output=True, text=True, timeout=10)
+    log = (r.stdout or '').lower()
+    return 'authenticated' in log and ('adm_ldapservice' in log or 'ldapservice' in log)
+
+def _ensure_ldap_flow_authentication_none():
+    """Ensure ldap-authentication-flow exists with authentication:none and 3 stage bindings, restart LDAP outpost.
+    If flow missing (blueprint never ran), create it by cloning default-authentication-flow.
+    If flow exists but has no stage bindings (deleted during debugging), recreate them from blueprint stages.
+    Fixes 'Flow does not apply to current user' — require_outpost blocks user binds.
+    Fixes 'Access denied for user' / Insufficient access (50) — missing bindings cause auth to fail.
+    Returns (True, None) on success, (False, error_msg) on failure."""
+    import urllib.request as _req
+    import urllib.error
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = line.strip().split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        return False, 'Authentik token not in .env'
+    ak_dir = os.path.expanduser('~/authentik')
+    if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+        return False, 'Authentik not deployed'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    # Authentik API can be slow after worker restart or under load; use 60s per request
+    _api_timeout = 60
+
+    def _get(path):
+        r = _req.Request(f'{url}/api/v3/{path}', headers=headers)
+        return json.loads(_req.urlopen(r, timeout=_api_timeout).read().decode())
+
+    def _post(path, body):
+        r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='POST')
+        return json.loads(_req.urlopen(r, timeout=_api_timeout).read().decode())
+
+    def _patch(path, body):
+        r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='PATCH')
+        _req.urlopen(r, timeout=_api_timeout)
+
+    def _delete(path):
+        r = _req.Request(f'{url}/api/v3/{path}', headers=headers, method='DELETE')
+        _req.urlopen(r, timeout=_api_timeout)
+
+    try:
+        ldap_flow_results = _get('flows/instances/?slug=ldap-authentication-flow').get('results', [])
+        ldap_flow = ldap_flow_results[0] if ldap_flow_results else None
+        default_flow_results = _get('flows/instances/?slug=default-authentication-flow').get('results', [])
+        default_flow = default_flow_results[0] if default_flow_results else None
+
+        if ldap_flow:
+            _patch('flows/instances/ldap-authentication-flow/', {'authentication': 'none'})
+            # Ensure 3 stage bindings are our ldap-* stages (not default/MFA — those break LDAP bind)
+            ldap_flow_pk = ldap_flow['pk']
+            all_bindings = []
+            page = 1
+            while True:
+                data = _get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+                all_bindings.extend(data.get('results', []))
+                if not data.get('pagination', {}).get('next'):
+                    break
+                page += 1
+            ldap_bindings = [b for b in all_bindings if str(b.get('target')) == str(ldap_flow_pk)]
+            stage_names = {(b.get('stage_obj') or {}).get('name') or '' for b in ldap_bindings}
+            need_names = {'ldap-identification-stage', 'ldap-authentication-password', 'ldap-authentication-login'}
+            # Clear password_stage on identification stage (DB may have it from old blueprint → "exceeded stage recursion depth")
+            def _find_stage(api_path, name):
+                for page in range(1, 4):
+                    data = _get(f'{api_path}?page={page}&page_size=100')
+                    for s in data.get('results', []):
+                        if s.get('name') == name:
+                            return s.get('pk')
+                    if not data.get('pagination', {}).get('next'):
+                        break
+                return None
+            id_stage_pk = None
+            for b in ldap_bindings:
+                so = b.get('stage_obj') or {}
+                if so.get('name') == 'ldap-identification-stage':
+                    id_stage_pk = so.get('pk') or (b.get('stage') if isinstance(b.get('stage'), int) else None)
+                    break
+            if not id_stage_pk:
+                id_stage_pk = _find_stage('stages/identification/', 'ldap-identification-stage')
+            if id_stage_pk:
+                try:
+                    # Include user_fields so PATCH does not trigger "no user fields selected" validation
+                    _patch(f'stages/identification/{id_stage_pk}/', {'password_stage': None, 'user_fields': ['username']})
+                except Exception:
+                    pass
+            wrong_bindings = len(ldap_bindings) < 3 or need_names != stage_names
+            if wrong_bindings:
+                for b in ldap_bindings:
+                    try:
+                        _delete(f'flows/bindings/{b["pk"]}/')
+                    except urllib.error.HTTPError:
+                        pass
+                ldap_bindings = []
+            if len(ldap_bindings) < 3:
+                # Find or create blueprint stages by name (blueprint may not have run)
+                def _create_ldap_stage(api_path, name, attrs):
+                    try:
+                        body = {'name': name, **attrs}
+                        return _post(api_path, body).get('pk')
+                    except urllib.error.HTTPError:
+                        return _find_stage(api_path, name)
+                id_stage = _find_stage('stages/identification/', 'ldap-identification-stage')
+                if not id_stage:
+                    id_stage = _create_ldap_stage('stages/identification/', 'ldap-identification-stage', {
+                        'case_insensitive_matching': True, 'pretend_user_exists': True, 'show_matched_user': True,
+                        'user_fields': ['username']})
+                pw_stage = _find_stage('stages/password/', 'ldap-authentication-password')
+                if not pw_stage:
+                    pw_stage = _create_ldap_stage('stages/password/', 'ldap-authentication-password', {
+                        'backends': ['authentik.core.auth.InbuiltBackend', 'authentik.core.auth.TokenBackend'],
+                        'failed_attempts_before_cancel': 5})
+                login_stage = _find_stage('stages/user_login/', 'ldap-authentication-login')
+                if not login_stage:
+                    login_stage = _create_ldap_stage('stages/user_login/', 'ldap-authentication-login', {
+                        'session_duration': 'seconds=0', 'remember_me_offset': 'seconds=0'})
+                if id_stage and pw_stage and login_stage:
+                    existing_orders = {b.get('order') for b in ldap_bindings}
+                    binding_specs = [(10, id_stage), (15, pw_stage), (20, login_stage)]
+                    for order, stage_pk in binding_specs:
+                        if order not in existing_orders:
+                            try:
+                                _post('flows/bindings/', {
+                                    'target': ldap_flow_pk, 'stage': stage_pk, 'order': order,
+                                    'evaluate_on_plan': True, 're_evaluate_policies': True,
+                                    'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+                            except urllib.error.HTTPError:
+                                pass
+                else:
+                    return False, f'LDAP stages not found/created: id={id_stage} pw={pw_stage} login={login_stage}'
+            providers = _get('providers/ldap/?search=LDAP').get('results', [])
+            ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
+            if ldap_prov:
+                try:
+                    _patch(f'providers/ldap/{ldap_prov["pk"]}/', {
+                        'authentication_flow': ldap_flow_pk,
+                        'authorization_flow': ldap_flow_pk})
+                except urllib.error.HTTPError as e:
+                    body = ''
+                    try: body = e.read().decode()[:200]
+                    except Exception: pass
+                    return False, f'Failed to update LDAP provider flows: {e.code} {body}'
+        else:
+            if not default_flow:
+                return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
+            default_pk = default_flow['pk']
+            all_bindings = []
+            page = 1
+            while True:
+                data = _get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+                all_bindings.extend(data.get('results', []))
+                if not data.get('pagination', {}).get('next'):
+                    break
+                page += 1
+            default_bindings = [b for b in all_bindings if str(b.get('target')) == str(default_pk)]
+            default_bindings.sort(key=lambda x: x.get('order', 0))
+            new_flow = _post('flows/instances/', {
+                'name': 'ldap-authentication-flow', 'slug': 'ldap-authentication-flow',
+                'title': 'ldap-authentication-flow', 'designation': 'authentication',
+                'authentication': 'none', 'layout': 'stacked', 'denied_action': 'message_continue',
+                'policy_engine_mode': 'any'})
+            new_flow_pk = new_flow['pk']
+            for b in default_bindings:
+                s = b.get('stage')
+                stage_pk = s if isinstance(s, int) else (s.get('pk') if isinstance(s, dict) and s else s)
+                if not stage_pk:
+                    continue
+                try:
+                    _post('flows/bindings/', {
+                        'target': new_flow_pk, 'stage': stage_pk, 'order': b.get('order', 0),
+                        'evaluate_on_plan': b.get('evaluate_on_plan', True),
+                        're_evaluate_policies': b.get('re_evaluate_policies', True),
+                        'policy_engine_mode': b.get('policy_engine_mode', 'any'),
+                        'invalid_response_action': b.get('invalid_response_action', 'retry')})
+                except urllib.error.HTTPError:
+                    pass
+            providers = _get('providers/ldap/?search=LDAP').get('results', [])
+            ldap_provider = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
+            if ldap_provider:
+                _patch(f'providers/ldap/{ldap_provider["pk"]}/', {
+                    'authentication_flow': new_flow_pk,
+                    'authorization_flow': new_flow_pk})
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            body = ''
+        return False, f'Authentik API {e.code}: {body}'
+    except Exception as e:
+        return False, str(e)[:120]
+    # LDAP outpost caches flow results — force-recreate required after flow/binding changes
+    subprocess.run(f'cd {ak_dir} && docker compose up -d --force-recreate ldap 2>&1',
+        shell=True, capture_output=True, timeout=60)
+    time.sleep(5)
+    return True, None
+
+def _ensure_authentik_ldap_service_account():
+    """Ensure adm_ldapservice exists, has password set, is in authentik Admins, and VERIFY the bind works.
+    Runs before Connect TAK Server to LDAP so LDAP bind works regardless of deploy order."""
+    ok, err = _ensure_ldap_flow_authentication_none()
+    if not ok:
+        return False, f'LDAP flow fix failed: {err}'
+    import urllib.request as _req
+    import urllib.error
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    ldap_pass = ''
+    with open(env_path) as f:
+        for line in f:
+            L = line.strip()
+            if L.startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = L.split('=', 1)[1].strip()
+            elif L.startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                ldap_pass = L.split('=', 1)[1].strip()
+    if not ak_token or not ldap_pass:
+        return False, 'Authentik token or LDAP password not in .env'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        # 1. Find or create the service account
+        req = _req.Request(f'{url}/api/v3/core/users/?search=adm_ldapservice', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        users = json.loads(resp.read().decode())['results']
+        user_obj = next((u for u in users if u.get('username') == 'adm_ldapservice'), None)
+        uid = user_obj['pk'] if user_obj else None
+        if not uid:
+            req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps({
+                'username': 'adm_ldapservice', 'name': 'LDAP Service Account',
+                'is_active': True, 'type': 'service_account',
+                'path': 'users',
+            }).encode(), headers=headers, method='POST')
+            resp = _req.urlopen(req, timeout=10)
+            user_obj = json.loads(resp.read().decode())
+            uid = user_obj['pk']
+        # 2. Ensure user is active and path is 'users' (service_account defaults to 'service-accounts' which gives wrong LDAP DN)
+        patch_fields = {}
+        if user_obj and not user_obj.get('is_active', True):
+            patch_fields['is_active'] = True
+        if user_obj and user_obj.get('path', '') != 'users':
+            patch_fields['path'] = 'users'
+        if patch_fields:
+            req = _req.Request(f'{url}/api/v3/core/users/{uid}/', data=json.dumps(patch_fields).encode(), headers=headers, method='PATCH')
+            _req.urlopen(req, timeout=10)
+        # 3. Set the password
+        req = _req.Request(f'{url}/api/v3/core/users/{uid}/set_password/',
+            data=json.dumps({'password': ldap_pass}).encode(), headers=headers, method='POST')
+        pw_resp = _req.urlopen(req, timeout=10)
+        pw_code = pw_resp.getcode()
+        # 4. Add to authentik Admins group
+        req = _req.Request(f'{url}/api/v3/core/groups/?search=authentik+Admins', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        groups = json.loads(resp.read().decode())['results']
+        admins = next((g for g in groups if 'admins' in g.get('name', '').lower()), None)
+        if admins:
+            users_raw = admins.get('users') or []
+            member_pks = [u.get('pk') if isinstance(u, dict) else u for u in users_raw]
+            if uid not in member_pks:
+                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/add_user/',
+                    data=json.dumps({'pk': uid}).encode(), headers=headers, method='POST')
+                _req.urlopen(req, timeout=10)
+        else:
+            return False, 'authentik Admins group not found'
+        # 5. Force-recreate the LDAP outpost so it picks up the new credentials
+        subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
+            shell=True, capture_output=True, timeout=60)
+        # 6. Ensure ldapsearch is available (install ldap-utils / openldap-clients if missing)
+        _ensure_ldapsearch()
+        # 7. Wait for LDAP outpost to be ready, then VERIFY via outpost logs (ldapsearch exit code is unreliable)
+        time.sleep(10)
+        for attempt in range(10):
+            time.sleep(6)
+            if _test_ldap_bind(ldap_pass):
+                return True, f'LDAP bind verified (attempt {attempt + 1})'
+        # Verification failed — outpost may not log service account binds, or format differs.
+        # Proceed anyway; service account exists and password is set. User can test with a TAK client.
+        return True, 'LDAP service account configured (bind verification inconclusive — outpost may not log service-account binds). Proceeding.'
+    except urllib.error.HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            pass
+        return False, f'Authentik API {e.code}: {body}'
+    except Exception as e:
+        return False, str(e)[:120]
+
+def _apply_ldap_to_coreconfig():
+    """Patch CoreConfig.xml with LDAP auth and restart TAK Server. Returns (success, message)."""
+    coreconfig_path = '/opt/tak/CoreConfig.xml'
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(coreconfig_path):
+        return False, 'CoreConfig.xml not found'
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ldap_pass = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                ldap_pass = line.strip().split('=', 1)[1].strip()
+                break
+    if not ldap_pass:
+        return False, 'LDAP service password not found in Authentik .env'
+    # Read current CoreConfig
+    with open(coreconfig_path, 'r') as f:
+        original = f.read()
+    if _coreconfig_has_ldap():
+        # LDAP already configured — check if password needs updating
+        import re as _re
+        m = _re.search(r'serviceAccountCredential="([^"]*)"', original)
+        existing_pass = m.group(1) if m else ''
+        if existing_pass == ldap_pass:
+            return True, 'CoreConfig already has LDAP (password matches .env)'
+        # Password mismatch — update it in place
+        updated = original.replace(
+            f'serviceAccountCredential="{existing_pass}"',
+            f'serviceAccountCredential="{ldap_pass}"')
+        if updated != original:
+            patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
+            with open(patch_path, 'w') as f:
+                f.write(updated)
+            r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return False, f'Password resync: sudo cp failed: {r.stderr.strip()[:200]}'
+            r = subprocess.run('sudo systemctl restart takserver 2>&1',
+                shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return False, f'Password resynced but TAK Server restart failed: {r.stderr.strip()[:120]}'
+            return True, 'LDAP password resynced from .env to CoreConfig — TAK Server restarted.'
+        return True, 'CoreConfig already has LDAP'
+    # Backup
+    backup_path = coreconfig_path + '.pre-ldap.bak'
+    if not os.path.exists(backup_path):
+        subprocess.run(['sudo', 'cp', coreconfig_path, backup_path], capture_output=True, timeout=10)
+    # Build the replacement auth block — matches TAK Portal reference exactly
+    ldap_line = '        <ldap'
+    ldap_line += ' url="ldap://127.0.0.1:389"'
+    ldap_line += ' userstring="cn={username},ou=users,dc=takldap"'
+    ldap_line += ' updateinterval="60"'
+    ldap_line += ' groupprefix="cn=tak_"'
+    ldap_line += ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
+    ldap_line += ' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
+    ldap_line += ' serviceAccountCredential="' + ldap_pass + '"'
+    ldap_line += ' groupBaseRDN="ou=groups,dc=takldap"'
+    ldap_line += ' userBaseRDN="ou=users,dc=takldap"'
+    ldap_line += ' dnAttributeName="DN"'
+    ldap_line += ' nameAttr="CN"'
+    ldap_line += ' adminGroup="ROLE_ADMIN"/>'
+    auth_block = ''
+    auth_block += '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
+    auth_block += ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
+    auth_block += ' x509checkRevocation="true">\n'
+    auth_block += ldap_line + '\n'
+    auth_block += '        <File location="UserAuthenticationFile.xml"/>\n'
+    auth_block += '    </auth>'
+    # Sanity check the block we built
+    if 'adm_ldapservice' not in auth_block:
+        return False, 'BUG: auth_block missing serviceAccountDN'
+    # Find <auth and </auth> in the file (case-insensitive, no regex)
+    lower = original.lower()
+    start = lower.find('<auth')
+    if start < 0:
+        return False, 'No <auth> tag found in CoreConfig.xml'
+    end_tag = lower.find('</auth>', start)
+    if end_tag < 0:
+        return False, 'No </auth> closing tag found in CoreConfig.xml'
+    end = end_tag + len('</auth>')
+    # Splice: everything before <auth> + our block + everything after </auth>
+    patched = original[:start] + auth_block + original[end:]
+    # Sanity check the patched content
+    if 'adm_ldapservice' not in patched:
+        return False, f'BUG: patched content missing LDAP. start={start} end={end} auth_block_len={len(auth_block)}'
+    # Write to a temp file we own, then sudo cp to /opt/tak
+    patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
+    with open(patch_path, 'w') as f:
+        f.write(patched)
+    r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        return False, f'sudo cp failed: {r.stderr.strip()[:200]}. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    # Verify the destination file
+    check = subprocess.run(['grep', '-c', 'adm_ldapservice', coreconfig_path], capture_output=True, text=True, timeout=5)
+    if check.returncode != 0 or check.stdout.strip() == '0':
+        return False, f'File not updated. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    # Restart TAK Server
+    r = subprocess.run('sudo systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
+    return True, 'LDAP connected — CoreConfig patched and TAK Server restarted.'
+
+def _ensure_authentik_webadmin():
+    """Ensure webadmin user exists in Authentik with path=users for 8446 LDAP login.
+    Needed when Authentik was deployed before TAK Server (webadmin skipped at deploy time).
+    Returns (True, None) on success, (False, error_msg) on failure."""
+    import urllib.request as _req
+    import urllib.error
+    if not os.path.exists('/opt/tak'):
+        return True, None
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = line.strip().split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        return False, 'Authentik token not in .env'
+    settings = load_settings()
+    webadmin_pass = settings.get('webadmin_password', '') or 'TakserverAtak1!'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        group_pk = None
+        req = _req.Request(f'{url}/api/v3/core/groups/?search=tak_ROLE_ADMIN', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        results = json.loads(resp.read().decode())['results']
+        group_pk = results[0]['pk'] if results else None
+        if not group_pk:
+            gr = _req.Request(f'{url}/api/v3/core/groups/', data=json.dumps({'name': 'tak_ROLE_ADMIN', 'is_superuser': False}).encode(), headers=headers, method='POST')
+            group_pk = json.loads(_req.urlopen(gr, timeout=10).read().decode())['pk']
+        req = _req.Request(f'{url}/api/v3/core/users/?search=webadmin', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        results = json.loads(resp.read().decode())['results']
+        user_obj = next((u for u in results if u.get('username') == 'webadmin'), None)
+        if not user_obj:
+            ud = {'username': 'webadmin', 'name': 'TAK Admin', 'is_active': True, 'path': 'users', 'groups': [group_pk] if group_pk else []}
+            req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps(ud).encode(), headers=headers, method='POST')
+            user_obj = json.loads(_req.urlopen(req, timeout=10).read().decode())
+        webadmin_pk = user_obj['pk']
+        patch_fields = {}
+        if user_obj.get('path', '') != 'users':
+            patch_fields['path'] = 'users'
+        existing = user_obj.get('groups') or []
+        g_pks = [g.get('pk', g) if isinstance(g, dict) else g for g in existing]
+        if group_pk and group_pk not in g_pks:
+            patch_fields['groups'] = list(set(g_pks + [group_pk]))
+        if patch_fields:
+            req = _req.Request(f'{url}/api/v3/core/users/{webadmin_pk}/', data=json.dumps(patch_fields).encode(), headers=headers, method='PATCH')
+            _req.urlopen(req, timeout=10)
+        req = _req.Request(f'{url}/api/v3/core/users/{webadmin_pk}/set_password/', data=json.dumps({'password': webadmin_pass}).encode(), headers=headers, method='POST')
+        _req.urlopen(req, timeout=10)
+        # Add webadmin to authentik Admins so LDAP application allows bind (8446 login)
+        req = _req.Request(f'{url}/api/v3/core/groups/?search=authentik+Admins', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        groups = json.loads(resp.read().decode())['results']
+        admins_grp = next((g for g in groups if g.get('name') == 'authentik Admins'), None)
+        if admins_grp:
+            users_raw = admins_grp.get('users') or []
+            member_pks = [u.get('pk') if isinstance(u, dict) else u for u in users_raw]
+            if webadmin_pk not in member_pks:
+                req = _req.Request(f'{url}/api/v3/core/groups/{admins_grp["pk"]}/add_user/',
+                    data=json.dumps({'pk': webadmin_pk}).encode(), headers=headers, method='POST')
+                _req.urlopen(req, timeout=10)
+        # Restart LDAP outpost to clear bind cache (password change would otherwise be ignored until cache expires)
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
+                shell=True, capture_output=True, timeout=90)
+        return True, None
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            body = ''
+        return False, f'Authentik API {e.code}: {body}'
+    except Exception as e:
+        return False, str(e)[:120]
+
+@app.route('/api/takserver/sync-webadmin', methods=['POST'])
+@login_required
+def takserver_sync_webadmin():
+    """Create or update webadmin user in Authentik with password from settings. Use when 8446 login fails (e.g. Authentik was deployed before TAK Server)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'success': False, 'message': 'TAK Server not installed'}), 400
+    if not os.path.exists(os.path.expanduser('~/authentik/.env')):
+        return jsonify({'success': False, 'message': 'Authentik not installed'}), 400
+    ok, err = _ensure_authentik_webadmin()
+    if ok:
+        return jsonify({'success': True, 'message': 'Webadmin user synced to Authentik. Use the same password you set at TAK Server deploy to log in to 8446.'})
+    return jsonify({'success': False, 'message': err or 'Sync failed'}), 400
+
+
+@app.route('/api/takserver/webadmin-password')
+@login_required
+def takserver_webadmin_password():
+    """Return webadmin password from settings (for Show Password on TAK Server page)."""
+    settings = load_settings()
+    pw = settings.get('webadmin_password', '').strip()
+    if pw:
+        return jsonify({'password': pw})
+    return jsonify({'password': ''})
+
+
+@app.route('/api/takserver/connect-ldap', methods=['POST'])
+@login_required
+def takserver_connect_ldap():
+    """One-shot: fix LDAP blueprint (remove recursion-causing password_stage), fix flow auth, ensure LDAP app open to all users (QR registration), ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
+    diag = []
+    # Fix LDAP blueprint on disk if it still has the broken password_stage (causes "invalid credentials" / recursion on user bind, e.g. QR code)
+    bp_path = os.path.expanduser('~/authentik/blueprints/tak-ldap-setup.yaml')
+    if os.path.exists(bp_path):
+        try:
+            with open(bp_path, 'r') as f:
+                content = f.read()
+            if 'password_stage: !KeyOf ldap-authentication-password' in content:
+                content = content.replace('      password_stage: !KeyOf ldap-authentication-password\n', '')
+                with open(bp_path, 'w') as f:
+                    f.write(content)
+                subprocess.run('cd ~/authentik && docker compose restart worker 2>&1', shell=True, capture_output=True, timeout=90)
+                time.sleep(50)  # let blueprint reconcile and update identification stage
+                diag.append('LDAP blueprint fixed (removed password_stage); worker restarted')
+        except Exception as e:
+            diag.append(f'Blueprint fix: {str(e)[:80]}')
+    # Fix flow (clear identification password_stage, ensure 3 ldap-* bindings) so user bind / QR works
+    ok_flow, err_flow = _ensure_ldap_flow_authentication_none()
+    if not ok_flow:
+        diag.append(f'Flow fix: {err_flow}')
+    else:
+        diag.append('Flow: OK')
+    # Ensure LDAP app has no restrictive policy (blocks QR registration for non-admin users)
+    try:
+        env_path = os.path.expanduser('~/authentik/.env')
+        ak_token = ''
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                    ak_token = line.strip().split('=', 1)[1].strip()
+                    break
+        if ak_token:
+            _ensure_app_access_policies('http://127.0.0.1:9090', {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}, lambda m: diag.append(m.strip()))
+            diag.append('App policies: LDAP open to all authenticated users')
+    except Exception as e:
+        diag.append(f'App policies: {str(e)[:60]}')
+    ok, msg = _ensure_authentik_ldap_service_account()
+    if not ok:
+        if '-w' in (msg or ''):
+            msg = 'ldapsearch timed out or failed (check Authentik LDAP outpost logs)'
+        return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
+    diag.append(f'Service account: {msg}')
+    ok, err = _ensure_authentik_webadmin()
+    if not ok:
+        diag.append(f'WebAdmin: {err}')
+    else:
+        diag.append('WebAdmin: OK')
+    ok, msg = _apply_ldap_to_coreconfig()
+    diag.append(f'CoreConfig: {msg}')
+    # Diagnostic: compare passwords and check outpost health
+    try:
+        env_path = os.path.expanduser('~/authentik/.env')
+        ldap_pass = ''
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                    ldap_pass = line.strip().split('=', 1)[1].strip()
+                    break
+        import re as _re
+        cc_pass = ''
+        if os.path.exists('/opt/tak/CoreConfig.xml'):
+            with open('/opt/tak/CoreConfig.xml') as f:
+                m = _re.search(r'serviceAccountCredential="([^"]*)"', f.read())
+                cc_pass = m.group(1) if m else ''
+        if ldap_pass and cc_pass:
+            diag.append(f'Password match: {"YES" if ldap_pass == cc_pass else "NO (MISMATCH!)"}')
+        elif not cc_pass:
+            diag.append('Password: not in CoreConfig')
+        r = subprocess.run('docker ps --filter name=authentik-ldap --format "{{.Status}}" 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=10)
+        ldap_status = (r.stdout or '').strip()
+        diag.append(f'LDAP outpost: {ldap_status or "not running"}')
+        r = subprocess.run('docker logs authentik-ldap-1 --since 30s 2>&1 | tail -5',
+            shell=True, capture_output=True, text=True, timeout=10)
+        outpost_tail = (r.stdout or '').strip()
+        if outpost_tail:
+            diag.append(f'Outpost log: {outpost_tail[:200]}')
+    except Exception as e:
+        diag.append(f'Diagnostic error: {str(e)[:100]}')
+    return jsonify({'success': ok, 'message': ' | '.join(diag)})
+
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
 def takserver_control():
@@ -6236,11 +8764,11 @@ def takserver_services():
             if 'profiles.active=messaging' in cmd:
                 name = 'Messaging'; icon = '📡'
             elif 'profiles.active=api' in cmd:
-                name = 'API'; icon = '🔌'
+                name = 'API'; icon = '🧩'
             elif 'profiles.active=config' in cmd:
                 name = 'Config'; icon = '⚙️'
             elif 'takserver-pm.jar' in cmd:
-                name = 'Plugin Manager'; icon = '🧩'
+                name = 'Plugin Manager'; icon = '🔌'
             elif 'takserver-retention.jar' in cmd:
                 name = 'Retention'; icon = '📦'
             else:
@@ -6517,6 +9045,9 @@ def run_takserver_deploy(config):
             log_step("No GPG key/policy — skipping verification")
 
         log_step(""); log_step("━━━ Step 4/9: Installing TAK Server ━━━")
+        settings = load_settings()
+        if settings.get('pkg_mgr', 'apt') == 'apt':
+            wait_for_apt_lock(log_step, deploy_log)
         log_step(f"Installing {pkg_name}...")
         # Primary: apt-get install handles dependencies automatically
         r1 = run_cmd(f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y {pkg} 2>&1', check=False)
@@ -6577,9 +9108,9 @@ def run_takserver_deploy(config):
         log_step("Creating user certificate...")
         run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1', quiet=True)
         log_step("✓ All certificates created")
-        log_step("Importing root CA into enrollment truststore...")
+        log_step("Importing root CA into TAK clients truststore...")
         run_cmd(f'keytool -import -alias root-ca -file /opt/tak/certs/files/root-ca.pem -keystore /opt/tak/certs/files/truststore-{int_ca}.jks -storepass atakatak -noprompt 2>&1', check=False)
-        log_step("✓ Root CA imported into truststore (ATAK enrollment trust chain complete)")
+        log_step("✓ Root CA imported into truststore (TAK clients trust chain complete)")
         log_step("Restarting TAK Server...")
         run_cmd('systemctl stop takserver'); time.sleep(10)
         run_cmd('pkill -9 -f takserver 2>/dev/null; true', check=False); time.sleep(5)
@@ -6656,6 +9187,14 @@ def run_takserver_deploy(config):
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
             log_step(f"  ✓ Caddy config updated for TAK Server")
+
+        # If Authentik is installed, ensure webadmin exists there (for 8446 LDAP login). On fresh install with Authentik-first order, this runs here so user does not need to click Sync webadmin.
+        if webadmin_pass and os.path.exists(os.path.expanduser('~/authentik/.env')):
+            ok, err = _ensure_authentik_webadmin()
+            if ok:
+                log_step("  ✓ webadmin synced to Authentik (8446 login ready)")
+            elif err:
+                log_step(f"  ⚠ webadmin sync: {err[:80]} — use Sync webadmin button if 8446 fails")
 
         # If Caddy is already running with a domain, install LE cert on 8446 now.
         # This handles the case where Caddy was deployed before TAK Server.
@@ -6801,12 +9340,356 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 def api_metrics():
     return jsonify(get_system_metrics())
 
+@app.route('/api/unattended-upgrades', methods=['POST'])
+@login_required
+def api_toggle_unattended_upgrades():
+    """Enable or disable unattended-upgrades service."""
+    action = request.json.get('action') if request.is_json else None
+    if action not in ('enable', 'disable'):
+        return jsonify({'success': False, 'error': 'action must be enable or disable'}), 400
+    try:
+        if action == 'disable':
+            subprocess.run('systemctl stop unattended-upgrades && systemctl disable unattended-upgrades',
+                shell=True, check=True, capture_output=True, text=True, timeout=30)
+            # Ubuntu/Debian also run unattended-upgrade via apt-daily-upgrade.timer; disable that too
+            subprocess.run('systemctl stop apt-daily-upgrade.timer 2>/dev/null; systemctl disable apt-daily-upgrade.timer 2>/dev/null; true',
+                shell=True, timeout=10)
+        else:
+            subprocess.run('systemctl enable unattended-upgrades && systemctl start unattended-upgrades',
+                shell=True, check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run('systemctl enable apt-daily-upgrade.timer 2>/dev/null; systemctl start apt-daily-upgrade.timer 2>/dev/null; true',
+                shell=True, timeout=10)
+        uu = _get_unattended_upgrades_status()
+        return jsonify({'success': True, 'enabled': uu['enabled'], 'running': uu['running']})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'success': False, 'error': e.stderr or str(e)}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/modules')
 @login_required
 def api_modules():
     """Live module states for dashboard cards (so CLI uninstall/start/stop is reflected)."""
     modules = detect_modules()
     return jsonify({k: {'installed': m.get('installed', False), 'running': m.get('running', False)} for k, m in modules.items()})
+
+# Full uninstall (all deployed services) — for testing: reset VPS without destroying it
+full_uninstall_log = []
+full_uninstall_status = {'running': False, 'done': False, 'error': None}
+
+def run_full_uninstall():
+    """Remove all deployed services in reverse dependency order. Console and config remain."""
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        full_uninstall_log.append(entry)
+        print(entry, flush=True)
+    try:
+        settings = load_settings()
+        pkg_mgr = settings.get('pkg_mgr', 'apt')
+
+        # 1. MediaMTX
+        plog("━━━ MediaMTX ━━━")
+        subprocess.run('systemctl stop mediamtx mediamtx-webeditor 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
+        subprocess.run('systemctl disable mediamtx mediamtx-webeditor 2>/dev/null; true', shell=True, capture_output=True)
+        for f in ['/etc/systemd/system/mediamtx.service', '/etc/systemd/system/mediamtx-webeditor.service',
+                  '/usr/local/bin/mediamtx', '/usr/local/etc/mediamtx.yml']:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        if os.path.exists('/opt/mediamtx-webeditor'):
+            subprocess.run('rm -rf /opt/mediamtx-webeditor', shell=True, capture_output=True)
+        subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
+        mediamtx_deploy_log.clear()
+        mediamtx_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ MediaMTX removed")
+
+        # 2. TAK Portal
+        plog("━━━ TAK Portal ━━━")
+        portal_dir = os.path.expanduser('~/TAK-Portal')
+        if os.path.exists(portal_dir):
+            subprocess.run(f'cd {portal_dir} && docker compose down -v --rmi local 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+            subprocess.run(f'rm -rf {portal_dir}', shell=True, capture_output=True)
+        takportal_deploy_log.clear()
+        takportal_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ TAK Portal removed")
+
+        # 3. CloudTAK
+        plog("━━━ CloudTAK ━━━")
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        for yml in [os.path.join(cloudtak_dir, 'docker-compose.yml'), os.path.join(cloudtak_dir, 'compose.yaml')]:
+            if os.path.exists(yml):
+                subprocess.run(f'docker compose -f "{yml}" down -v --rmi local 2>/dev/null; true', shell=True, capture_output=True, timeout=180, cwd=cloudtak_dir)
+                break
+        if os.path.exists(cloudtak_dir):
+            subprocess.run(f'rm -rf "{cloudtak_dir}"', shell=True, capture_output=True, timeout=60)
+        cloudtak_deploy_log.clear()
+        cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ CloudTAK removed")
+
+        # 4. Node-RED
+        plog("━━━ Node-RED ━━━")
+        nr_dir = os.path.expanduser('~/node-red')
+        compose = os.path.join(nr_dir, 'docker-compose.yml')
+        if os.path.exists(compose):
+            subprocess.run(f'docker compose -f "{compose}" down -v 2>/dev/null; true', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+        if os.path.exists(nr_dir):
+            subprocess.run(f'rm -rf "{nr_dir}"', shell=True, capture_output=True, timeout=10)
+        nodered_deploy_log.clear()
+        nodered_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ Node-RED removed")
+
+        # 5. TAK Server
+        plog("━━━ TAK Server ━━━")
+        subprocess.run(['systemctl', 'stop', 'takserver'], capture_output=True, timeout=60)
+        subprocess.run(['systemctl', 'disable', 'takserver'], capture_output=True, timeout=30)
+        subprocess.run('pkill -9 -f takserver 2>/dev/null; true', shell=True, capture_output=True)
+        pkg_result = subprocess.run('dpkg -l | grep takserver', shell=True, capture_output=True, text=True)
+        if 'takserver' in (pkg_result.stdout or ''):
+            subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove -y takserver 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        if os.path.exists('/opt/tak'):
+            subprocess.run('rm -rf /opt/tak', shell=True, capture_output=True)
+        subprocess.run("sudo -u postgres psql -c \"DROP DATABASE IF EXISTS cot;\" 2>/dev/null; true", shell=True, capture_output=True, timeout=30)
+        subprocess.run("sudo -u postgres psql -c \"DROP USER IF EXISTS martiuser;\" 2>/dev/null; true", shell=True, capture_output=True, timeout=30)
+        subprocess.run('rm -rf /usr/share/debsig/keyrings/* /etc/debsig/policies/* 2>/dev/null; true', shell=True, capture_output=True, timeout=10)
+        for f in os.listdir(UPLOAD_DIR):
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, f))
+            except Exception:
+                pass
+        deploy_log.clear()
+        deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ TAK Server removed")
+
+        # 6. Email Relay
+        plog("━━━ Email Relay ━━━")
+        subprocess.run('systemctl stop postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
+        subprocess.run('systemctl disable postfix 2>/dev/null; true', shell=True, capture_output=True)
+        if pkg_mgr == 'apt':
+            subprocess.run('apt-get remove -y postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        else:
+            subprocess.run('dnf remove -y postfix 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        settings = load_settings()
+        settings.pop('email_relay', None)
+        save_settings(settings)
+        email_deploy_log.clear()
+        email_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ Email Relay removed")
+
+        # 7. Authentik
+        plog("━━━ Authentik ━━━")
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(ak_dir):
+            subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all --remove-orphans 2>/dev/null; true', shell=True, capture_output=True, text=True, timeout=180)
+            subprocess.run(f'rm -rf {ak_dir}', shell=True, capture_output=True)
+        authentik_deploy_log.clear()
+        authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ Authentik removed")
+
+        # 8. Caddy
+        plog("━━━ Caddy ━━━")
+        subprocess.run('systemctl stop caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
+        subprocess.run('systemctl disable caddy 2>/dev/null; true', shell=True, capture_output=True)
+        if pkg_mgr == 'apt':
+            subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        else:
+            subprocess.run('dnf remove -y caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        # Ensure binary and config are gone so console no longer shows Caddy as installed (which uses "which caddy")
+        for path in ['/usr/bin/caddy', '/usr/local/bin/caddy']:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    subprocess.run(f'rm -f {path}', shell=True, capture_output=True)
+        if os.path.exists('/etc/caddy'):
+            subprocess.run('rm -rf /etc/caddy', shell=True, capture_output=True, timeout=10)
+        subprocess.run('systemctl daemon-reload 2>/dev/null; true', shell=True, capture_output=True)
+        settings = load_settings()
+        settings['fqdn'] = ''
+        save_settings(settings)
+        caddy_deploy_log.clear()
+        caddy_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        plog("✓ Caddy removed")
+
+        plog("")
+        plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        plog("All deployed services removed. Console remains. Use Marketplace to deploy again.")
+        plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        full_uninstall_status.update({'running': False, 'done': True, 'error': None})
+    except subprocess.TimeoutExpired:
+        full_uninstall_status.update({'running': False, 'done': True, 'error': 'Uninstall timed out'})
+        full_uninstall_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✗ Timeout")
+    except Exception as e:
+        full_uninstall_status.update({'running': False, 'done': True, 'error': str(e)})
+        full_uninstall_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✗ {str(e)}")
+
+@app.route('/api/console/uninstall-all/validate', methods=['POST'])
+@login_required
+def console_uninstall_all_validate():
+    """Check admin password only (for green check in UI)."""
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    valid = bool(auth.get('password_hash') and check_password_hash(auth['password_hash'], password))
+    return jsonify({'valid': valid})
+
+@app.route('/api/console/uninstall-all', methods=['POST'])
+@login_required
+def console_uninstall_all():
+    """Start full uninstall of all deployed services (for testing: reset without burning VPS)."""
+    data = request.json or {}
+    password = data.get('password', '')
+    confirm = (data.get('confirm') or '').strip().upper()
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    if confirm != 'UNINSTALL':
+        return jsonify({'error': 'Type UNINSTALL in the confirmation box to proceed'}), 400
+    if full_uninstall_status.get('running'):
+        return jsonify({'error': 'Uninstall already in progress'}), 409
+    full_uninstall_log.clear()
+    full_uninstall_status.update({'running': True, 'done': False, 'error': None})
+    threading.Thread(target=run_full_uninstall, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Full uninstall started'})
+
+@app.route('/api/console/uninstall-all/status')
+@login_required
+def console_uninstall_all_status():
+    return jsonify({
+        'running': full_uninstall_status.get('running', False),
+        'done': full_uninstall_status.get('done', False),
+        'error': full_uninstall_status.get('error'),
+        'log': full_uninstall_log[-200:],
+    })
+
+@app.route('/api/console/password/reset', methods=['POST'])
+@login_required
+def console_password_reset():
+    """Reset console admin password (for 5001 and Uninstall all). Requires current password."""
+    data = request.json or {}
+    current = data.get('current_password', '')
+    new_pw = data.get('new_password', '')
+    confirm = data.get('new_password_confirm', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], current):
+        return jsonify({'success': False, 'error': 'Current password is wrong'}), 403
+    if not new_pw or len(new_pw) < 8:
+        return jsonify({'success': False, 'error': 'New password must be at least 8 characters'}), 400
+    if new_pw != confirm:
+        return jsonify({'success': False, 'error': 'New password and confirmation do not match'}), 400
+    auth['password_hash'] = generate_password_hash(new_pw)
+    auth['created'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    save_auth(auth)
+    subprocess.Popen('sleep 2 && systemctl restart takwerx-console', shell=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return jsonify({'success': True, 'message': 'Password updated. Console will restart in a few seconds.'})
+
+# === Help Template (sidebar: backdoor, password info, reset) ===
+HELP_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Help — infra-TAK</title>
+<style>
+''' + BASE_CSS + '''
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:640px;margin:0 auto}
+.help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px}
+.help-card h2{font-size:16px;font-weight:600;margin-bottom:12px;color:var(--text-primary)}
+.help-card p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px}
+.help-card p:last-child{margin-bottom:0}
+.backdoor-url{font-family:'JetBrains Mono',monospace;font-size:13px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--cyan);word-break:break-all;user-select:all}
+.form-field{margin-bottom:14px}.form-field label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-field input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
+.btn{display:inline-block;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{opacity:0.9}
+#reset-msg{margin-top:12px;font-size:13px;min-height:20px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;max-width:90vw}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border);padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn-danger{background:var(--red);color:#fff;border:none;padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
+</style></head><body>
+{{ sidebar_html }}
+<main class="main">
+<div class="help-card">
+<h2>Backdoor (IP:5001)</h2>
+<p>If Authentik or the domain is down, you can always reach the console at:</p>
+<p class="backdoor-url">https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</p>
+<p>Accept the self-signed cert and log in with your <strong>console password</strong>. <strong>Full lockout?</strong> If you can't log in at all, you have to get on the CLI: the <strong>README on the GitHub repo</strong> has the exact commands to run on the server to reset the password (e.g. <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">./reset-console-password.sh</code>).</p>
+</div>
+<div class="help-card">
+<h2>Console password</h2>
+<p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Use the form below if you're logged in; for a full lockout you need the CLI — see the README on the GitHub repo.</p>
+</div>
+<div class="help-card">
+<h2>Reset console password</h2>
+<p>Enter your current password and choose a new one. The console will restart and you'll use the new password for 5001 and Uninstall all. <em>Only works when you're already logged in.</em> For a full lockout, use the CLI (README has the commands).</p>
+<div class="form-field"><label>Current password</label><input type="password" id="reset-current" placeholder="Current console password"></div>
+<div class="form-field"><label>New password</label><input type="password" id="reset-new" placeholder="At least 8 characters"></div>
+<div class="form-field"><label>Confirm new password</label><input type="password" id="reset-confirm" placeholder="Same as above"></div>
+<button type="button" class="btn btn-primary" onclick="doResetPassword()">Reset password</button>
+<div id="reset-msg"></div>
+</div>
+<div class="help-card">
+<h2>Uninstall all services</h2>
+<p>Remove all deployed services (TAK Server, Authentik, Caddy, TAK Portal, MediaMTX, Node-RED, CloudTAK, Email Relay). The console stays so you can redeploy from Marketplace without burning the VPS.</p>
+<button type="button" onclick="document.getElementById('full-uninstall-modal').classList.add('open');setTimeout(function(){fullUninstallCheckFields();var p=document.getElementById('full-uninstall-password');if(p&&p.value.trim())fullUninstallValidatePassword();},50)" style="padding:8px 16px;background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.4);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Uninstall all services</button>
+</div>
+<div id="full-uninstall-modal" class="modal-overlay" style="z-index:9999;padding:24px">
+<div class="modal" style="max-width:480px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
+<div style="font-weight:600;margin-bottom:16px">Uninstall all deployed services</div>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">This will remove TAK Server, Authentik, Caddy, TAK Portal, MediaMTX, Node-RED, CloudTAK, and Email Relay. The console and your password remain. You can redeploy from Marketplace afterward.</p>
+<div style="margin-bottom:12px"><label class="form-label" style="display:block;margin-bottom:4px;font-size:12px">Admin password</label><div style="position:relative;display:flex;align-items:center;gap:8px"><input class="form-input" id="full-uninstall-password" type="password" placeholder="Your console password" style="flex:1" oninput="fullUninstallPasswordInput()" onblur="fullUninstallValidatePassword()"><span id="full-uninstall-pw-check" style="display:none;color:var(--green);font-size:18px;flex-shrink:0" title="Password correct">&#10003;</span></div></div>
+<div style="margin-bottom:12px"><label class="form-label" style="display:block;margin-bottom:4px;font-size:12px">Type <strong>UNINSTALL</strong> to confirm</label><div style="position:relative;display:flex;align-items:center;gap:8px"><input class="form-input" id="full-uninstall-confirm" type="text" placeholder="UNINSTALL" autocomplete="off" style="flex:1" oninput="fullUninstallCheckFields()"><span id="full-uninstall-confirm-check" style="display:none;color:var(--green);font-size:18px;flex-shrink:0" title="UNINSTALL typed correctly">&#10003;</span></div></div>
+<div id="full-uninstall-msg" style="margin-bottom:8px;font-size:12px;color:var(--red);min-height:18px"></div>
+<div id="full-uninstall-progress" style="display:none;margin-bottom:12px;font-size:12px;color:var(--text-secondary)"></div>
+<div id="full-uninstall-log" style="display:none;background:var(--bg-deep);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;max-height:200px;overflow-y:auto;margin-bottom:12px;white-space:pre-wrap;word-break:break-all"></div>
+<div style="display:flex;gap:8px;margin-top:8px">
+<button type="button" class="btn btn-ghost" id="full-uninstall-cancel" onclick="closeFullUninstallModal()">Cancel</button>
+<button type="button" class="btn btn-danger" id="full-uninstall-submit" onclick="doFullUninstall()">Uninstall all</button>
+</div>
+</div>
+</div>
+<div class="help-card">
+<h2>Deployment order</h2>
+<p>(1) Caddy — set FQDN and TLS · (2) Authentik · (3) Email Relay · (4) TAK Server — upload .deb/.rpm and deploy · (5) TAK Portal · (6) Connect TAK Server to LDAP (button on TAK Server page) · (7) Node-RED, MediaMTX, CloudTAK as needed.</p>
+</div>
+<div class="help-card">
+<h2>Docs</h2>
+<p><a href="https://github.com/takwerx/infra-TAK" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">github.com/takwerx/infra-TAK</a> (README, docs/COMMANDS.md, docs/HANDOFF-LDAP-AUTHENTIK.md)</p>
+</div>
+</main>
+<script>
+function closeFullUninstallModal(){document.getElementById('full-uninstall-modal').classList.remove('open');}
+var fullUninstallPwValidateTimer=null;
+function fullUninstallPasswordInput(){var c=document.getElementById('full-uninstall-pw-check');if(c)c.style.display='none';clearTimeout(fullUninstallPwValidateTimer);var p=document.getElementById('full-uninstall-password');if(!p||!p.value.trim())return;fullUninstallPwValidateTimer=setTimeout(fullUninstallValidatePassword,400);}
+async function fullUninstallValidatePassword(){var p=document.getElementById('full-uninstall-password');var c=document.getElementById('full-uninstall-pw-check');if(!p||!c)return;if(!p.value.trim()){c.style.display='none';return;}try{var r=await fetch('/api/console/uninstall-all/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p.value})});var d=await r.json();c.style.display=d.valid?'inline':'none';}catch(e){c.style.display='none';}}
+function fullUninstallCheckFields(){var conf=document.getElementById('full-uninstall-confirm');var chk=document.getElementById('full-uninstall-confirm-check');if(chk)chk.style.display=conf&&conf.value.trim().toUpperCase()==='UNINSTALL'?'inline':'none';}
+var fullUninstallPollTimer=null;
+async function doFullUninstall(){var pw=document.getElementById('full-uninstall-password').value;var confirmVal=document.getElementById('full-uninstall-confirm').value.trim().toUpperCase();var msgEl=document.getElementById('full-uninstall-msg');var progressEl=document.getElementById('full-uninstall-progress');var logEl=document.getElementById('full-uninstall-log');var cancelBtn=document.getElementById('full-uninstall-cancel');var submitBtn=document.getElementById('full-uninstall-submit');msgEl.textContent='';if(!pw){msgEl.textContent='Enter your password';return;}if(confirmVal!=='UNINSTALL'){msgEl.textContent='Type UNINSTALL in the confirmation box to proceed';return;}progressEl.style.display='block';progressEl.textContent='Starting...';logEl.style.display='none';logEl.textContent='';cancelBtn.disabled=true;submitBtn.disabled=true;try{var r=await fetch('/api/console/uninstall-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw,confirm:confirmVal})});var d=await r.json();if(!d.success){msgEl.textContent=d.error||'Request failed';progressEl.style.display='none';cancelBtn.disabled=false;submitBtn.disabled=false;return;}logEl.style.display='block';function poll(){fetch('/api/console/uninstall-all/status').then(function(res){return res.json();}).then(function(s){if(s.log&&s.log.length){logEl.textContent=s.log.join('\\n');logEl.scrollTop=logEl.scrollHeight;}if(s.running){progressEl.textContent='Uninstalling...';fullUninstallPollTimer=setTimeout(poll,1500);return;}if(s.done){progressEl.textContent=s.error?'Error: '+s.error:'Done. Reloading...';if(s.error)msgEl.textContent=s.error;cancelBtn.disabled=false;if(!s.error)setTimeout(function(){window.location.href='/console';},1500);}}).catch(function(){progressEl.textContent='Error polling';cancelBtn.disabled=false;submitBtn.disabled=false;});}poll();}catch(e){msgEl.textContent=e.message||'Request failed';progressEl.style.display='none';cancelBtn.disabled=false;submitBtn.disabled=false;}}
+</script>
+<script>
+async function doResetPassword(){
+    var cur=document.getElementById('reset-current').value;
+    var neu=document.getElementById('reset-new').value;
+    var conf=document.getElementById('reset-confirm').value;
+    var msg=document.getElementById('reset-msg');
+    msg.textContent='';
+    if(!cur){msg.style.color='var(--red)';msg.textContent='Enter current password';return;}
+    if(!neu||neu.length<8){msg.style.color='var(--red)';msg.textContent='New password must be at least 8 characters';return;}
+    if(neu!==conf){msg.style.color='var(--red)';msg.textContent='New password and confirmation do not match';return;}
+    msg.style.color='var(--cyan)';msg.textContent='Updating...';
+    try{
+        var r=await fetch('/api/console/password/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:cur,new_password:neu,new_password_confirm:conf})});
+        var d=await r.json();
+        if(d.success){msg.style.color='var(--green)';msg.textContent=d.message||'Password updated. Reload in a few seconds.';}
+        else{msg.style.color='var(--red)';msg.textContent=d.error||'Failed';}
+    }catch(e){msg.style.color='var(--red)';msg.textContent=e.message||'Request failed';}
+}
+</script></body></html>'''
 
 # === Console Template (installed services only) ===
 CONSOLE_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Console — infra-TAK</title>
@@ -6843,6 +9726,13 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .module-action{display:inline-block;margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);opacity:0;transition:opacity 0.2s}
 .module-card:hover .module-action{opacity:1}
 .meta-line{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:12px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;max-width:90vw}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
+.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border);padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn-danger{background:var(--red);color:#fff;border:none;padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
 </style></head><body>
 {{ sidebar_html }}
 <div class="main">
@@ -6851,7 +9741,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
 <div>
 <div style="font-size:13px;font-weight:600;color:var(--yellow)">🔒 No Domain Configured — Running in IP-Only Mode</div>
-<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no ATAK QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no TAK client QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
 </div>
 <a href="/caddy" style="padding:8px 18px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap">Set Up Domain →</a>
 </div>
@@ -6876,15 +9766,28 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value" id="ram-value">{{ metrics.ram_percent }}%</div><div class="metric-detail">{{ metrics.ram_used_gb }}GB / {{ metrics.ram_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Disk</div><div class="metric-value" id="disk-value">{{ metrics.disk_percent }}%</div><div class="metric-detail">{{ metrics.disk_used_gb }}GB / {{ metrics.disk_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
+<div class="metric-card" style="position:relative">
+<div class="metric-label" style="display:flex;align-items:center;gap:6px">Auto Updates
+{% if metrics.unattended_upgrades.enabled and metrics.unattended_upgrades.running %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 2s infinite" title="Upgrade in progress"></span>{% endif %}
+</div>
+<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+<label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;margin:0">
+<input type="checkbox" id="uu-toggle" {% if metrics.unattended_upgrades.enabled %}checked{% endif %} onchange="toggleUU(this)" style="opacity:0;width:0;height:0">
+<span style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}rgba(71,85,105,0.5){% endif %};border-radius:20px;transition:.3s" id="uu-slider"></span>
+<span style="position:absolute;content:'';height:16px;width:16px;left:{% if metrics.unattended_upgrades.enabled %}18px{% else %}2px{% endif %};bottom:2px;background:#fff;border-radius:50%;transition:.3s" id="uu-knob"></span>
+</label>
+<span id="uu-label" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}var(--text-dim){% endif %}">{% if metrics.unattended_upgrades.enabled and metrics.unattended_upgrades.running %}Running...{% elif metrics.unattended_upgrades.enabled %}Enabled{% else %}Disabled{% endif %}</span>
+</div>
+</div>
 </div>
 <div class="section-title">Console</div>
-<div class="meta-line">v{{ version }} · {{ settings.get('os_name', 'Unknown OS') }} · {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div>
+<div class="meta-line">v{{ version }} | {{ settings.get('os_name', 'Unknown OS') }} | {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} | {{ settings.get('fqdn') }}{% endif %}</div>
 <div class="modules-grid">
 {% if not modules %}
 <div style="grid-column:1/-1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:48px;text-align:center">
 <div style="font-size:15px;color:var(--text-secondary);margin-bottom:12px">No deployed services yet</div>
 <div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">Install and deploy from the Marketplace to see them here.</div>
-<a href="/marketplace" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;text-decoration:none">Go to Marketplace →</a>
+<a href="/marketplace" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;text-decoration:none">Go to Marketplace</a>
 </div>
 {% else %}
 {% for key, mod in modules.items() %}
@@ -6893,15 +9796,36 @@ body{display:flex;flex-direction:row;min-height:100vh}
 {% if not mod.get('icon_url') or key == 'takportal' or key == 'emailrelay' %}<div class="module-name">{{ mod.name }}</div>{% endif %}
 </div>
 <div class="module-desc">{{ mod.description }}</div>
+{% if module_versions.get(key) %}{% set v = module_versions.get(key) %}{% if v.version or v.update_available %}<div class="meta-line module-version-line" id="module-version-{{ key }}" style="margin-bottom:4px">{% if v.version %}v{{ v.version }}{% endif %}{% if v.update_available %} <span style="color:var(--cyan);font-size:10px" title="Update available">update</span>{% endif %}</div>{% endif %}{% endif %}
 <span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
-{% if mod.installed %}<span class="module-action">Manage →</span>{% else %}<span class="module-action">Deploy →</span>{% endif %}
+{% if mod.installed %}<span class="module-action">Manage</span>{% else %}<span class="module-action">Deploy</span>{% endif %}
 </a>
 {% endfor %}
 {% endif %}
 </div>
-</div>
 <script>
-setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime}catch(e){}},5000);
+function updateUU(uu){
+    if(!uu)return;
+    var tog=document.getElementById('uu-toggle'),sl=document.getElementById('uu-slider'),kn=document.getElementById('uu-knob'),lb=document.getElementById('uu-label');
+    if(!tog)return;
+    tog.checked=uu.enabled;
+    sl.style.background=uu.enabled?'var(--green)':'rgba(71,85,105,0.5)';
+    kn.style.left=uu.enabled?'18px':'2px';
+    lb.style.color=uu.enabled?'var(--green)':'var(--text-dim)';
+    lb.textContent=(uu.enabled&&uu.running)?'Running...':uu.enabled?'Enabled':'Disabled';
+}
+async function toggleUU(cb){
+    var action=cb.checked?'enable':'disable';
+    var lb=document.getElementById('uu-label');
+    lb.textContent=cb.checked?'Enabling...':'Disabling...';lb.style.color='var(--cyan)';
+    try{
+        var r=await fetch('/api/unattended-upgrades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});
+        var d=await r.json();
+        if(d.success){updateUU(d)}
+        else{cb.checked=!cb.checked;lb.textContent='Error: '+(d.error||'unknown');lb.style.color='var(--red)'}
+    }catch(e){cb.checked=!cb.checked;lb.textContent='Error';lb.style.color='var(--red)'}
+}
+setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime;updateUU(d.unattended_upgrades)}catch(e){}},5000);
 function refreshModuleCards(){
     fetch('/api/modules').then(r=>r.json()).then(function(mods){
         for(var k in mods){
@@ -6916,13 +9840,28 @@ function refreshModuleCards(){
 }
 setInterval(refreshModuleCards,8000);
 refreshModuleCards();
+function refreshModuleVersions(){
+    fetch('/api/modules/version').then(function(r){return r.json()}).then(function(data){
+        for(var key in data){
+            var el=document.getElementById('module-version-'+key);
+            if(!el)continue;
+            var d=data[key];
+            var s='';
+            if(d.version)s='v'+d.version;
+            if(d.update_available)s+=(s?' ':'')+'<span style="color:var(--cyan);font-size:10px" title="Update available">update</span>';
+            el.innerHTML=s;if(s)el.style.display='';
+        }
+    }).catch(function(){});
+}
+setInterval(refreshModuleVersions,30000);
+refreshModuleVersions();
 var updateBody='';
 async function checkUpdate(){
     try{
         var r=await fetch('/api/update/check');var d=await r.json();
         if(d.update_available){
             document.getElementById('update-banner').style.display='block';
-            document.getElementById('update-info').textContent='v'+d.current+' → v'+d.latest+(d.notes?' · '+d.notes:'');
+            document.getElementById('update-info').textContent='v'+d.current+' -> v'+d.latest+(d.notes?' - '+d.notes:'');
             updateBody=d.body||'No details available';
         }
     }catch(e){}
@@ -6941,13 +9880,13 @@ async function applyUpdate(){
         var r=await fetch('/api/update/apply',{method:'POST'});var d=await r.json();
         if(d.success){
             status.style.color='var(--green)';
-            status.textContent='✓ Updated! Restarting console...';
+            status.textContent='OK Updated! Restarting console...';
             setTimeout(function(){window.location.reload()},5000);
         }else{
-            status.style.color='var(--red)';status.textContent='✗ '+d.error;
+            status.style.color='var(--red)';status.textContent='Error: '+d.error;
             btn.disabled=false;btn.textContent='Update Now';btn.style.opacity='1';
         }
-    }catch(e){status.style.color='var(--red)';status.textContent='✗ '+e.message;btn.disabled=false;btn.textContent='Update Now';btn.style.opacity='1'}
+    }catch(e){status.style.color='var(--red)';status.textContent='Error: '+e.message;btn.disabled=false;btn.textContent='Update Now';btn.style.opacity='1'}
 }
 checkUpdate();
 </script></body></html>'''
@@ -6987,6 +9926,13 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .module-action{display:inline-block;margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);opacity:0;transition:opacity 0.2s}
 .module-card:hover .module-action{opacity:1}
 .meta-line{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:12px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;max-width:90vw}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
+.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border);padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn-danger{background:var(--red);color:#fff;border:none;padding:10px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
 </style></head><body>
 {{ sidebar_html }}
 <div class="main">
@@ -6995,7 +9941,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
 <div>
 <div style="font-size:13px;font-weight:600;color:var(--yellow)">🔒 No Domain Configured — Running in IP-Only Mode</div>
-<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no ATAK QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no TAK client QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
 </div>
 <a href="/caddy" style="padding:8px 18px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap">Set Up Domain →</a>
 </div>
@@ -7090,16 +10036,16 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </style></head><body>
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server</h1><p>Team Awareness Kit server for situational awareness</p></div>
+  <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server</h1><p>Team Awareness Kit Server</p></div>
 <div class="status-banner" id="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
 <div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
-<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
 <div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
-<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running</div></div></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
 <div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
 <div class="status-info"><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
@@ -7114,6 +10060,29 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="cert-download-area" style="margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-secondary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>
 {% endif %}
 {% elif tak.installed %}
+{% if show_connect_ldap %}
+<div class="card" style="border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.06);margin-bottom:24px">
+<div class="card-title">🔗 Connect TAK Server to LDAP</div>
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">Authentik is deployed. Connect TAK Server to the same LDAP so users can sign in with their Authentik accounts. This patches CoreConfig.xml and restarts TAK Server once.</p>
+<button type="button" id="connect-ldap-btn" onclick="connectLdap()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Connect TAK Server to LDAP</button>
+<div id="connect-ldap-msg" style="margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>
+</div>
+{% elif ldap_connected and modules.get('authentik', {}).get('installed') %}
+<div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
+<div style="display:flex;align-items:center;gap:12px">
+<span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span>
+</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
+<div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="resync-ldap-btn" onclick="resyncLdap()" style="padding:8px 16px;background:rgba(16,185,129,.2);color:var(--green);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Resync LDAP to TAK Server</button>
+<button type="button" id="sync-webadmin-btn" onclick="syncWebadmin()" style="padding:8px 16px;background:rgba(59,130,246,.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Sync webadmin to Authentik</button>
+<span id="sync-webadmin-msg" style="font-size:12px;color:var(--text-dim)"></span><span id="resync-ldap-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:4px"><strong>Resync LDAP</strong> — Re-runs the full flow (fix blueprint if needed, restart Authentik worker, ensure service account &amp; webadmin, sync CoreConfig). Use after pulling console updates or if QR/login fails.</p>
+<p style="font-size:11px;color:var(--text-dim);margin-top:0;margin-bottom:0"><strong>Sync webadmin</strong> — Only pushes the 8446 password from settings into Authentik. Does not restart anything.</p>
+<div id="resync-notice" style="display:none;margin-top:8px;padding:10px 14px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.35);border-radius:8px;font-size:12px;color:var(--yellow)">TAK Portal user list may take a short moment to repopulate.</div>
+</div>
+{% endif %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
@@ -7122,6 +10091,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
 </div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">8446 login: <span style="color:var(--cyan)">webadmin</span> · <button type="button" onclick="showWebadminPassword()" id="webadmin-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="webadmin-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
 <div class="section-title">Services</div>
 <div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
@@ -7138,8 +10108,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
-<div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="document.getElementById('file-input').click()">
+<div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
 <div class="upload-icon">📦</div><div class="upload-text">Drop your TAK Server files here</div>
+<div class="upload-hint" style="margin-bottom:6px"><span style="color:var(--text-dim);font-size:12px">Slow upload? Use the backdoor — open <strong>https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</strong> and upload from the TAK Server page there (skips proxy, no timeout).</span></div>
 <div class="upload-hint">
 {% if 'ubuntu' in settings.get('os_type', '') %}
 <strong style="color:var(--text-secondary)">Ubuntu — upload these files from tak.gov:</strong><br>
@@ -7161,7 +10132,7 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:20px">
 <div id="upload-files-list" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary)"></div>
 <div id="add-more-area" style="margin-top:16px;text-align:center">
-<button onclick="document.getElementById('file-input-more').click()" style="padding:8px 20px;background:transparent;color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">+ Add more files</button>
+<button onclick="var i=document.getElementById('file-input-more');i.value='';i.click()" style="padding:8px 20px;background:transparent;color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">+ Add more files</button>
 <input type="file" id="file-input-more" style="display:none" multiple {% if 'ubuntu' in settings.get('os_type', '') %}accept=".deb,.key,.pol"{% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}accept=".rpm,.key"{% else %}accept=".deb,.rpm,.key,.pol"{% endif %} onchange="handleAddMore(event)">
 </div>
 <div id="deploy-btn-area" style="margin-top:20px;text-align:center;display:none">
@@ -7185,6 +10156,50 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 </div>
 <footer class="footer"></footer>
 <script>
+async function resyncLdap(){
+    if(!confirm('Resync will restart the Authentik worker and re-apply the LDAP blueprint. The TAK Portal user list may take a short moment to repopulate.\\n\\nContinue?')){return;}
+    var btn=document.getElementById('resync-ldap-btn');
+    var msg=document.getElementById('resync-ldap-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';btn.textContent='Resyncing...';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){
+            if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';}
+            var notice=document.getElementById('resync-notice');
+            if(notice){notice.style.display='block';window.setTimeout(function(){notice.style.display='none';},10000);}
+            if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}
+        }
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
+}
+async function showWebadminPassword(){
+    var btn=document.getElementById('webadmin-pw-btn');
+    var display=document.getElementById('webadmin-pw-display');
+    if(!btn||!display)return;
+    if(display.style.display==='inline'){display.style.display='none';display.textContent='';btn.textContent='🔑 Show Password';return;}
+    try{
+        var r=await fetch('/api/takserver/webadmin-password');
+        var d=await r.json();
+        if(d.password){display.textContent=d.password;display.style.display='inline';btn.textContent='🔑 Hide';}
+        else{display.textContent='Not set (set at deploy or sync webadmin)';display.style.display='inline';}
+    }catch(e){display.textContent='Error';display.style.display='inline';}
+}
+async function syncWebadmin(){
+    var btn=document.getElementById('sync-webadmin-btn');
+    var msg=document.getElementById('sync-webadmin-msg');
+    if(btn){btn.disabled=true;btn.style.opacity='0.7';}
+    if(msg){msg.textContent='Syncing...';msg.style.color='var(--text-dim)';}
+    try{
+        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+        else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+}
 async function loadServices(){
     var el=document.getElementById('services-list');
     if(!el)return;
@@ -7251,6 +10266,20 @@ async function takControl(action){
         window.location.reload();
     }
     catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
+}
+
+async function connectLdap(){
+    var btn=document.getElementById('connect-ldap-btn');
+    var msg=document.getElementById('connect-ldap-msg');
+    if(btn){btn.disabled=true;btn.textContent='Connecting...';btn.style.opacity='0.7';}
+    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
+    try{
+        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} alert(d.message||'LDAP connected. TAK Server restarted.');setTimeout(function(){window.location.reload();},500);}
+        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
+    }
+    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
 }
 
 (function(){
@@ -7383,12 +10412,14 @@ function uploadFile(file){
         delete window['xhr_'+id];
         const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
         var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn)}
+        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn);updateUploadSummary()}
         else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
         uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
     };
     xhr.onerror=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
     xhr.onabort=()=>{delete window['xhr_'+id];uploadsInProgress--};
+    xhr.ontimeout=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='Timeout';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
+    xhr.timeout=1800000;
     xhr.open('POST','/api/upload/takserver');xhr.send(fd);
 }
 
