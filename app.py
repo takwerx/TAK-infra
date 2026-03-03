@@ -253,7 +253,7 @@ def render_sidebar(modules, active_path):
         cls = 'nav-item active' if path == active else 'nav-item'
         t = f' title="{html.escape(title)}"' if title else ''
         return f'<a href="{href}" class="{cls}"{t}>{content}</a>'
-    logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>TAK Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
+    logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
     parts = [logo]
     parts.append(link('/console', '<span class="nav-icon material-symbols-outlined">dashboard</span>Console'))
     caddy = modules.get('caddy', {})
@@ -536,17 +536,20 @@ def guarddog_page():
         {'name': 'Process', 'interval': '1 min', 'desc': 'Verifies all 5 TAK Server Java processes (messaging, api, config, plugins, retention). Auto-restart after 3 consecutive failures.'},
         {'name': 'Network', 'interval': '1 min', 'desc': 'Pings Cloudflare (1.1.1.1) and Google (8.8.8.8). Alerts only (no restart) after 3 failures — helps distinguish network issues from server issues.'},
         {'name': 'PostgreSQL', 'interval': '5 min', 'desc': 'Checks that the PostgreSQL service is running. Attempts restart if down; sends alert.'},
+        {'name': 'CoT database size', 'interval': '6 hours', 'desc': 'Monitors the TAK Server CoT (Cursor on Target) database size. Alert when over 25GB (warning) or 40GB (critical). Retention deletes rows but PostgreSQL does not free disk until VACUUM; alert includes tips (retention, tak-db-cleanup.service, VACUUM).'},
         {'name': 'OOM', 'interval': '1 min', 'desc': 'Scans TAK Server logs for OutOfMemoryError. Auto-restarts TAK Server and sends alert when detected.'},
         {'name': 'Disk', 'interval': '1 hour', 'desc': 'Checks root and TAK logs filesystem usage. Alert only when usage exceeds 80% (warning) or 90% (critical).'},
         {'name': 'Certificate', 'interval': 'Daily', 'desc': 'Checks Let\'s Encrypt / TAK Server cert expiry. Alert when 40 days or less remaining until expiry.'},
     ]
     guarddog_docs_url = f'https://github.com/{GITHUB_REPO}/blob/main/docs/GUARDDOG.md'
+    notifications_configured = bool((settings.get('guarddog_alert_email') or '').strip())
     return render_template_string(GUARDDOG_TEMPLATE,
         settings=settings, gd=gd, tak=tak, version=VERSION,
         guarddog_alert_email=settings.get('guarddog_alert_email', ''),
         guarddog_sms=settings.get('guarddog_sms', {}),
         guarddog_monitors=guarddog_monitors,
         guarddog_docs_url=guarddog_docs_url,
+        notifications_configured=notifications_configured,
         email_relay_configured=email_relay_configured,
         health_url=_guarddog_health_url(settings),
         deploying=guarddog_deploy_status.get('running', False),
@@ -588,14 +591,14 @@ def guarddog_uninstall():
     if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
         return jsonify({'error': 'Invalid admin password'}), 403
     timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-              'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+              'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
     for t in timers:
         subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
         subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
     subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
     subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
     for name in timers + ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
-                          'taknetguard.service', 'takprocessguard.service', 'takcertguard.service', 'tak-health.service']:
+                          'takcotdbguard.service', 'taknetguard.service', 'takprocessguard.service', 'takcertguard.service', 'tak-health.service']:
         path = os.path.join('/etc/systemd/system', name)
         if os.path.exists(path):
             try:
@@ -788,7 +791,7 @@ def run_guarddog_deploy(alert_email):
         plog("✓ Directories created")
         script_files = [
             'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
-            'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-health-endpoint.py'
+            'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-health-endpoint.py'
         ]
         for name in script_files:
             src = os.path.join(scripts_dir, name)
@@ -813,6 +816,8 @@ def run_guarddog_deploy(alert_email):
             ('takdiskguard.timer', '[Unit]\nDescription=Run TAK disk monitor every hour\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=1h\nUnit=takdiskguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('takdbguard.service', '[Unit]\nDescription=TAK PostgreSQL Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-db-watch.sh\n'),
             ('takdbguard.timer', '[Unit]\nDescription=Run TAK DB monitor every 5 minutes\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=5min\nUnit=takdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takcotdbguard.service', '[Unit]\nDescription=TAK CoT Database Size Monitor\nAfter=postgresql.service postgresql-15.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cotdb-watch.sh\n'),
+            ('takcotdbguard.timer', '[Unit]\nDescription=Run TAK CoT DB size monitor every 6 hours\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=6h\nUnit=takcotdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('taknetguard.service', '[Unit]\nDescription=TAK Network Monitor\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-network-watch.sh\n'),
             ('taknetguard.timer', '[Unit]\nDescription=TAK Network Monitor Timer\nRequires=taknetguard.service\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
             ('takprocessguard.service', '[Unit]\nDescription=TAK Server Process Monitor\nAfter=network.target takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-process-watch.sh\n'),
@@ -839,13 +844,13 @@ def run_guarddog_deploy(alert_email):
             guarddog_deploy_status.update({'running': False, 'error': True})
             return
         timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-                  'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+                  'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
         for t in timers:
             subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
             subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
         subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
         subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
-        for f in ['process_alert_sent', 'disk_alert_sent', 'db_alert_sent', 'network_alert_sent', 'cert_alert_sent']:
+        for f in ['process_alert_sent', 'disk_alert_sent', 'db_alert_sent', 'cotdb_alert_sent', 'network_alert_sent', 'cert_alert_sent']:
             p = os.path.join('/var/lib/takguard', f)
             if not os.path.exists(p):
                 open(p, 'a').close()
@@ -5044,13 +5049,19 @@ function doUninstall(){var pw=document.getElementById('uninstall-password').valu
 GUARDDOG_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Guard Dog — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
 :root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
 .sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
 .nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
 .nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow:visible;line-height:1.35}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px}
 .page-header{margin-bottom:28px}.page-header h1{font-size:22px;font-weight:700}.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
 .card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
@@ -5078,7 +5089,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 <body>
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span style="font-size:28px;line-height:1">&#128054;</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery (7 monitors + health endpoint). <a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p></div>
+  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">&#128054;</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery (8 monitors + health endpoint). <a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p></div>
   {% if gd.running %}<div class="status-banner running"><div class="dot"></div>Guard Dog is running (timers active)</div>
   {% elif gd.installed %}<div class="status-banner stopped"><div class="dot"></div>Guard Dog is installed but timers may be stopped</div>
   {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed</div>{% endif %}
@@ -5107,6 +5118,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% endif %}
 
   <div class="card"><div class="card-title">Notifications</div>
+    {% if notifications_configured %}
+    <div id="gd-notify-banner" class="status-banner running" style="margin-bottom:12px"><div class="dot"></div>Notifications configured</div>
+    <button type="button" class="btn btn-ghost" id="gd-notify-toggle-btn" onclick="gdToggleNotifications()" style="margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px">expand_more</span><span id="gd-notify-toggle-label">Expand to edit</span></button>
+    <div id="gd-notify-body" style="display:none">
+    {% endif %}
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts.</p>
     <div class="gd-section" style="margin-bottom:20px">
       <div class="form-label">Email</div>
@@ -5148,6 +5164,10 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       </div>
       <div id="gd-sms-msg" style="margin-top:8px;font-size:12px"></div>
     </div>
+    {% if notifications_configured %}
+    <button type="button" class="btn btn-ghost" onclick="gdToggleNotifications()" style="margin-top:12px"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px">expand_less</span>Collapse</button>
+    </div>
+    {% endif %}
   </div>
 
   {% if gd.installed %}
@@ -5160,7 +5180,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div></div>
   {% else %}
   <div class="card"><div class="card-title">Deploy Guard Dog</div>
-    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 7 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed). Alert email is set in Notifications above.</p>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 8 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed). Alert email is set in Notifications above.</p>
     <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>&#128054; Deploy Guard Dog</button>
     <p id="gd-deploy-email-err" style="margin-top:10px;font-size:12px;color:var(--red);display:none">Set an alert email in Notifications first.</p>
   </div>
@@ -5178,6 +5198,7 @@ if(d.entries&&d.entries.length){if(gdLogIndex===0&&logEl)logEl.textContent='';if
 if(!d.running){clearInterval(gdLogInterval);var btn=document.getElementById('gd-deploy-btn');if(btn)btn.disabled=false;if(d.complete){logEl.textContent+=String.fromCharCode(10,10)+'Deploy complete. Refreshing...';setTimeout(function(){location.reload();},2000);}}});}poll();gdLogInterval=setInterval(poll,800);}
 if ({{ 'true' if deploying else 'false' }}) { var c=document.getElementById('gd-log-card');if(c)c.style.display='block';gdPollLog(); }
 function gdUninstall(){var pw=document.getElementById('gd-uninstall-password');var msg=document.getElementById('gd-uninstall-msg');if(!pw||!msg)return;msg.textContent='';fetch('/api/guarddog/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw.value}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){msg.textContent=d.error;return;}msg.textContent='Done. Reloading...';document.getElementById('gd-uninstall-modal').classList.remove('open');setTimeout(function(){location.reload();},800);}).catch(function(e){msg.textContent=e.message||'Request failed';});}
+function gdToggleNotifications(){var body=document.getElementById('gd-notify-body');var btn=document.getElementById('gd-notify-toggle-btn');var label=document.getElementById('gd-notify-toggle-label');if(!body)return;var show=body.style.display==='none';body.style.display=show?'block':'none';if(btn){var icon=btn.querySelector('.material-symbols-outlined');if(icon)icon.textContent=show?'expand_less':'expand_more';}if(label)label.textContent=show?'Collapse':'Expand to edit';}
 function gdTestEmail(){var el=document.getElementById('gd-test-email-msg');var btn=document.getElementById('gd-test-email-btn');var email=document.getElementById('gd-notify-email');var to=(email&&email.value)?email.value.trim():'';if(!to){el.textContent='Enter an email address.';el.style.color='var(--red)';return;}el.textContent='Sending...';el.style.color='var(--text-dim)';if(btn)btn.disabled=true;fetch('/api/guarddog/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,save:true}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(btn)btn.disabled=false;if(d.success){el.textContent=d.message||'Sent.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){if(btn)btn.disabled=false;el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
 function gdSmsProviderChange(){var p=document.getElementById('gd-sms-provider');var v=p?p.value:'';document.getElementById('gd-sms-twilio').style.display=(v==='twilio')?'block':'none';document.getElementById('gd-sms-brevo').style.display=(v==='brevo')?'block':'none';}
 function gdSmsSave(){var el=document.getElementById('gd-sms-msg');var p=document.getElementById('gd-sms-provider');var provider=(p&&p.value)?p.value.trim():'';var body={provider:provider};if(provider==='twilio'){body.account_sid=document.getElementById('gd-sms-tw-account').value.trim();body.auth_token=document.getElementById('gd-sms-tw-auth').value;body.from_number=document.getElementById('gd-sms-tw-from').value.trim();body.to_numbers=document.getElementById('gd-sms-tw-to').value.trim();}else if(provider==='brevo'){body.api_key=document.getElementById('gd-sms-br-api').value;body.sender=document.getElementById('gd-sms-br-sender').value.trim();body.to_numbers=document.getElementById('gd-sms-br-to').value.trim();}el.textContent='Saving...';el.style.color='var(--text-dim)';fetch('/api/guarddog/sms/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.success){el.textContent=d.message||'Saved.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
@@ -9197,6 +9218,57 @@ def takserver_connect_ldap():
         diag.append(f'Diagnostic error: {str(e)[:100]}')
     return jsonify({'success': ok, 'message': ' | '.join(diag)})
 
+@app.route('/api/takserver/vacuum', methods=['POST'])
+@login_required
+def takserver_vacuum():
+    """Run VACUUM on the CoT database. Default: VACUUM ANALYZE (safe, reclaims space). Optional: VACUUM FULL (locks tables, reclaims more)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'success': False, 'error': 'TAK Server not installed'}), 400
+    data = request.get_json() or {}
+    use_full = data.get('full') is True
+    if use_full:
+        cmd = "sudo -u postgres psql -d cot -c 'VACUUM FULL;' 2>&1"
+        timeout_sec = 3600
+    else:
+        cmd = "sudo -u postgres psql -d cot -c 'VACUUM ANALYZE;' 2>&1"
+        timeout_sec = 600
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_sec)
+        out = (r.stdout or '') + (r.stderr or '')
+        if r.returncode != 0:
+            return jsonify({'success': False, 'error': out.strip() or f'Exit code {r.returncode}'}), 400
+        return jsonify({'success': True, 'output': out.strip(), 'full': use_full})
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False, 'error': 'VACUUM timed out (database may be very large)'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/takserver/cot-db-size')
+@login_required
+def takserver_cot_db_size():
+    """Return CoT database size in bytes and human-readable (for UI)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': 'TAK Server not installed'})
+    try:
+        r = subprocess.run(
+            "sudo -u postgres psql -t -A -c \"SELECT COALESCE(pg_database_size('cot'), 0);\" 2>/dev/null",
+            shell=True, capture_output=True, text=True, timeout=10
+        )
+        size = int((r.stdout or '0').strip() or 0)
+        if size >= 1024 ** 3:
+            human = f'{size // (1024**3)} GB'
+        elif size >= 1024 ** 2:
+            human = f'{size // (1024**2)} MB'
+        elif size >= 1024:
+            human = f'{size // 1024} KB'
+        else:
+            human = f'{size} B'
+        return jsonify({'size_bytes': size, 'size_human': human})
+    except Exception as e:
+        return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': str(e)})
+
+
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
 def takserver_control():
@@ -9767,6 +9839,9 @@ BASE_CSS = """
 *{margin:0;padding:0;box-sizing:border-box}
 .material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;word-wrap:normal;direction:ltr;-webkit-font-smoothing:antialiased}
 .nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow:visible;line-height:1.35}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
 :root{--bg-primary:#0a0e17;--bg-card:rgba(15,23,42,0.7);--bg-card-hover:rgba(15,23,42,0.9);--border:rgba(59,130,246,0.1);--border-hover:rgba(59,130,246,0.3);--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--accent-glow:rgba(59,130,246,0.15);--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4}
 body{font-family:'DM Sans',sans-serif;background:var(--bg-primary);color:var(--text-primary);min-height:100vh}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(59,130,246,0.02) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.02) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0}
@@ -10703,6 +10778,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div id="services-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading services...</div>
 </div>
+<div class="section-title">Database maintenance (CoT)</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">The CoT (Cursor on Target) database can grow large. Data retention deletes old rows, but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE periodically to reclaim space (safe while TAK Server is running).</p>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">CoT database size: <span id="cot-db-size">—</span> <button type="button" onclick="refreshCotSize()" style="margin-left:8px;padding:2px 10px;background:transparent;color:var(--cyan);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Refresh</button></p>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+<button type="button" id="vacuum-analyze-btn" onclick="runVacuum(false)" style="padding:10px 20px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer">Run VACUUM ANALYZE</button>
+<button type="button" id="vacuum-full-btn" onclick="runVacuum(true)" style="padding:10px 20px;background:rgba(234,179,8,0.2);color:var(--yellow);border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer" title="Locks tables — use during maintenance window">VACUUM FULL</button>
+</div>
+<p style="font-size:11px;color:var(--text-dim);margin-top:10px;margin-bottom:0"><strong>VACUUM ANALYZE</strong> — Reclaims space from deleted rows and updates statistics. Safe to run while TAK is running.<br><strong>VACUUM FULL</strong> — Rewrites tables to reclaim more space; <strong>locks tables</strong>. Run during a maintenance window.</p>
+<div id="vacuum-output" style="display:none;margin-top:14px;padding:12px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
+<div id="vacuum-msg" style="margin-top:8px;font-size:13px"></div>
+</div>
 <div class="section-title">Certificates</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;align-items:center;justify-content:space-between">
@@ -10834,6 +10921,9 @@ async function loadServices(){
     }catch(e){el.textContent='Failed to load services'}
 }
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
+if(document.getElementById('cot-db-size')){refreshCotSize();}
+async function refreshCotSize(){var el=document.getElementById('cot-db-size');if(!el)return;el.textContent='…';try{var r=await fetch('/api/takserver/cot-db-size');var d=await r.json();if(d.error){el.textContent=d.error;}else{el.textContent=d.size_human||'—';}}catch(e){el.textContent='Error';}}
+async function runVacuum(full){var msg=document.getElementById('vacuum-msg');var out=document.getElementById('vacuum-output');var btnA=document.getElementById('vacuum-analyze-btn');var btnF=document.getElementById('vacuum-full-btn');if(full&&!confirm('VACUUM FULL locks the CoT tables. TAK Server may be unable to write during the run. Run during a maintenance window. Continue?'))return;if(msg){msg.textContent=full?'Running VACUUM FULL (may take a long time)…':'Running VACUUM ANALYZE…';msg.style.color='var(--text-dim)';}if(out){out.style.display='none';out.textContent='';}if(btnA){btnA.disabled=true;}if(btnF){btnF.disabled=true;}try{var r=await fetch('/api/takserver/vacuum',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({full:full})});var d=await r.json();if(d.success){if(msg){msg.textContent='Done.';msg.style.color='var(--green)';}if(out&&d.output){out.textContent=d.output;out.style.display='block';}if(document.getElementById('cot-db-size')){refreshCotSize();}}else{if(msg){msg.textContent=d.error||'Failed';msg.style.color='var(--red)';}if(out&&d.error){out.textContent=d.error;out.style.display='block';}}}catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';}}if(btnA){btnA.disabled=false;}if(btnF){btnF.disabled=false;}}
 
 var serverLogOffset=0;
 async function pollServerLog(){

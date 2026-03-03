@@ -1,6 +1,6 @@
 # Guard Dog — How it works
 
-Guard Dog is TAK Server health monitoring and auto-recovery: seven monitors plus an HTTP health endpoint. It runs as systemd timers and a small health service.
+Guard Dog is TAK Server health monitoring and auto-recovery: eight monitors plus an HTTP health endpoint. It runs as systemd timers and a small health service.
 
 ## Monitors
 
@@ -10,6 +10,9 @@ Guard Dog is TAK Server health monitoring and auto-recovery: seven monitors plus
 | **Process**   | 1 min  | Verifies all 5 TAK Server Java processes (messaging, api, config, plugins, retention) | Auto-restart after 3 consecutive failures |
 | **Network**   | 1 min  | Pings 1.1.1.1 and 8.8.8.8 | Alert only (no restart) — helps tell network vs server issues |
 | **PostgreSQL**| 5 min  | Checks PostgreSQL is running | Attempts restart and sends alert |
+| **CoT database size** | 6 hr | Monitors the TAK Server CoT (Cursor on Target) database size | Alert when over 25GB (warning) or 40GB (critical). Retention deletes rows but PostgreSQL does not free disk until **VACUUM**; alert includes tips (retention, tak-db-cleanup.service, VACUUM). |
+
+**How to run VACUUM:** On the **TAK Server** page in the console, use **Database maintenance (CoT)** → **Run VACUUM ANALYZE** (safe while TAK is running). For maximum space reclaim, use **VACUUM FULL** during a maintenance window (it locks tables).
 | **OOM**       | 1 min  | Scans TAK Server logs for OutOfMemoryError | Auto-restart and alert (once until log clears) |
 | **Disk**      | 1 hr   | Root and TAK logs filesystem usage | Alert at 80% (warning) and 90% (critical) |
 | **Certificate**| Daily | Let's Encrypt / TAK Server cert expiry | Alert when **40 days or less** remaining until expiry |
