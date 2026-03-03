@@ -19,6 +19,8 @@ Guard Dog is TAK Server health monitoring and auto-recovery: eight monitors plus
 
 ## Avoiding restart loops and boot races
 
+Guard Dog is designed so that **a restart does not trigger another monitor to restart again in a loop**. Multiple safeguards prevent that:
+
 - **15-minute boot skip**  
   Port 8089, Process, and OOM monitors do not run for the first 15 minutes after boot. That gives TAK Server and PostgreSQL time to start without Guard Dog restarting them during startup.
 

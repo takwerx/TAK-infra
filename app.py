@@ -5089,7 +5089,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 <body>
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">&#128054;</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery (8 monitors + health endpoint). <a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p></div>
+  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery.</p></div>
   {% if gd.running %}<div class="status-banner running"><div class="dot"></div>Guard Dog is running (timers active)</div>
   {% elif gd.installed %}<div class="status-banner stopped"><div class="dot"></div>Guard Dog is installed but timers may be stopped</div>
   {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed</div>{% endif %}
@@ -5113,6 +5113,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       {% endfor %}
     </div>
     <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint: <code style="color:var(--cyan)">{{ health_url }}</code></p>
+    <p style="margin-top:10px;font-size:12px;color:var(--text-dim)"><a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p>
     <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
   </div>
   {% endif %}
