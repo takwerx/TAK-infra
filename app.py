@@ -5110,9 +5110,9 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div></div>
   {% else %}
   <div class="card"><div class="card-title">Deploy Guard Dog</div>
-    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 7 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Alerts are sent by email. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed).</p>
-    <div style="margin-bottom:16px"><label class="form-label">Alert email address (required)</label><input class="form-input" type="email" id="guarddog-email" placeholder="admin@example.com" value="{{ guarddog_alert_email }}"></div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 7 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed). Alert email is set in Notifications above.</p>
     <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>&#128054; Deploy Guard Dog</button>
+    <p id="gd-deploy-email-err" style="margin-top:10px;font-size:12px;color:var(--red);display:none">Set an alert email in Notifications first.</p>
   </div>
   {% endif %}
 
@@ -5120,8 +5120,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 </div>
 <script>
 var gdLogIndex=0,gdLogInterval=null;
-function startGuarddogDeploy(){var btn=document.getElementById('gd-deploy-btn');var email=document.getElementById('guarddog-email');if(email&&!email.value.trim()){alert('Please enter an alert email address');return;}if(btn)btn.disabled=true;document.getElementById('gd-log-card').style.display='block';document.getElementById('gd-deploy-log').textContent='Starting...';gdLogIndex=0;
-fetch('/api/guarddog/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_email:(email&&email.value.trim())||''}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+function startGuarddogDeploy(){var btn=document.getElementById('gd-deploy-btn');var emailEl=document.getElementById('gd-notify-email');var errEl=document.getElementById('gd-deploy-email-err');var email=(emailEl&&emailEl.value)?emailEl.value.trim():'';if(errEl)errEl.style.display='none';if(!email){if(errEl){errEl.style.display='block';errEl.textContent='Set an alert email in Notifications first.';}else alert('Set an alert email in Notifications first.');return;}if(btn)btn.disabled=true;document.getElementById('gd-log-card').style.display='block';document.getElementById('gd-deploy-log').textContent='Starting...';gdLogIndex=0;
+fetch('/api/guarddog/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_email:email}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
 if(d.error){document.getElementById('gd-deploy-log').textContent='Error: '+d.error;if(btn)btn.disabled=false;return;}gdPollLog();});}
 function gdPollLog(){var logEl=document.getElementById('gd-deploy-log');function poll(){fetch('/api/guarddog/deploy/log?index='+gdLogIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
 if(d.entries&&d.entries.length){if(gdLogIndex===0&&logEl)logEl.textContent='';if(logEl){logEl.textContent+=d.entries.join(String.fromCharCode(10))+String.fromCharCode(10);logEl.scrollTop=logEl.scrollHeight;}gdLogIndex+=d.entries.length;}
