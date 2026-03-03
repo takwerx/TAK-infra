@@ -6,6 +6,8 @@ from flask import (Flask, render_template_string, request, jsonify,
 from werkzeug.security import check_password_hash, generate_password_hash
 from functools import wraps
 import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
 app = Flask(__name__)
@@ -504,10 +506,347 @@ def mediamtx_page():
         deploying=mediamtx_deploy_status.get('running', False),
         deploy_done=mediamtx_deploy_status.get('complete', False))
 
+# ── Guard Dog (TAK Server hardening / 7 monitors) ─────────────────────────────
+guarddog_deploy_log = []
+guarddog_deploy_status = {'running': False, 'complete': False, 'error': False}
+
+def _guarddog_health_url(settings):
+    """Build the health endpoint URL for this server (for Uptime Robot / display)."""
+    fqdn = (settings.get('fqdn') or '').strip()
+    server_ip = (settings.get('server_ip') or '').strip()
+    if fqdn:
+        return f"http://{fqdn.split(':')[0]}:8080/health"
+    if server_ip:
+        return f"http://{server_ip}:8080/health"
+    return "http://YOUR_SERVER_IP:8080/health"
+
 @app.route('/guarddog')
 @login_required
 def guarddog_page():
-    return redirect(url_for('marketplace_page'))
+    settings = load_settings()
+    modules = detect_modules()
+    gd = modules.get('guarddog', {})
+    tak = modules.get('takserver', {})
+    relay = settings.get('email_relay', {})
+    email_relay_configured = bool(relay.get('relay_host') and relay.get('smtp_user'))
+    return render_template_string(GUARDDOG_TEMPLATE,
+        settings=settings, gd=gd, tak=tak, version=VERSION,
+        guarddog_alert_email=settings.get('guarddog_alert_email', ''),
+        guarddog_uptimerobot_api_key=settings.get('guarddog_uptimerobot_api_key', ''),
+        guarddog_sms=settings.get('guarddog_sms', {}),
+        email_relay_configured=email_relay_configured,
+        health_url=_guarddog_health_url(settings),
+        deploying=guarddog_deploy_status.get('running', False),
+        deploy_done=guarddog_deploy_status.get('complete', False))
+
+@app.route('/api/guarddog/deploy', methods=['POST'])
+@login_required
+def guarddog_deploy_api():
+    if guarddog_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    data = request.json or {}
+    alert_email = (data.get('alert_email') or '').strip()
+    settings = load_settings()
+    if not alert_email:
+        alert_email = (settings.get('guarddog_alert_email') or '').strip()
+    if not alert_email:
+        return jsonify({'error': 'At least one alert email address is required'}), 400
+    settings['guarddog_alert_email'] = alert_email
+    save_settings(settings)
+    guarddog_deploy_log.clear()
+    guarddog_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_guarddog_deploy, args=(alert_email,), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/guarddog/deploy/log')
+@login_required
+def guarddog_deploy_log_api():
+    idx = request.args.get('index', 0, type=int)
+    return jsonify({'entries': guarddog_deploy_log[idx:], 'total': len(guarddog_deploy_log),
+        'running': guarddog_deploy_status['running'], 'complete': guarddog_deploy_status['complete'],
+        'error': guarddog_deploy_status['error']})
+
+@app.route('/api/guarddog/uninstall', methods=['POST'])
+@login_required
+def guarddog_uninstall():
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
+              'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+    for t in timers:
+        subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
+    for name in timers + ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
+                          'taknetguard.service', 'takprocessguard.service', 'takcertguard.service', 'tak-health.service']:
+        path = os.path.join('/etc/systemd/system', name)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    if os.path.exists('/opt/tak-guarddog'):
+        shutil.rmtree('/opt/tak-guarddog', ignore_errors=True)
+    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+    return jsonify({'success': True})
+
+@app.route('/api/guarddog/uptimerobot/add-monitor', methods=['POST'])
+@login_required
+def guarddog_uptimerobot_add():
+    """Create a new Uptime Robot monitor for the health endpoint (free API)."""
+    data = request.json or {}
+    api_key = (data.get('api_key') or '').strip()
+    settings = load_settings()
+    if not api_key:
+        api_key = (settings.get('guarddog_uptimerobot_api_key') or '').strip()
+    if not api_key:
+        return jsonify({'success': False, 'error': 'Uptime Robot API key required'}), 400
+    url = (data.get('url') or '').strip() or _guarddog_health_url(settings)
+    friendly_name = (data.get('friendly_name') or '').strip() or f"TAK Server Health ({settings.get('server_ip', '')})"
+    try:
+        import urllib.request
+        body = f"api_key={urllib.parse.quote(api_key)}&url={urllib.parse.quote(url)}&friendly_name={urllib.parse.quote(friendly_name)}&type=1"
+        req = urllib.request.Request('https://api.uptimerobot.com/v2/newMonitor', data=body.encode(), method='POST', headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            out = json.loads(r.read().decode())
+        if out.get('stat') != 'ok':
+            return jsonify({'success': False, 'error': out.get('error', {}).get('message', 'Unknown error')}), 400
+        if not settings.get('guarddog_uptimerobot_api_key'):
+            settings['guarddog_uptimerobot_api_key'] = api_key
+            save_settings(settings)
+        mon = out.get('monitor', {})
+        return jsonify({'success': True, 'monitor_id': mon.get('id'), 'message': 'Monitor created'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/guarddog/test-email', methods=['POST'])
+@login_required
+def guarddog_test_email():
+    """Send a test email to the configured Guard Dog alert address (uses Email Relay / Brevo when deployed)."""
+    settings = load_settings()
+    data = request.json or {}
+    to_addr = data.get('to', '').strip() or (settings.get('guarddog_alert_email') or '').strip()
+    if not to_addr:
+        return jsonify({'success': False, 'error': 'No email address configured'}), 400
+    if data.get('save'):
+        settings['guarddog_alert_email'] = to_addr
+        save_settings(settings)
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        relay = settings.get('email_relay', {})
+        from_addr = relay.get('from_addr', 'noreply@localhost')
+        from_name = relay.get('from_name', 'Guard Dog')
+        msg = MIMEText('Test alert from infra-TAK Guard Dog.\n\nIf you received this, email notifications are working (via Email Relay/Brevo when deployed).', 'plain')
+        msg['From'] = f'{from_name} <{from_addr}>'
+        msg['To'] = to_addr
+        msg['Subject'] = 'Guard Dog Test Alert'
+        with smtplib.SMTP('localhost', 25, timeout=15) as s:
+            s.sendmail(from_addr, [to_addr], msg.as_string())
+        return jsonify({'success': True, 'message': f'Test email sent to {to_addr}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/guarddog/sms/save', methods=['POST'])
+@login_required
+def guarddog_sms_save():
+    """Save SMS provider config (Twilio or Brevo) and write sms_send.sh for watch scripts."""
+    data = request.json or {}
+    provider = (data.get('provider') or '').strip().lower()
+    settings = load_settings()
+    if provider not in ('twilio', 'brevo', ''):
+        return jsonify({'success': False, 'error': 'Provider must be Twilio, Brevo, or empty to disable'}), 400
+    if provider == '':
+        settings['guarddog_sms'] = {}
+        save_settings(settings)
+        for path in ['/opt/tak-guarddog/sms_send.sh', '/opt/tak-guarddog/sms_send.py']:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        return jsonify({'success': True, 'message': 'SMS disabled'})
+    if provider == 'twilio':
+        account_sid = (data.get('account_sid') or '').strip()
+        auth_token = (data.get('auth_token') or '').strip()
+        from_number = (data.get('from_number') or '').strip()
+        to_numbers = (data.get('to_numbers') or '').strip()
+        if not all([account_sid, auth_token, from_number, to_numbers]):
+            return jsonify({'success': False, 'error': 'Twilio: Account SID, Auth Token, From number, and To number(s) required'}), 400
+        settings['guarddog_sms'] = {'provider': 'twilio', 'account_sid': account_sid, 'auth_token': auth_token, 'from_number': from_number, 'to_numbers': to_numbers}
+    else:
+        api_key = (data.get('api_key') or '').strip()
+        sender = (data.get('sender') or '').strip()
+        to_numbers = (data.get('to_numbers') or '').strip()
+        if not all([api_key, sender, to_numbers]):
+            return jsonify({'success': False, 'error': 'Brevo: API key, Sender (max 11 chars), and To number(s) with country code required'}), 400
+        settings['guarddog_sms'] = {'provider': 'brevo', 'api_key': api_key, 'sender': sender, 'to_numbers': to_numbers}
+    save_settings(settings)
+    _guarddog_write_sms_send_script(settings)
+    return jsonify({'success': True, 'message': 'SMS settings saved'})
+
+def _guarddog_write_sms_send_script(settings):
+    """Write /opt/tak-guarddog/sms_send.sh that watch scripts can call to send SMS via console API."""
+    sms = settings.get('guarddog_sms', {})
+    if not sms or not sms.get('provider'):
+        return
+    os.makedirs('/opt/tak-guarddog', exist_ok=True)
+    py_script = '''#!/usr/bin/env python3
+import urllib.request, json, sys
+if len(sys.argv) < 3:
+    sys.exit(0)
+subj, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: body = f.read()
+except Exception:
+    body = subj
+data = json.dumps({"subject": subj, "body": body}).encode()
+req = urllib.request.Request("http://127.0.0.1:5001/api/guarddog/send-sms", data=data, headers={"Content-Type": "application/json"}, method="POST")
+try:
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+'''
+    sh_script = '''#!/bin/bash
+SUBJ="$1"
+BODY_FILE="$2"
+[ -z "$BODY_FILE" ] || [ ! -f "$BODY_FILE" ] && exit 0
+/usr/bin/python3 /opt/tak-guarddog/sms_send.py "$SUBJ" "$BODY_FILE"
+'''
+    for name, content in [('sms_send.py', py_script), ('sms_send.sh', sh_script)]:
+        p = os.path.join('/opt/tak-guarddog', name)
+        with open(p, 'w') as f:
+            f.write(content)
+        os.chmod(p, 0o755)
+
+@app.route('/api/guarddog/send-sms', methods=['POST'])
+def guarddog_send_sms():
+    """Called by Guard Dog scripts (localhost only) to send SMS via Twilio or Brevo."""
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'error': 'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    subj = (data.get('subject') or '')[:100]
+    body = (data.get('body') or '')[:1600]
+    settings = load_settings()
+    sms = settings.get('guarddog_sms', {})
+    if not sms or sms.get('provider') not in ('twilio', 'brevo'):
+        return jsonify({'error': 'SMS not configured'}), 400
+    try:
+        if sms.get('provider') == 'twilio':
+            import base64
+            account_sid = sms.get('account_sid', '')
+            auth_token = sms.get('auth_token', '')
+            from_num = sms.get('from_number', '')
+            to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+            if not to_list:
+                return jsonify({'error': 'No To numbers'}), 400
+            text = f"{subj}: {body}"[:1600]
+            auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+            for to_num in to_list:
+                req_body = f"To={urllib.parse.quote('+' + to_num.lstrip('+'))}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
+                req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
+                urllib.request.urlopen(req, timeout=15)
+        else:
+            api_key = sms.get('api_key', '')
+            sender = (sms.get('sender', '') or 'GuardDog')[:11]
+            to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+            if not to_list:
+                return jsonify({'error': 'No To numbers'}), 400
+            text = f"{subj}: {body}"[:1600]
+            for to_num in to_list:
+                payload = json.dumps({'sender': sender, 'recipient': to_num.lstrip('+'), 'content': text, 'type': 'transactional'}).encode()
+                req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json'})
+                urllib.request.urlopen(req, timeout=15)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def run_guarddog_deploy(alert_email):
+    """Deploy Guard Dog: 7 monitors + health endpoint. Requires TAK Server at /opt/tak. Alert email required."""
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        guarddog_deploy_log.append(entry)
+    alert_sms = ''  # Optional SMS; scripts accept empty
+    try:
+        if not os.path.exists('/opt/tak'):
+            plog("✗ TAK Server not found at /opt/tak. Deploy TAK Server first.")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("━━━ Guard Dog deployment ━━━")
+        scripts_dir = os.path.join(BASE_DIR, 'scripts', 'guarddog')
+        if not os.path.isdir(scripts_dir):
+            plog(f"✗ Scripts directory not found: {scripts_dir}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        for d in ['/opt/tak-guarddog', '/var/lib/takguard', '/var/log/takguard']:
+            os.makedirs(d, exist_ok=True)
+        plog("✓ Directories created")
+        script_files = [
+            'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
+            'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-health-endpoint.py'
+        ]
+        for name in script_files:
+            src = os.path.join(scripts_dir, name)
+            if not os.path.isfile(src):
+                plog(f"✗ Missing script: {name}")
+                guarddog_deploy_status.update({'running': False, 'error': True})
+                return
+            content = open(src, 'r').read()
+            content = content.replace('ALERT_EMAIL_PLACEHOLDER', alert_email).replace('ALERT_SMS_PLACEHOLDER', alert_sms or '')
+            dest = os.path.join('/opt/tak-guarddog', name)
+            with open(dest, 'w') as f:
+                f.write(content)
+            if name.endswith('.sh'):
+                os.chmod(dest, 0o755)
+        plog("✓ Scripts installed")
+        units = [
+            ('tak8089guard.service', '[Unit]\nDescription=TAK 8089 Health Guard Dog\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-8089-watch.sh\n'),
+            ('tak8089guard.timer', '[Unit]\nDescription=Run TAK 8089 guard dog every 1 minute\n\n[Timer]\nOnBootSec=10min\nOnUnitActiveSec=1min\nUnit=tak8089guard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takoomguard.service', '[Unit]\nDescription=TAK OOM Guard Dog\nAfter=takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-oom-watch.sh\n'),
+            ('takoomguard.timer', '[Unit]\nDescription=Run TAK OOM guard dog every 1 minute\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1min\nUnit=takoomguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takdiskguard.service', '[Unit]\nDescription=TAK Disk Space Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-disk-watch.sh\n'),
+            ('takdiskguard.timer', '[Unit]\nDescription=Run TAK disk monitor every hour\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=1h\nUnit=takdiskguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takdbguard.service', '[Unit]\nDescription=TAK PostgreSQL Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-db-watch.sh\n'),
+            ('takdbguard.timer', '[Unit]\nDescription=Run TAK DB monitor every 5 minutes\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=5min\nUnit=takdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('taknetguard.service', '[Unit]\nDescription=TAK Network Monitor\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-network-watch.sh\n'),
+            ('taknetguard.timer', '[Unit]\nDescription=TAK Network Monitor Timer\nRequires=taknetguard.service\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takprocessguard.service', '[Unit]\nDescription=TAK Server Process Monitor\nAfter=network.target takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-process-watch.sh\n'),
+            ('takprocessguard.timer', '[Unit]\nDescription=TAK Server Process Monitor Timer\nRequires=takprocessguard.service\n\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takcertguard.service', '[Unit]\nDescription=TAK Certificate Expiry Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cert-watch.sh\n'),
+            ('takcertguard.timer', '[Unit]\nDescription=Run TAK cert monitor daily\n\n[Timer]\nOnBootSec=1h\nOnUnitActiveSec=1d\nUnit=takcertguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('tak-health.service', '[Unit]\nDescription=TAK Server Health Check Endpoint\nAfter=network.target takserver.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-health-endpoint.py\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n'),
+        ]
+        for name, content in units:
+            path = os.path.join('/etc/systemd/system', name)
+            with open(path, 'w') as f:
+                f.write(content)
+        plog("✓ Systemd units installed")
+        r = subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            plog(f"✗ daemon-reload failed: {r.stderr}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
+                  'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+        for t in timers:
+            subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
+            subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+        for f in ['process_alert_sent', 'disk_alert_sent', 'db_alert_sent', 'network_alert_sent', 'cert_alert_sent']:
+            p = os.path.join('/var/lib/takguard', f)
+            if not os.path.exists(p):
+                open(p, 'a').close()
+        plog("✓ Timers and health endpoint started")
+        plog("✓ Deployment complete")
+        guarddog_deploy_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        plog(f"✗ Error: {str(e)}")
+        guarddog_deploy_status.update({'running': False, 'error': True})
 
 @app.route('/nodered')
 @login_required
@@ -4690,6 +5029,143 @@ function control(action){document.getElementById('control-status').textContent=a
 fetch('/api/nodered/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){document.getElementById('control-status').textContent=d.running?'Running':'Stopped';setTimeout(function(){window.location.href=window.location.pathname+'?t='+Date.now();},1500);});}
 function loadLogs(){document.getElementById('logs-card').style.display='block';fetch('/api/nodered/logs?lines=80').then(function(r){return r.json();}).then(function(d){document.getElementById('container-logs').textContent=(d.entries||[]).join(String.fromCharCode(10))||'(no output)';});}
 function doUninstall(){var pw=document.getElementById('uninstall-password').value,msg=document.getElementById('uninstall-msg');msg.textContent='';fetch('/api/nodered/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){msg.textContent=d.error;return;}msg.textContent='Done. Reloading...';setTimeout(function(){location.reload();},800);}).catch(function(e){msg.textContent=e.message||'Request failed';});}
+</script>
+</body></html>
+'''
+
+GUARDDOG_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Guard Dog — infra-TAK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
+.page-header{margin-bottom:28px}.page-header h1{font-size:22px;font-weight:700}.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+.status-banner{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-size:13px}
+.status-banner.running{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:var(--green)}
+.status-banner.stopped{background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);color:var(--yellow)}
+.status-banner.not-installed{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none}
+.btn-primary{background:var(--accent);color:#fff}.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;max-width:400px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
+.log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;white-space:pre-wrap}
+.guard-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.guard-item{background:#0a0e1a;border-radius:8px;padding:12px;font-size:12px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+</style></head>
+<body>
+{{ sidebar_html }}
+<div class="main">
+  <div class="page-header"><h1>&#128054; Guard Dog</h1><p>TAK Server health monitoring and auto-recovery (7 monitors + health endpoint)</p></div>
+  {% if gd.running %}<div class="status-banner running"><div class="dot"></div>Guard Dog is running (timers active)</div>
+  {% elif gd.installed %}<div class="status-banner stopped"><div class="dot"></div>Guard Dog is installed but timers may be stopped</div>
+  {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed</div>{% endif %}
+
+  {% if not tak.installed %}
+  <div class="card" style="border-color:var(--yellow)">
+    <div class="card-title">Requirement</div>
+    <p style="color:var(--text-secondary);font-size:13px">TAK Server must be installed first. Deploy TAK Server from the TAK Server module, then return here to deploy Guard Dog.</p>
+  </div>
+  {% endif %}
+
+  {% if gd.installed %}
+  <div class="card"><div class="card-title">Monitors</div>
+    <div class="guard-list">
+      <div class="guard-item">Port 8089 (1 min)</div><div class="guard-item">Process (1 min)</div><div class="guard-item">Network (1 min)</div>
+      <div class="guard-item">PostgreSQL (5 min)</div><div class="guard-item">OOM (1 min)</div><div class="guard-item">Disk (1 hr)</div><div class="guard-item">Certificate (daily)</div>
+    </div>
+    <p style="margin-top:12px;font-size:12px;color:var(--text-dim)">Health endpoint: <code style="color:var(--cyan)">{{ health_url }}</code></p>
+    <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
+  </div>
+  {% endif %}
+
+  <div class="card"><div class="card-title">Notifications</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts.</p>
+    <div class="gd-section" style="margin-bottom:20px">
+      <div class="form-label">Email</div>
+      {% if email_relay_configured %}<p style="font-size:12px;color:var(--green);margin-bottom:8px">Using Email Relay (e.g. Brevo SMTP). Alerts are sent through your configured relay.</p>{% endif %}
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <input class="form-input" type="email" id="gd-notify-email" placeholder="Alert email" value="{{ guarddog_alert_email }}" style="max-width:280px">
+        <button class="btn btn-ghost" id="gd-test-email-btn" onclick="gdTestEmail()">Send test email</button>
+      </div>
+      <div id="gd-test-email-msg" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div class="gd-section" style="margin-bottom:20px">
+      <div class="form-label">Uptime Robot (free)</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Add a monitor that pings the health endpoint. Get your API key from <a href="https://uptimerobot.com/mySettings" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">My Settings</a>.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px">
+        <input class="form-input" type="password" id="gd-ur-api-key" placeholder="API key" value="{{ guarddog_uptimerobot_api_key }}" style="max-width:280px" autocomplete="off">
+        <button class="btn btn-ghost" id="gd-ur-add-btn" onclick="gdUptimeRobotAdd()">Add monitor to Uptime Robot</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim)">Health URL: <code style="word-break:break-all">{{ health_url }}</code></p>
+      <div id="gd-ur-msg" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div class="gd-section">
+      <div class="form-label">SMS (optional)</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">Use Twilio or Brevo to send SMS for critical alerts.</p>
+      <select class="form-input" id="gd-sms-provider" style="max-width:120px;margin-bottom:10px" onchange="gdSmsProviderChange()">
+        <option value="">Off</option>
+        <option value="twilio" {{ 'selected' if guarddog_sms.get('provider')=='twilio' else '' }}>Twilio</option>
+        <option value="brevo" {{ 'selected' if guarddog_sms.get('provider')=='brevo' else '' }}>Brevo</option>
+      </select>
+      <div id="gd-sms-twilio" style="display:{{ 'block' if guarddog_sms.get('provider')=='twilio' else 'none' }};margin-bottom:10px">
+        <input class="form-input" type="text" id="gd-sms-tw-account" placeholder="Account SID" value="{{ guarddog_sms.get('account_sid','') }}" style="margin-bottom:6px">
+        <input class="form-input" type="password" id="gd-sms-tw-auth" placeholder="Auth Token" value="{{ guarddog_sms.get('auth_token','') }}" style="margin-bottom:6px" autocomplete="off">
+        <input class="form-input" type="text" id="gd-sms-tw-from" placeholder="From number (e.g. +15551234567)" value="{{ guarddog_sms.get('from_number','') }}" style="margin-bottom:6px">
+        <input class="form-input" type="text" id="gd-sms-tw-to" placeholder="To number(s), comma-separated" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
+      </div>
+      <div id="gd-sms-brevo" style="display:{{ 'block' if guarddog_sms.get('provider')=='brevo' else 'none' }};margin-bottom:10px">
+        <input class="form-input" type="password" id="gd-sms-br-api" placeholder="Brevo API key" value="{{ guarddog_sms.get('api_key','') }}" style="margin-bottom:6px" autocomplete="off">
+        <input class="form-input" type="text" id="gd-sms-br-sender" placeholder="Sender (max 11 chars)" value="{{ guarddog_sms.get('sender','') }}" style="margin-bottom:6px">
+        <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To number(s) with country code, comma-separated" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
+      </div>
+      <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
+      <div id="gd-sms-msg" style="margin-top:8px;font-size:12px"></div>
+    </div>
+  </div>
+
+  {% if gd.installed %}
+  <div class="modal-overlay" id="gd-uninstall-modal"><div class="modal" style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw">
+    <h3 style="font-size:16px;margin-bottom:8px;color:var(--red)">Uninstall Guard Dog?</h3>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">This will stop all timers and the health endpoint, and remove scripts and systemd units. Alert history in /var/lib/takguard and /var/log/takguard is left in place.</p>
+    <div style="margin-bottom:16px"><label class="form-label">Admin password</label><input class="form-input" type="password" id="gd-uninstall-password" placeholder="Confirm password"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn btn-ghost" onclick="document.getElementById('gd-uninstall-modal').classList.remove('open')">Cancel</button><button class="btn" style="background:var(--red);color:#fff" onclick="gdUninstall()">Uninstall</button></div>
+    <div id="gd-uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+  </div></div>
+  {% else %}
+  <div class="card"><div class="card-title">Deploy Guard Dog</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 7 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Alerts are sent by email. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed).</p>
+    <div style="margin-bottom:16px"><label class="form-label">Alert email address (required)</label><input class="form-input" type="email" id="guarddog-email" placeholder="admin@example.com" value="{{ guarddog_alert_email }}"></div>
+    <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>&#128054; Deploy Guard Dog</button>
+  </div>
+  {% endif %}
+
+  <div class="card" id="gd-log-card" style="display:none"><div class="card-title">Deploy log</div><div class="log-box" id="gd-deploy-log">Initializing...</div></div>
+</div>
+<script>
+var gdLogIndex=0,gdLogInterval=null;
+function startGuarddogDeploy(){var btn=document.getElementById('gd-deploy-btn');var email=document.getElementById('guarddog-email');if(email&&!email.value.trim()){alert('Please enter an alert email address');return;}if(btn)btn.disabled=true;document.getElementById('gd-log-card').style.display='block';document.getElementById('gd-deploy-log').textContent='Starting...';gdLogIndex=0;
+fetch('/api/guarddog/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alert_email:(email&&email.value.trim())||''}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+if(d.error){document.getElementById('gd-deploy-log').textContent='Error: '+d.error;if(btn)btn.disabled=false;return;}gdPollLog();});}
+function gdPollLog(){var logEl=document.getElementById('gd-deploy-log');function poll(){fetch('/api/guarddog/deploy/log?index='+gdLogIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+if(d.entries&&d.entries.length){if(gdLogIndex===0&&logEl)logEl.textContent='';if(logEl){logEl.textContent+=d.entries.join(String.fromCharCode(10))+String.fromCharCode(10);logEl.scrollTop=logEl.scrollHeight;}gdLogIndex+=d.entries.length;}
+if(!d.running){clearInterval(gdLogInterval);var btn=document.getElementById('gd-deploy-btn');if(btn)btn.disabled=false;if(d.complete){logEl.textContent+=String.fromCharCode(10,10)+'Deploy complete. Refreshing...';setTimeout(function(){location.reload();},2000);}}});}poll();gdLogInterval=setInterval(poll,800);}
+if ({{ 'true' if deploying else 'false' }}) { var c=document.getElementById('gd-log-card');if(c)c.style.display='block';gdPollLog(); }
+function gdUninstall(){var pw=document.getElementById('gd-uninstall-password');var msg=document.getElementById('gd-uninstall-msg');if(!pw||!msg)return;msg.textContent='';fetch('/api/guarddog/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw.value}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){msg.textContent=d.error;return;}msg.textContent='Done. Reloading...';document.getElementById('gd-uninstall-modal').classList.remove('open');setTimeout(function(){location.reload();},800);}).catch(function(e){msg.textContent=e.message||'Request failed';});}
+function gdTestEmail(){var el=document.getElementById('gd-test-email-msg');var btn=document.getElementById('gd-test-email-btn');var email=document.getElementById('gd-notify-email');var to=(email&&email.value)?email.value.trim():'';if(!to){el.textContent='Enter an email address.';el.style.color='var(--red)';return;}el.textContent='Sending...';el.style.color='var(--text-dim)';if(btn)btn.disabled=true;fetch('/api/guarddog/test-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,save:true}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(btn)btn.disabled=false;if(d.success){el.textContent=d.message||'Sent.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){if(btn)btn.disabled=false;el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
+function gdUptimeRobotAdd(){var el=document.getElementById('gd-ur-msg');var btn=document.getElementById('gd-ur-add-btn');var key=document.getElementById('gd-ur-api-key');var apiKey=(key&&key.value)?key.value.trim():'';if(!apiKey){el.textContent='Enter your Uptime Robot API key.';el.style.color='var(--red)';return;}el.textContent='Adding monitor...';el.style.color='var(--text-dim)';if(btn)btn.disabled=true;fetch('/api/guarddog/uptimerobot/add-monitor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:apiKey}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(btn)btn.disabled=false;if(d.success){el.textContent=d.message||'Monitor created.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){if(btn)btn.disabled=false;el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
+function gdSmsProviderChange(){var p=document.getElementById('gd-sms-provider');var v=p?p.value:'';document.getElementById('gd-sms-twilio').style.display=(v==='twilio')?'block':'none';document.getElementById('gd-sms-brevo').style.display=(v==='brevo')?'block':'none';}
+function gdSmsSave(){var el=document.getElementById('gd-sms-msg');var p=document.getElementById('gd-sms-provider');var provider=(p&&p.value)?p.value.trim():'';var body={provider:provider};if(provider==='twilio'){body.account_sid=document.getElementById('gd-sms-tw-account').value.trim();body.auth_token=document.getElementById('gd-sms-tw-auth').value;body.from_number=document.getElementById('gd-sms-tw-from').value.trim();body.to_numbers=document.getElementById('gd-sms-tw-to').value.trim();}else if(provider==='brevo'){body.api_key=document.getElementById('gd-sms-br-api').value;body.sender=document.getElementById('gd-sms-br-sender').value.trim();body.to_numbers=document.getElementById('gd-sms-br-to').value.trim();}el.textContent='Saving...';el.style.color='var(--text-dim)';fetch('/api/guarddog/sms/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.success){el.textContent=d.message||'Saved.';el.style.color='var(--green)';}else{el.textContent=d.error||'Failed';el.style.color='var(--red)';}}).catch(function(e){el.textContent=e.message||'Request failed';el.style.color='var(--red)';});}
 </script>
 </body></html>
 '''
