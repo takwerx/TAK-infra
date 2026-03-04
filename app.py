@@ -11115,13 +11115,20 @@ def api_toggle_unattended_upgrades():
         return jsonify({'success': False, 'error': 'action must be enable or disable'}), 400
     try:
         if action == 'disable':
+            # Kill in-flight process first so systemctl stop doesn't hang waiting for it
+            subprocess.run('pkill -TERM -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+            for _ in range(8):
+                time.sleep(1)
+                r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=3)
+                if not (r.stdout or '').strip():
+                    break
+            else:
+                subprocess.run('pkill -9 -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+                time.sleep(2)
             subprocess.run('systemctl stop unattended-upgrades && systemctl disable unattended-upgrades',
-                shell=True, check=True, capture_output=True, text=True, timeout=30)
-            # Ubuntu/Debian also run unattended-upgrade via apt-daily-upgrade.timer; disable that too
+                shell=True, check=True, capture_output=True, text=True, timeout=15)
             subprocess.run('systemctl stop apt-daily-upgrade.timer 2>/dev/null; systemctl disable apt-daily-upgrade.timer 2>/dev/null; true',
                 shell=True, timeout=10)
-            # Kill any in-flight unattended-upgrade process so deploys don't wait; user explicitly disabled
-            subprocess.run('pkill -TERM -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
         else:
             subprocess.run('systemctl enable unattended-upgrades && systemctl start unattended-upgrades',
                 shell=True, check=True, capture_output=True, text=True, timeout=30)
