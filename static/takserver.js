@@ -93,6 +93,21 @@ async function loadCertExpiry(){
       h+='</div>';
     }
     el.innerHTML=h||'No certificates found.';
+    var banner=document.getElementById('cert-expiry-banner');
+    if(banner){
+      var bh='';
+      for(var j=0;j<certs.length;j++){
+        var bk=certs[j][0],bl=certs[j][1],bc=d[bk];
+        if(!bc||bc.error)continue;
+        var bd=bc.days_left,bcolor='var(--green)';
+        if(bd<=90)bcolor='var(--red)';else if(bd<=365)bcolor='var(--yellow)';
+        var byrs=Math.floor(bd/365),brem=bd%365,bmo=Math.floor(brem/30),bdd=brem%30;
+        var bp=[];if(byrs>0)bp.push(byrs+'y');if(bmo>0)bp.push(bmo+'mo');if(bdd>0||bp.length===0)bp.push(bdd+'d');
+        if(bh)bh+=' &middot; ';
+        bh+=bl+' <span style="color:'+bcolor+';font-weight:600">'+bp.join(' ')+'</span>';
+      }
+      banner.innerHTML=bh;
+    }
   }catch(e){el.textContent='Failed to load certificate info';}
 }
 async function refreshCotSize(){var el=document.getElementById('cot-db-size');if(!el)return;el.textContent='...';el.style.color='';try{var r=await fetch('/api/takserver/cot-db-size');var d=await r.json();if(d.error){el.textContent=d.error;}else{el.textContent=d.size_human||'-';var b=d.size_bytes;if(typeof b==='number'){var gb25=25*1024*1024*1024;var gb40=40*1024*1024*1024;if(b<gb25)el.style.color='var(--green)';else if(b<gb40)el.style.color='var(--yellow)';else el.style.color='var(--red)';}}}catch(e){el.textContent='Error';}}
