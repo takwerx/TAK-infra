@@ -1,6 +1,15 @@
 # infra-TAK v0.1.9
 
-Release Date: 2026-03-03
+Release Date: 2026-03-04
+
+---
+
+## Guard Dog — UX and Hardening (v0.1.9-alpha)
+
+- **Sidebar:** Guard Dog appears **directly under Console** when installed (high-priority placement).
+- **Apply Docker log limits:** Button on the Guard Dog page applies 50 MB × 3 files per container (no redeploy of Authentik, Node-RED, etc.). Reduces risk of a single container log filling the disk.
+- **Collapsible sections:** Notifications, Database maintenance (CoT), and Activity log are collapsible (click header to expand/collapse), matching TAK Server and Help page style.
+- **4GB swap on deploy:** When Guard Dog is deployed (or auto-deployed with TAK Server), the console ensures a 4GB swap file at `/swapfile` exists and is enabled (from reference TAK Server Hardening script — memory stability under load).
 
 ---
 
@@ -80,15 +89,17 @@ Removed hidden "Manage" ghost elements from module cards for consistent card hei
 
 ## Changes
 
-- `app.py`: Guard Dog deploy (9 monitors + service monitors), TAK Server update flow, client cert creation, cert expiry API, Intermediate CA rotation, Root CA rotation, revoke old CA, ca-info API, collapsible sections, console dashboard cert expiry, Help page overhaul
+- `app.py`: Guard Dog deploy (9 monitors + service monitors, 4GB swap on deploy), Guard Dog sidebar under Console, Apply Docker log limits API + card, collapsible Guard Dog sections (Notifications, DB maintenance, Activity log), TAK Server update flow, client cert creation, cert expiry API, Intermediate CA rotation, Root CA rotation, revoke old CA, ca-info API, collapsible TAK Server/Help sections, console dashboard cert expiry
 - `static/takserver.js`: Extracted TAK Server inline JS to external file
-- `static/guarddog.js`: Guard Dog page JavaScript
+- `static/guarddog.js`: Guard Dog page JavaScript, `gdSectionToggle`, `gdApplyDockerLogLimits`
 - `scripts/guarddog/`: All monitor scripts, health endpoint, SMS helper
 - `docs/TAK_Server_OpenAPI_v0.json`: In-repo TAK Server OpenAPI 3.1 spec
 - `docs/REFERENCES.md`: Added OpenAPI spec reference
-- `docs/GUARDDOG.md`: Updated with Root CA / Int CA monitor and rotation workflow
+- `docs/GUARDDOG.md`: Root CA / Int CA monitor and rotation workflow, 4GB swap, Docker log limits
+- `docs/COMMANDS.md`: Pull dev only, restart console, pull+restart, disk full / container logs
+- `docs/DISK-AND-LOGS.md`: Disk full recovery, Docker log limits, optional journal/prune
 - `docs/HANDOFF-LDAP-AUTHENTIK.md`: Full v0.1.9 session state
 
 ## Status
 
-All modules production-ready. Guard Dog fully operational. Certificate lifecycle management (create, rotate, revoke) verified.
+All modules production-ready. Guard Dog fully operational (monitors, 4GB swap, Docker log limits button, collapsible UI). Certificate lifecycle management (create, rotate, revoke) verified.

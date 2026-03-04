@@ -16,20 +16,22 @@ A unified web console for deploying and managing TAK ecosystem infrastructure:
 - **MediaMTX** — Video streaming server for real-time feeds
 - **Node-RED** — Flow-based automation engine, protected behind Authentik forward auth
 - **Email Relay** — Outbound email for notifications and alerts
-- **Guard Dog** — Network monitoring and intrusion detection *(in development)*
+- **Guard Dog** — TAK Server health monitoring and auto-recovery (port 8089, processes, OOM, PostgreSQL, CoT DB size, disk, certificates; optional monitors for Authentik, Node-RED, MediaMTX, CloudTAK)
 
-*All modules except Guard Dog are production-ready.*
+*All modules are production-ready.*
 
 No more SSH. No more editing XML by hand. No more running scripts and hoping.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/takwerx/infra-TAK.git
+git clone -b dev https://github.com/takwerx/infra-TAK.git
 cd infra-TAK
 chmod +x start.sh
 sudo ./start.sh
 ```
+
+For the stable branch use `git clone https://github.com/takwerx/infra-TAK.git` (no `-b dev`).
 
 The script will:
 1. Detect your OS (Ubuntu 22.04, Rocky 9)
@@ -143,12 +145,25 @@ start.sh                    ← One CLI command to launch everything
 ## Design notes
 
 - **[References](docs/REFERENCES.md)** — Canonical links (e.g. [TAK Server API](https://docs.tak.gov/api/takserver)) for development and integration.
-- **[Guard Dog](docs/GUARDDOG.md)** — How Guard Dog works: monitors, 15‑minute boot delay and cooldowns, TAK Server soft start (after PostgreSQL and network), and restart-loop protection.
+- **[Guard Dog](docs/GUARDDOG.md)** — How Guard Dog works: monitors, 15‑minute boot delay and cooldowns, TAK Server soft start (after PostgreSQL and network), 4GB swap on deploy for memory stability, and restart-loop protection. Apply Docker container log limits from the Guard Dog page without redeploying a module.
 - **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal’s open request-access page and Email Relay.
 
 ---
 
 ## Changelog
+
+### v0.1.9-alpha — 2026-03-04
+
+**Guard Dog**
+- Guard Dog appears in the sidebar **directly under Console** when installed (high-priority placement).
+- **Apply Docker log limits** button on the Guard Dog page — set 50 MB × 3 files per container without redeploying Authentik, Node-RED, or another Docker module. Reduces risk of a single container log filling the disk (e.g. Node-RED).
+- **Collapsible sections** on the Guard Dog page: Notifications, Database maintenance (CoT), and Activity log are now collapsible (click header to expand/collapse), matching the TAK Server and Help page style.
+- **4GB swap on deploy** — When Guard Dog is deployed (or auto-deployed with TAK Server), the console ensures a 4GB swap file at `/swapfile` exists and is enabled. Matches the reference TAK Server Hardening script for memory stability under load.
+
+**Docs**
+- [GUARDDOG.md](docs/GUARDDOG.md) documents the 4GB swap step and Docker log limits. [COMMANDS.md](docs/COMMANDS.md) has pull/restart one-liners and disk-full recovery.
+
+---
 
 ### v0.1.8-alpha — 2026-03-02
 
