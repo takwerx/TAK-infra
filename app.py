@@ -822,6 +822,7 @@ def _guarddog_send_sms_now(sms, text):
     text = (text or '')[:1600]
     if sms.get('provider') == 'twilio':
         import base64
+        import urllib.error
         account_sid = sms.get('account_sid', '')
         auth_token = sms.get('auth_token', '')
         from_num = sms.get('from_number', '')
@@ -830,9 +831,19 @@ def _guarddog_send_sms_now(sms, text):
             raise ValueError('No To numbers configured')
         auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
         for to_num in to_list:
-            req_body = f"To={urllib.parse.quote('+' + to_num.lstrip('+'))}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
+            to_e164 = '+' + ''.join(c for c in to_num if c.isdigit()).lstrip('+') or to_num.lstrip('+')
+            req_body = f"To={urllib.parse.quote(to_e164)}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
             req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
-            urllib.request.urlopen(req, timeout=15)
+            try:
+                urllib.request.urlopen(req, timeout=15)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ''
+                try:
+                    err_json = json.loads(body) if body else {}
+                    msg = err_json.get('message') or str(err_json.get('code', '')) or body[:200] or f'HTTP {e.code}'
+                except Exception:
+                    msg = body[:200] or f'HTTP {e.code}'
+                raise ValueError(f'Twilio SMS: {msg}')
     else:
         import urllib.error
         api_key = sms.get('api_key', '')
@@ -844,8 +855,8 @@ def _guarddog_send_sms_now(sms, text):
             recipient = ''.join(c for c in to_num if c.isdigit())
             if not recipient or len(recipient) < 10:
                 raise ValueError(f'Brevo recipient must be digits with country code (e.g. 15551234567). Got: {to_num[:25]}')
-            payload = json.dumps({'sender': sender, 'recipient': recipient, 'content': text, 'type': 'transactional'}).encode()
-            req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json'})
+            payload = json.dumps({'sender': sender, 'recipient': recipient, 'content': text, 'type': 'transactional', 'tag': 'GuardDog'}).encode()
+            req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json', 'accept': 'application/json'})
             try:
                 urllib.request.urlopen(req, timeout=15)
             except urllib.error.HTTPError as e:
@@ -5349,7 +5360,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
           <span id="gd-sms-sender-warn" style="font-size:12px;color:var(--text-dim);display:none"></span>
         </div>
         <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To: digits + country code, e.g. 15551234567" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
-        <p style="font-size:11px;color:var(--text-dim);margin-top:0">Use digits only for To (no + or spaces). In Brevo: SMS in the sidebar, then configure sender when creating a campaign or under SMS settings. If test fails, the error from Brevo will appear below.</p>
+        <p style="font-size:11px;color:var(--text-dim);margin-top:0">To: digits + country code (e.g. 19512338808). Sender: up to 11 letters/numbers (Brevo has no separate SMS sender page — we send it in the API). If test fails, Brevo’s error appears below.</p>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
