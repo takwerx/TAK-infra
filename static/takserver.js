@@ -183,20 +183,27 @@ async function loadCAInfo(){
     var r=await fetch('/api/takserver/ca-info');
     var d=await r.json();
     var h='';
+    function fmtDays(days){
+      var yrs=Math.floor(days/365),rem=days%365,mo=Math.floor(rem/30),dd=rem%30;
+      var parts=[];if(yrs>0)parts.push(yrs+'y');if(mo>0)parts.push(mo+'mo');if(dd>0||parts.length===0)parts.push(dd+'d');
+      return parts.join(' ');
+    }
     if(d.root_ca){
+      var rd=d.root_ca.days_left,rc='var(--green)';
+      if(rd!==null){if(rd<=90)rc='var(--red)';else if(rd<=365)rc='var(--yellow)';}
       h+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">';
       h+='<span style="color:var(--text-secondary);min-width:140px">Root CA</span>';
       h+='<span style="color:var(--cyan);font-weight:600">'+d.root_ca.name+'</span>';
-      if(d.root_ca.expires)h+='<span style="color:var(--text-dim)">expires '+d.root_ca.expires+'</span>';
+      if(d.root_ca.expires&&rd!==null)h+='<span style="color:'+rc+';font-weight:600">'+fmtDays(rd)+'</span> <span style="color:var(--text-dim)">'+d.root_ca.expires+'</span>';
       h+='</div>';
     }
     if(d.intermediate_ca){
       var days=d.intermediate_ca.days_left,color='var(--green)';
-      if(days<=90)color='var(--red)';else if(days<=365)color='var(--yellow)';
+      if(days!==null){if(days<=90)color='var(--red)';else if(days<=365)color='var(--yellow)';}
       h+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">';
       h+='<span style="color:var(--text-secondary);min-width:140px">Intermediate CA</span>';
       h+='<span style="color:var(--cyan);font-weight:600">'+d.intermediate_ca.name+'</span>';
-      if(d.intermediate_ca.expires)h+='<span style="color:'+color+'">expires '+d.intermediate_ca.expires+' ('+days+'d)</span>';
+      if(d.intermediate_ca.expires&&days!==null)h+='<span style="color:'+color+';font-weight:600">'+fmtDays(days)+'</span> <span style="color:var(--text-dim)">'+d.intermediate_ca.expires+'</span>';
       h+='</div>';
     }
     if(d.truststore_file){

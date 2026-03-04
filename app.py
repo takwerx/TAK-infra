@@ -9659,13 +9659,16 @@ def takserver_ca_info():
             r = subprocess.run(['openssl', 'x509', '-subject', '-enddate', '-noout', '-in', path],
                                capture_output=True, text=True, timeout=5)
             cn = ''
-            for part in r.stdout.replace('subject=', '').split(','):
-                part = part.strip()
-                if part.startswith('CN') or part.startswith('CN '):
-                    cn = part.split('=', 1)[-1].strip()
             expiry_raw = ''
             for line in r.stdout.strip().split('\n'):
-                if 'notAfter' in line:
+                line = line.strip()
+                if line.startswith('subject=') or line.startswith('subject ='):
+                    subj = line.split('=', 1)[-1].strip()
+                    for part in subj.split(','):
+                        part = part.strip()
+                        if part.startswith('CN') or part.startswith('CN '):
+                            cn = part.split('=', 1)[-1].strip()
+                elif 'notAfter' in line:
                     expiry_raw = line.split('=', 1)[-1].strip()
             days_left = None
             expires = ''
