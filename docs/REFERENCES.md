@@ -8,6 +8,10 @@ Canonical links used when working on infra-TAK. Keep these so tooling and docs a
   https://docs.tak.gov/api/takserver  
   Official API reference for TAK Server (endpoints, request/response shapes). Use when implementing or debugging TAK Server integration (e.g. CoreConfig, Marti API, certificates, retention).
 
+- **TAK Server OpenAPI Spec (JSON)**  
+  [docs/TAK_Server_OpenAPI_v0.json](TAK_Server_OpenAPI_v0.json)  
+  In-repo copy of the OpenAPI 3.1 spec (v5.6-RELEASE-14). Machine-readable endpoint definitions, request/response schemas, and parameter types. Use when implementing or verifying TAK Server API calls (e.g. `/Marti/api/groups/all`, `/user-management/api/list-groupnames`).
+
 - **TAK Server Configuration Guide (PDF)**  
   [docs/TAK_Server_Configuration_Guide.pdf](TAK_Server_Configuration_Guide.pdf)  
   In-repo copy (v5.6, Dec 2025). Use when configuring or troubleshooting TAK Server. **Ch. 19 Data Retention Tool** points to the wiki (below) for retention behavior and settings.
