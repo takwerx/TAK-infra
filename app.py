@@ -5355,7 +5355,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
         <span style="font-size:12px;color:var(--text-secondary)">Reclaims space from deleted rows. Safe while TAK Server is running.</span>
       </div>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
-        <button type="button" id="gd-vacuum-full-btn" onclick="gdRunVacuum(true)" class="btn btn-ghost" style="color:var(--yellow);border-color:var(--yellow);flex-shrink:0" title="Caution: run when TAK Server is not running">VACUUM FULL</button>
+        <button type="button" id="gd-vacuum-full-btn" onclick="gdRunVacuum(true)" class="btn btn-ghost" style="color:var(--yellow);border-color:var(--yellow);flex-shrink:0" title="Caution: run when TAK Server is not running">Run VACUUM FULL</button>
         <span style="font-size:12px;color:var(--text-secondary)">Rewrites tables to reclaim more space; locks tables. Run when <strong>TAK Server is not running</strong>. <span style="color:var(--yellow)">(yellow = caution)</span></span>
       </div>
     </div>
@@ -11005,7 +11005,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <span style="font-size:12px;color:var(--text-secondary)">Reclaims space from deleted rows and updates statistics. Safe while TAK Server is running.</span>
 </div>
 <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
-<button type="button" id="vacuum-full-btn" onclick="runVacuum(true)" style="padding:10px 20px;background:rgba(234,179,8,0.2);color:var(--yellow);border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0" title="Caution: run when TAK Server is not running">VACUUM FULL</button>
+<button type="button" id="vacuum-full-btn" onclick="runVacuum(true)" style="padding:10px 20px;background:rgba(234,179,8,0.2);color:var(--yellow);border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0" title="Caution: run when TAK Server is not running">Run VACUUM FULL</button>
 <span style="font-size:12px;color:var(--text-secondary)">Rewrites tables to reclaim more space; locks tables. Run when <strong>TAK Server is not running</strong>. <span style="color:var(--yellow)">(yellow = caution)</span></span>
 </div>
 </div>
