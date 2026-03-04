@@ -1,6 +1,6 @@
 # infra-TAK
 
-Tea Awarness Kit Infrastructure Management Platform.
+Team Awarness Kit Infrastructure Management Platform.
 
 One clone. One password. One URL. Manage everything from your browser.
 
