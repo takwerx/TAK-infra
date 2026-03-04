@@ -11286,10 +11286,14 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div id="services-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading services...</div>
 </div>
-<div class="section-title">Database maintenance (CoT)</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">The CoT (Cursor on Target) database can grow large. Data retention deletes old rows, but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE periodically to reclaim space (safe while TAK Server is running).</p>
-<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">CoT database size: <span id="cot-db-size" style="font-weight:600">-</span> <button type="button" onclick="refreshCotSize()" style="margin-left:8px;padding:2px 10px;background:transparent;color:var(--cyan);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Refresh</button> <span style="font-size:10px;color:var(--text-dim);margin-left:6px">(green &lt; 25 GB · yellow 25–40 GB · red &gt; 40 GB)</span></p>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('cot-db')">
+<span class="section-title" style="margin-bottom:0">Database Maintenance (CoT)</span>
+<span id="cot-db-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="cot-db-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px;padding-top:16px">The CoT (Cursor on Target) database can grow large. Data retention deletes old rows, but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE periodically to reclaim space (safe while TAK Server is running).</p>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">CoT database size: <span id="cot-db-size" style="font-weight:600">-</span> <button type="button" onclick="refreshCotSize()" style="margin-left:8px;padding:2px 10px;background:transparent;color:var(--cyan);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Refresh</button> <span style="font-size:10px;color:var(--text-dim);margin-left:6px">(green &lt; 25 GB · yellow 25-40 GB · red &gt; 40 GB)</span></p>
 <div style="display:flex;flex-direction:column;gap:12px">
 <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
 <button type="button" id="vacuum-analyze-btn" onclick="runVacuum(false)" style="padding:10px 20px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0">Run VACUUM ANALYZE</button>
@@ -11303,24 +11307,34 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="vacuum-output" style="display:none;margin-top:14px;padding:12px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
 <div id="vacuum-msg" style="margin-top:8px;font-size:13px"></div>
 </div>
-<div class="section-title">Certificates</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('certs')">
+<span class="section-title" style="margin-bottom:0">Certificates</span>
+<span id="certs-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="certs-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-top:16px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;&middot;&nbsp; /opt/tak/certs/files/</div>
 <a href="/certs" class="cert-btn cert-btn-secondary" style="text-decoration:none">📁 Browse Certificates</a>
 </div>
 <div id="cert-expiry-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading certificate expiry...</div>
 </div>
-<div class="section-title">Create Client Certificate</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">Generate a signed client certificate and assign it to groups with read/write permissions. The .p12 file can be imported into ATAK, iTAK, or WinTAK.</p>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('client-cert')">
+<span class="section-title" style="margin-bottom:0">Create Client Certificate</span>
+<span id="client-cert-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="client-cert-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">Generate a signed client certificate and assign it to groups with read/write permissions. The .p12 file can be imported into ATAK, iTAK, or WinTAK.</p>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
 <div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">Client Name</label><input type="text" id="cc-name" placeholder="e.g. operator1" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
 <div></div>
 </div>
 <div style="margin-bottom:16px">
-<label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Groups <span style="font-weight:400;color:var(--text-dim)">(select groups and permissions)</span></label>
-<div id="cc-groups-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading groups...</div>
+<label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Groups <span style="font-weight:400;color:var(--text-dim)">(optional - assign read/write permissions)</span></label>
+<div id="cc-groups-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)"><button type="button" id="cc-load-groups-btn" onclick="loadGroups()" style="padding:8px 16px;background:rgba(59,130,246,0.1);color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">Load Groups from TAK Server</button></div>
 </div>
 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
 <button type="button" id="cc-create-btn" onclick="createClientCert()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Create Certificate</button>
@@ -11330,6 +11344,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
 <div><span style="color:var(--green);font-weight:600" id="cc-result-name"></span><span style="color:var(--text-dim);font-size:12px;margin-left:8px">Password: atakatak</span></div>
 <a id="cc-download-link" href="#" class="cert-btn cert-btn-secondary" style="text-decoration:none;font-size:12px;padding:8px 16px">⬇ Download .p12</a>
+</div>
 </div>
 </div>
 </div>

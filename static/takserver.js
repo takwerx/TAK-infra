@@ -72,9 +72,9 @@ async function loadServices(){
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
 if(document.getElementById('cot-db-size')){refreshCotSize();}
 if(document.getElementById('cert-expiry-info')){loadCertExpiry();}
-if(document.getElementById('cc-groups-list')){loadGroups();}
 async function loadGroups(){
   var el=document.getElementById('cc-groups-list');if(!el)return;
+  el.innerHTML='<span style="color:var(--text-dim)">Loading groups...</span>';
   try{
     var r=await fetch('/api/takserver/groups');var d=await r.json();
     if(d.error&&!d.groups.length){el.textContent=d.error;return;}
@@ -519,7 +519,8 @@ function uploadUpgradeDeb(file){
 }
 function handleUpgradeFile(ev){var f=ev.target.files[0];if(f)uploadUpgradeDeb(f);}
 function handleUpgradeDrop(ev){ev.preventDefault();ev.stopPropagation();document.getElementById('upgrade-upload-area').classList.remove('dragover');var f=ev.dataTransfer.files[0];if(f)uploadUpgradeDeb(f);}
-function takToggleUpdate(){var body=document.getElementById('tak-update-body');var icon=document.getElementById('tak-update-toggle-icon');if(!body)return;var show=body.style.display==='none';body.style.display=show?'block':'none';if(icon)icon.style.transform=show?'rotate(180deg)':'';}
+function takToggleUpdate(){takToggleSection('tak-update');}
+function takToggleSection(id){var body=document.getElementById(id+'-body');var icon=document.getElementById(id+'-toggle-icon');if(!body)return;var show=body.style.display==='none';body.style.display=show?'block':'none';if(icon)icon.style.transform=show?'rotate(180deg)':'';}
 async function startTakUpdate(){
   var btn=document.getElementById('tak-update-btn');var msg=document.getElementById('tak-update-msg');
   if(!upgradeFileReady){if(msg){msg.textContent='Upload a .deb package first.';msg.style.color='var(--red)';}return;}
