@@ -55,6 +55,10 @@ Configure an alert email in the Guard Dog **Notifications** section. Alerts are 
 | **VACUUM from CLI** | **CLI** | `sudo -u postgres psql -d cot -c 'VACUUM ANALYZE;'` (same as the console button). |
 | **Guard Dog activity** (restarts, alerts) | **infra-TAK console → Guard Dog** → **Activity log** | Or on the server: `cat /var/log/takguard/restarts.log`. |
 
+## Scope
+
+Guard Dog monitors **TAK Server** (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate). When those are installed, Guard Dog also monitors Authentik, MediaMTX, Node-RED, and CloudTAK (alert and restart on failure). For those, use each module’s page for status and the **health endpoint + Uptime Robot** for outside-in checks. Re-deploy Guard Dog to add monitors for services you install later. Optional monitors for other services (e.g. “if MediaMTX is installed, check its port or systemd unit”) could be added in a future release.
+
 ## More
 
 - [infra-TAK README](https://github.com/takwerx/infra-TAK) — Quick start, deployment order, backdoor access

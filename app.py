@@ -531,7 +531,7 @@ def guarddog_page():
     tak = modules.get('takserver', {})
     relay = settings.get('email_relay', {})
     email_relay_configured = bool(relay.get('relay_host') and relay.get('smtp_user'))
-    guarddog_monitors = [
+    guarddog_monitors_tak = [
         {'name': 'Port 8089', 'interval': '1 min', 'desc': 'Checks that TAK Server port 8089 is listening and accepting connections. Auto-restarts TAK Server after 3 consecutive failures.'},
         {'name': 'Process', 'interval': '1 min', 'desc': 'Verifies all 5 TAK Server Java processes (messaging, api, config, plugins, retention). Auto-restart after 3 consecutive failures.'},
         {'name': 'Network', 'interval': '1 min', 'desc': 'Pings Cloudflare (1.1.1.1) and Google (8.8.8.8). Alerts only (no restart) after 3 failures — helps distinguish network issues from server issues.'},
@@ -541,13 +541,21 @@ def guarddog_page():
         {'name': 'Disk', 'interval': '1 hour', 'desc': 'Checks root and TAK logs filesystem usage. Alert only when usage exceeds 80% (warning) or 90% (critical).'},
         {'name': 'Certificate', 'interval': 'Daily', 'desc': 'Checks Let\'s Encrypt / TAK Server cert expiry. Alert when 40 days or less remaining until expiry.'},
     ]
+    # Per-service list for expandable UI. "monitored" = Guard Dog monitors this (installed when Guard Dog was deployed).
+    guarddog_services = [
+        {'id': 'takserver', 'name': 'TAK Server', 'monitored': gd.get('installed'), 'monitors': guarddog_monitors_tak},
+        {'id': 'authentik', 'name': 'Authentik', 'monitored': modules.get('authentik', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '2 min', 'desc': 'Checks Authentik HTTP (9090). Alert and restart containers after 3 failures.'}]},
+        {'id': 'mediamtx', 'name': 'MediaMTX', 'monitored': modules.get('mediamtx', {}).get('installed'), 'monitors': [{'name': 'Service', 'interval': '2 min', 'desc': 'Checks systemd mediamtx. Alert and restart after 3 failures.'}]},
+        {'id': 'nodered', 'name': 'Node-RED', 'monitored': modules.get('nodered', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '2 min', 'desc': 'Checks Node-RED HTTP (1880). Alert and restart container after 3 failures.'}]},
+        {'id': 'cloudtak', 'name': 'CloudTAK', 'monitored': modules.get('cloudtak', {}).get('installed'), 'monitors': [{'name': 'Container', 'interval': '2 min', 'desc': 'Checks CloudTAK container. Alert and restart after 3 failures.'}]},
+    ]
     guarddog_docs_url = f'https://github.com/{GITHUB_REPO}/blob/main/docs/GUARDDOG.md'
     notifications_configured = bool((settings.get('guarddog_alert_email') or '').strip())
     return render_template_string(GUARDDOG_TEMPLATE,
         settings=settings, gd=gd, tak=tak, version=VERSION,
         guarddog_alert_email=settings.get('guarddog_alert_email', ''),
         guarddog_sms=settings.get('guarddog_sms', {}),
-        guarddog_monitors=guarddog_monitors,
+        guarddog_services=guarddog_services,
         guarddog_docs_url=guarddog_docs_url,
         notifications_configured=notifications_configured,
         email_relay_configured=email_relay_configured,
@@ -605,6 +613,43 @@ def _parse_guarddog_log_date(line):
             pass
     return None, ''
 
+def _guarddog_health_check(service_id):
+    """Quick health check for one service. Returns True if healthy, False otherwise. Used for UI and optional monitors."""
+    try:
+        if service_id == 'takserver':
+            r = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True, timeout=3)
+            if r.returncode != 0:
+                return False
+            # Optional: also check 8089
+            r2 = subprocess.run('ss -ltn "sport = :8089" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=2)
+            return 'LISTEN' in (r2.stdout or '')
+        if service_id == 'authentik':
+            req = urllib.request.Request('http://127.0.0.1:9090/', method='GET')
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status in (200, 302, 301)
+        if service_id == 'mediamtx':
+            r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True, timeout=3)
+            return r.returncode == 0
+        if service_id == 'nodered':
+            req = urllib.request.Request('http://127.0.0.1:1880/', method='GET')
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status in (200, 302, 301)
+        if service_id == 'cloudtak':
+            r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}"', shell=True, capture_output=True, text=True, timeout=5)
+            return bool(r.stdout and 'Up' in r.stdout)
+    except Exception:
+        return False
+    return False
+
+@app.route('/api/guarddog/health')
+@login_required
+def guarddog_health_api():
+    """Return health status per service (for UI). Only includes services that Guard Dog can monitor."""
+    result = {}
+    for sid in ('takserver', 'authentik', 'mediamtx', 'nodered', 'cloudtak'):
+        result[sid] = _guarddog_health_check(sid)
+    return jsonify(result)
+
 @app.route('/api/guarddog/activity-log')
 @login_required
 def guarddog_activity_log():
@@ -650,14 +695,17 @@ def guarddog_uninstall():
     if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
         return jsonify({'error': 'Invalid admin password'}), 403
     timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-              'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+              'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer',
+              'takauthentikguard.timer', 'takmediamtxguard.timer', 'taknoderedguard.timer', 'takcloudtakguard.timer']
     for t in timers:
         subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
         subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
     subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
     subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
-    for name in timers + ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
-                          'takcotdbguard.service', 'taknetguard.service', 'takprocessguard.service', 'takcertguard.service', 'tak-health.service']:
+    services_extra = ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
+                      'takcotdbguard.service', 'taknetguard.service', 'takprocessguard.service', 'takcertguard.service',
+                      'takauthentikguard.service', 'takmediamtxguard.service', 'taknoderedguard.service', 'takcloudtakguard.service', 'tak-health.service']
+    for name in timers + services_extra:
         path = os.path.join('/etc/systemd/system', name)
         if os.path.exists(path):
             try:
@@ -852,6 +900,18 @@ def run_guarddog_deploy(alert_email):
             'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
             'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-health-endpoint.py'
         ]
+        # Optional: monitors for other services (only install if that service is present)
+        ak_dir = os.path.expanduser('~/authentik')
+        nr_dir = os.path.expanduser('~/node-red')
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            script_files.append('tak-authentik-watch.sh')
+        if os.path.exists('/usr/local/bin/mediamtx') and os.path.exists('/usr/local/etc/mediamtx.yml'):
+            script_files.append('tak-mediamtx-watch.sh')
+        if os.path.exists(os.path.join(nr_dir, 'docker-compose.yml')):
+            script_files.append('tak-nodered-watch.sh')
+        if os.path.exists(cloudtak_dir) and os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml')):
+            script_files.append('tak-cloudtak-watch.sh')
         for name in script_files:
             src = os.path.join(scripts_dir, name)
             if not os.path.isfile(src):
@@ -885,6 +945,27 @@ def run_guarddog_deploy(alert_email):
             ('takcertguard.timer', '[Unit]\nDescription=Run TAK cert monitor daily\n\n[Timer]\nOnBootSec=1h\nOnUnitActiveSec=1d\nUnit=takcertguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('tak-health.service', '[Unit]\nDescription=TAK Server Health Check Endpoint\nAfter=network.target takserver.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-health-endpoint.py\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n'),
         ]
+        # Optional timers for other services (only if we installed the script)
+        if 'tak-authentik-watch.sh' in script_files:
+            units.extend([
+                ('takauthentikguard.service', '[Unit]\nDescription=Guard Dog Authentik Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-authentik-watch.sh\n'),
+                ('takauthentikguard.timer', '[Unit]\nDescription=Run Authentik guard every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=takauthentikguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-mediamtx-watch.sh' in script_files:
+            units.extend([
+                ('takmediamtxguard.service', '[Unit]\nDescription=Guard Dog MediaMTX Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-mediamtx-watch.sh\n'),
+                ('takmediamtxguard.timer', '[Unit]\nDescription=Run MediaMTX guard every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=takmediamtxguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-nodered-watch.sh' in script_files:
+            units.extend([
+                ('taknoderedguard.service', '[Unit]\nDescription=Guard Dog Node-RED Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-nodered-watch.sh\n'),
+                ('taknoderedguard.timer', '[Unit]\nDescription=Run Node-RED guard every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=taknoderedguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-cloudtak-watch.sh' in script_files:
+            units.extend([
+                ('takcloudtakguard.service', '[Unit]\nDescription=Guard Dog CloudTAK Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cloudtak-watch.sh\n'),
+                ('takcloudtakguard.timer', '[Unit]\nDescription=Run CloudTAK guard every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=takcloudtakguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
         for name, content in units:
             path = os.path.join('/etc/systemd/system', name)
             with open(path, 'w') as f:
@@ -904,6 +985,14 @@ def run_guarddog_deploy(alert_email):
             return
         timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
                   'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+        if 'tak-authentik-watch.sh' in script_files:
+            timers.append('takauthentikguard.timer')
+        if 'tak-mediamtx-watch.sh' in script_files:
+            timers.append('takmediamtxguard.timer')
+        if 'tak-nodered-watch.sh' in script_files:
+            timers.append('taknoderedguard.timer')
+        if 'tak-cloudtak-watch.sh' in script_files:
+            timers.append('takcloudtakguard.timer')
         for t in timers:
             subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
             subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
@@ -5137,8 +5226,20 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .form-input{width:100%;max-width:400px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
 .log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;white-space:pre-wrap}
 .guard-list{display:flex;flex-direction:column;gap:0}
-.guard-item{display:flex;align-items:flex-start;gap:16px;padding:14px 16px;border-bottom:1px solid var(--border);background:#0a0e1a;font-size:13px}
-.guard-item:last-child{border-bottom:none}
+.guard-service-row{border-bottom:1px solid var(--border);background:#0a0e1a}
+.guard-service-row:last-child{border-bottom:none}
+.guard-service-header{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text-primary);user-select:none}
+.guard-service-header:hover{background:rgba(255,255,255,.04)}
+.guard-service-health{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.guard-service-health.ok{background:var(--green)}
+.guard-service-health.fail{background:var(--red)}
+.guard-service-health.pending{background:var(--text-dim)}
+.guard-service-expand{margin-left:auto;transition:transform .2s}
+.guard-service-row.open .guard-service-expand{transform:rotate(180deg)}
+.guard-service-body{display:none;padding:0 16px 12px 16px}
+.guard-service-row.open .guard-service-body{display:block}
+.guard-item{display:flex;align-items:flex-start;gap:16px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--bg-deep);font-size:13px;border-radius:8px;margin-bottom:4px}
+.guard-item:last-child{border-bottom:none;margin-bottom:0}
 .guard-item-name{font-weight:600;color:var(--cyan);min-width:120px;flex-shrink:0}
 .guard-item-interval{color:var(--text-dim);font-size:11px;min-width:70px;flex-shrink:0}
 .guard-item-desc{color:var(--text-secondary);line-height:1.5;flex:1}
@@ -5162,16 +5263,30 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 
   {% if gd.installed %}
   <div class="card"><div class="card-title">Monitors</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Per-service health and checks. Expand a row to see what Guard Dog is monitoring.</p>
     <div class="guard-list">
-      {% for m in guarddog_monitors %}
-      <div class="guard-item">
-        <span class="guard-item-name">{{ m.name }}</span>
-        <span class="guard-item-interval">{{ m.interval }}</span>
-        <span class="guard-item-desc">{{ m.desc }}</span>
+      {% for svc in guarddog_services %}
+      {% if svc.monitored %}
+      <div class="guard-service-row" id="gd-svc-{{ svc.id }}" data-service-id="{{ svc.id }}">
+        <div class="guard-service-header" onclick="gdToggleService('{{ svc.id }}')">
+          <span class="guard-service-health pending" id="gd-health-{{ svc.id }}" title="Health"></span>
+          <span>{{ svc.name }}</span>
+          <span class="guard-service-expand material-symbols-outlined" style="font-size:20px">expand_more</span>
+        </div>
+        <div class="guard-service-body">
+          {% for m in svc.monitors %}
+          <div class="guard-item">
+            <span class="guard-item-name">{{ m.name }}</span>
+            <span class="guard-item-interval">{{ m.interval }}</span>
+            <span class="guard-item-desc">{{ m.desc }}</span>
+          </div>
+          {% endfor %}
+        </div>
       </div>
+      {% endif %}
       {% endfor %}
     </div>
-    <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint: <code style="color:var(--cyan)">{{ health_url }}</code></p>
+    <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint (for Uptime Robot): <code style="color:var(--cyan);word-break:break-all">{{ health_url }}</code></p>
     <p style="margin-top:10px;font-size:12px;color:var(--text-dim)"><a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p>
     <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
   </div>
@@ -5299,8 +5414,11 @@ function gdTestSms(){var el=document.getElementById('gd-sms-msg');var btn=docume
 function gdLoadActivityLog(){var el=document.getElementById('gd-activity-log');if(!el)return;el.textContent='Loading…';var fromVal=document.getElementById('gd-log-from')?document.getElementById('gd-log-from').value:'';var toVal=document.getElementById('gd-log-to')?document.getElementById('gd-log-to').value:'';var q='';if(fromVal)q+='from='+encodeURIComponent(fromVal)+'&';if(toVal)q+='to='+encodeURIComponent(toVal)+'&';fetch('/api/guarddog/activity-log?'+q,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){el.textContent='Error: '+d.error;return;}if(!d.entries||d.entries.length===0){el.textContent='No entries'+(fromVal||toVal?' for this date range':'')+'.';return;}el.textContent=d.entries.map(function(e){return e.raw;}).join(String.fromCharCode(10));}).catch(function(e){el.textContent='Request failed: '+(e.message||'Unknown error');});}
 async function gdRefreshCotSize(){var el=document.getElementById('gd-cot-db-size');if(!el)return;el.textContent='…';el.style.color='';try{var r=await fetch('/api/takserver/cot-db-size');var d=await r.json();el.textContent=d.error?d.error:(d.size_human||'—');var b=d.size_bytes;if(typeof b==='number'&&!d.error){var gb25=25*1024*1024*1024;var gb40=40*1024*1024*1024;if(b<gb25)el.style.color='var(--green)';else if(b<gb40)el.style.color='var(--yellow)';else el.style.color='var(--red)';}}catch(e){el.textContent='Error';}}
 async function gdRunVacuum(full){var msg=document.getElementById('gd-vacuum-msg');var out=document.getElementById('gd-vacuum-output');var btnA=document.getElementById('gd-vacuum-analyze-btn');var btnF=document.getElementById('gd-vacuum-full-btn');if(full&&!confirm('VACUUM FULL locks the CoT tables. Run when TAK Server is not running. Continue?'))return;if(msg){msg.textContent=full?'Running VACUUM FULL…':'Running VACUUM ANALYZE…';msg.style.color='var(--text-dim)';}if(out){out.style.display='none';out.textContent='';}if(btnA){btnA.disabled=true;}if(btnF){btnF.disabled=true;}try{var r=await fetch('/api/takserver/vacuum',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({full:full})});var d=await r.json();if(d.success){if(msg){msg.textContent='Done.';msg.style.color='var(--green)';}if(out&&d.output){out.textContent=d.output;out.style.display='block';}if(document.getElementById('gd-cot-db-size')){gdRefreshCotSize();}}else{if(msg){msg.textContent=d.error||'Failed';msg.style.color='var(--red)';}}if(btnA){btnA.disabled=false;}if(btnF){btnF.disabled=false;} }catch(e){if(msg){msg.textContent='Request failed';msg.style.color='var(--red)';}if(btnA){btnA.disabled=false;}if(btnF){btnF.disabled=false;}}}
+function gdToggleService(id){var row=document.getElementById('gd-svc-'+id);if(row)row.classList.toggle('open');}
+function gdRefreshHealth(){fetch('/api/guarddog/health',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(h){for(var id in h){var el=document.getElementById('gd-health-'+id);if(!el)continue;el.className='guard-service-health '+(h[id]?'ok':'fail');el.title=h[id]?'Healthy':'Unhealthy';}}).catch(function(){});}
 if (document.getElementById('gd-activity-log')) gdLoadActivityLog();
 if (document.getElementById('gd-cot-db-size')) gdRefreshCotSize();
+if (document.querySelector('.guard-service-row')){gdRefreshHealth();setInterval(gdRefreshHealth,60000);}
 </script>
 </body></html>
 '''
