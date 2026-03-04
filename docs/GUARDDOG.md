@@ -1,6 +1,6 @@
 # Guard Dog — How it works
 
-Guard Dog is TAK Server health monitoring and auto-recovery: eight monitors plus an HTTP health endpoint. It runs as systemd timers and a small health service.
+Guard Dog is TAK Server health monitoring and auto-recovery: nine monitors plus an HTTP health endpoint. It runs as systemd timers and a small health service.
 
 ## Monitors
 
@@ -17,6 +17,7 @@ Guard Dog is TAK Server health monitoring and auto-recovery: eight monitors plus
 | **OOM**       | 1 min  | Scans TAK Server logs for OutOfMemoryError | Auto-restart and alert (once until log clears) |
 | **Disk**      | 1 hr   | Root and TAK logs filesystem usage | Alert at 80% (warning) and 90% (critical) |
 | **Certificate**| Daily | Let's Encrypt / TAK Server cert expiry | Alert when **40 days or less** remaining until expiry |
+| **Root CA / Intermediate CA** | Escalating | Monitors Root CA and Intermediate CA certificate expiry | First alert at 90 days, then 75, 60, 45, 30, then daily until expiry. Email includes CA name, days remaining, and exact expiry date. |
 
 ## Avoiding restart loops and boot races
 
@@ -50,14 +51,25 @@ Configure an alert email in the Guard Dog **Notifications** section. Alerts are 
 | Task | Where | Notes |
 |------|--------|------|
 | **VACUUM** (reclaim CoT DB disk after retention deletes) | **infra-TAK console → TAK Server** → **Database maintenance (CoT)** | Use **Run VACUUM ANALYZE** (safe while TAK is running). Use **VACUUM FULL** only during a maintenance window (locks tables). |
-| **Data retention** (how long to keep CoT data) | **TAK Server’s own web UI** (Core Config / Data Retention) | Set TTL and schedule; retention deletes rows but PostgreSQL does not free disk until you run VACUUM. |
+| **Data retention** (how long to keep CoT data) | **TAK Server's own web UI** (Core Config / Data Retention) | Set TTL and schedule; retention deletes rows but PostgreSQL does not free disk until you run VACUUM. |
 | **tak-db-cleanup.service** (if present) | **CLI** | `systemctl status tak-db-cleanup.service`, `sudo journalctl -u tak-db-cleanup.service -f` to see deletion activity. |
 | **VACUUM from CLI** | **CLI** | `sudo -u postgres psql -d cot -c 'VACUUM ANALYZE;'` (same as the console button). |
 | **Guard Dog activity** (restarts, alerts) | **infra-TAK console → Guard Dog** → **Activity log** | Or on the server: `cat /var/log/takguard/restarts.log`. |
 
 ## Scope
 
-Guard Dog monitors **TAK Server** (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate). When those are installed, Guard Dog also monitors Authentik, MediaMTX, Node-RED, and CloudTAK (alert and restart on failure). For those, use each module’s page for status and the **health endpoint + Uptime Robot** for outside-in checks. Re-deploy Guard Dog to add monitors for services you install later. Optional monitors for other services (e.g. “if MediaMTX is installed, check its port or systemd unit”) could be added in a future release.
+Guard Dog monitors **TAK Server** (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate, Root CA / Intermediate CA). When installed, Guard Dog also monitors Authentik, MediaMTX, Node-RED, and CloudTAK (alert and restart on failure). For those, use each module's page for status and the **health endpoint + Uptime Robot** for outside-in checks. Re-deploy Guard Dog to add monitors for services you install later.
+
+## Certificate Rotation Workflow
+
+The Root CA / Intermediate CA monitor is the first step in a rotation workflow:
+
+1. **90 days out** — Guard Dog sends first notification. Go to **TAK Server → Rotate Intermediate CA** to begin rotation.
+2. **Rotate** — Creates new Intermediate CA, new server cert, regenerates admin/user certs, keeps old CA in truststore for transition.
+3. **Notify users** — At 60 days, notify users to re-enroll via TAK Portal (delete old connection, scan new QR code).
+4. **Revoke old CA** — At 30 days, use **Revoke Old CA** on the TAK Server page to remove the old CA from the truststore. Only the new CA is valid.
+
+For **Root CA rotation** (rare, ~10 year cycle): this is a hard cutover. New Root CA, new Intermediate CA, all certs regenerated. All clients must re-enroll. Use **TAK Server → Rotate Root CA** during a planned maintenance window.
 
 ## More
 

@@ -1,8 +1,67 @@
 # infra-TAK Technical Handoff Document
 
-## 0. Current Session State (Last Updated: 2026-03-02 night)
+## 0. Current Session State (Last Updated: 2026-03-03 night)
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
+
+### v0.1.9 (2026-03-03) — TAK Server PKI, Guard Dog, Client Certs, UI Overhaul
+
+**Guard Dog — full deploy with 9 monitors:**
+- TAK Server: Port 8089, Process, Network, PostgreSQL, CoT DB size, OOM, Disk, Certificate (Let's Encrypt / TAK Server cert), Root CA / Intermediate CA (escalating schedule: 90/75/60/45/30 days then daily until expiry).
+- Additional service monitors (when installed): Authentik, MediaMTX, Node-RED, CloudTAK.
+- Notifications via Email Relay (Brevo SMTP) and optional SMS (Twilio/Brevo).
+- Guard Dog scripts in `scripts/guarddog/`, deployed as systemd timers. Health endpoint on port 8888.
+
+**TAK Server page — new features:**
+- **Update TAK Server:** Collapsible card with upload (.deb), progress bar, cancel button, success/failure indicators. Blocks update if file not uploaded.
+- **Certificate expiry display:** Root CA and Intermediate CA expiry shown on TAK Server page (banner + Certificates section) and on the Console dashboard module card. Color-coded: green (>1yr), yellow (<=1yr), red (<=90 days). Format: `Xy Xmo Xd`.
+- **Create Client Certificate:** Collapsible card. Enter client name, load groups from TAK Server (via Marti API), select groups with Read (OUT), Write (IN), or Both permissions. Downloads .p12 file. Uses `makeCert.sh` + `UserManager.jar certmod`.
+- **Database Maintenance (CoT):** Collapsible card (was open section).
+- **Certificates:** Collapsible card with Root CA and Intermediate CA expiry details.
+- **Server Log:** Collapsible card for `takserver-messaging.log`.
+- **Rotate Intermediate CA:** Collapsible card. Shows current Root/Intermediate CA names, expiry, time remaining. Input for new CA name (auto-suggested). Steps: restore root CA → create new intermediate → new server cert → regenerate admin/user certs → update truststore (old CA kept for transition) → update CoreConfig → update TAK Portal certs → restart TAK Server. "Revoke Old CA" section lists trusted CAs in truststore, allows removing old CA after transition period.
+- **Rotate Root CA:** Collapsible card. Shows Root CA expiry. Hard cutover: removes old PKI, creates new Root CA, new Intermediate CA, new server cert, regenerates admin/user certs, updates truststore, CoreConfig, TAK Portal, restarts TAK Server. Double confirmation required. All clients must re-enroll via QR code after rotation.
+- **Section order:** Access, Services, Update TAK Server, Database Maintenance, Certificates, Rotate Intermediate CA, Rotate Root CA, Create Client Certificate, Server Log.
+
+**TAK Server page — JS extraction:**
+- Entire inline `<script>` moved to `static/takserver.js` served via `/takserver.js` route. Fixed `SyntaxError: missing ) after argument list` caused by extra closing brace in `pollUpgradeLog`.
+
+**Console dashboard — cert expiry on module card:**
+- TAK Server card shows `Root Xy · Int Xy Xmo Xd` below the Running badge, color-coded. Removed hidden "Manage"/"Deploy" spans from console cards to eliminate ghost height.
+
+**Help page — collapsible sections:**
+- All 7 help sections converted to collapsible cards matching TAK Server style (uppercase monospace titles, chevron arrow on right).
+- Left-aligned layout (removed centered max-width).
+- Reordered: Deployment Order, Backdoor, Console Password, Reset Console Password, Server Hardening (SSH), Uninstall All, Docs.
+
+**Guard Dog — Root CA / Intermediate CA monitor:**
+- New systemd timer `takintcaguard.timer` (runs daily).
+- Script `tak-intca-watch.sh` checks both Root CA and Intermediate CA expiry.
+- Escalating notification schedule: first alert at 90 days, then 75, 60, 45, 30, then daily until expiry.
+- Email includes the CA name, days remaining, and exact expiry date.
+
+**API endpoints added:**
+- `GET /api/takserver/cert-expiry` — Root CA and Intermediate CA days left + expiry date.
+- `GET /api/takserver/groups` — Fetches TAK Server groups via Marti API (extracts PEM from admin.p12 with `-legacy` flag for OpenSSL 3.x compatibility).
+- `POST /api/takserver/create-client-cert` — Creates client cert, assigns to groups with IN/OUT permissions.
+- `GET /api/takserver/ca-info` — Current CA names, expiry, truststore contents, suggested new names.
+- `POST /api/takserver/rotate-intca` — Intermediate CA rotation (background thread, streamed log).
+- `GET /api/takserver/rotate-intca/status` — Poll rotation progress.
+- `POST /api/takserver/revoke-old-ca` — Remove old CA from truststore.
+- `POST /api/takserver/rotate-rootca` — Root CA rotation (background thread, hard cutover).
+- `GET /api/takserver/rotate-rootca/status` — Poll root rotation progress.
+
+**Docs added:**
+- `docs/TAK_Server_OpenAPI_v0.json` — In-repo copy of TAK Server OpenAPI 3.1 spec.
+- `docs/REFERENCES.md` — Added OpenAPI spec reference.
+
+**Key fixes:**
+- `curl` exit code 58 for TAK Server API: legacy PKCS12 (RC2-40-CBC) from `makeCert.sh` incompatible with OpenSSL 3.x. Fixed by extracting PEM with `openssl pkcs12 -legacy`.
+- `makeCert.sh` permission denied: Fixed with `chmod +r cert-metadata.sh` + `sudo -u tak bash -c "cd ... && ./makeCert.sh ..."`.
+- `keytool -list` showing "mykey" (PrivateKeyEntry) as revocable CA: Filtered to only include `trustedCertEntry` aliases.
+- TAK Portal cert update during CA rotation: Re-encodes admin.p12 to tak-client.p12 with `-legacy` for Node.js compatibility, copies CA chain, restarts tak-portal container.
+
+**Git workflow:** Same as v0.1.8. dev = full workspace. main = public-facing only. Selective checkout for merge.
 
 ### v0.1.8-alpha Release (2026-03-02 night)
 
@@ -177,6 +236,15 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 - **Help page** -- Sidebar link to `/help`; backdoor URL, console password, reset form (when logged in), full-lockout note (CLI + README), Uninstall all services (modal), deployment order, Docs link
 - **Uninstall all** -- Only on Help; full uninstall order MediaMTX→Portal→CloudTAK→Node-RED→TAK Server→Email→Authentik→Caddy; Caddy purge + binary/config removal; leftover Caddy cleanup in `detect_modules()` when service disabled/inactive
 
+- **Guard Dog** -- Full deploy with 9 monitors (TAK Server) + service monitors for Authentik, MediaMTX, Node-RED, CloudTAK. Root CA / Intermediate CA escalating notification schedule. Health endpoint port 8888.
+- **TAK Server update** -- Upload .deb, progress bar, cancel, update with pre-upload guard
+- **Client certificate creation** -- Name + group selection (Marti API) + IN/OUT/Both permissions → .p12 download
+- **Certificate expiry** -- Displayed on TAK Server page (banner + Certificates card), Console dashboard card, Rotate CA cards. Color-coded time remaining.
+- **Intermediate CA rotation** -- Full workflow: new CA, server cert, admin/user certs, truststore (old CA kept), CoreConfig, TAK Portal update, TAK Server restart. Revoke old CA after transition.
+- **Root CA rotation** -- Hard cutover: new PKI, all certs regenerated, TAK Portal update, restart. All clients re-enroll via QR.
+- **Collapsible sections** -- TAK Server page (Update, DB Maintenance, Certificates, Rotate Int CA, Rotate Root CA, Client Cert, Server Log) and Help page (all 7 sections)
+- **Console dashboard cert expiry** -- Root/Int CA time remaining on TAK Server module card, color-coded
+
 ### What's Broken (Verified)
 - Nothing critical. LDAP fully resolved.
 
@@ -205,7 +273,13 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 9. **Help page and Uninstall-all (2026-03-02):** Sidebar "Help" link and `HELP_TEMPLATE` at `/help`: backdoor (IP:5001), console password, reset form (`POST /api/console/password/reset`), full-lockout wording (CLI + README). Uninstall all moved to Help only (removed from Console template); modal with password + "UNINSTALL" confirm. Full uninstall: Caddy step purges package and removes `/usr/bin/caddy`, `/usr/local/bin/caddy`, `/etc/caddy`; Caddy page uninstall does same. In `detect_modules()`: when Caddy binary exists but service is disabled and inactive, one-time cleanup removes binary and `/etc/caddy` so card disappears (fixes leftover after uninstall before this commit). Auto-updates: show "Running..." only when enabled and running; disable also stops/disables `apt-daily-upgrade.timer`.
 
 ### Key Files Changed
-- `app.py` — Blueprint fix (configure_flow/password_stage removed), LDAP verification, TAK Portal email/URL fixes, MediaMTX self-healing overlay; plus (2026-03-02) re import, TAK Portal CA bundle/takserver.pem, infratak app creation, LDAP outpost version sync, MediaMTX deploy log UX, Authentik next-steps UI; Help page (HELP_TEMPLATE, /help), Uninstall all on Help only, Caddy full cleanup + leftover cleanup in detect_modules, auto-updates timer + "Running..." only when enabled
+- `app.py` — All prior changes plus (v0.1.9): Guard Dog deploy with 9 monitors + service monitors, TAK Server update flow (upload/progress/cancel), client cert creation (groups via Marti API), cert expiry API + display, Intermediate CA rotation, Root CA rotation, revoke old CA, ca-info API, collapsible sections (TAK Server page + Help page), console dashboard cert expiry, Help page reorder + left-align. Removed hidden "Manage" spans from console cards.
+- `static/takserver.js` — Extracted TAK Server page inline script. All TAK Server JS: services, deploy, upgrade, cert expiry, groups, client cert creation, CA rotation (intermediate + root), collapsible section toggle.
+- `static/guarddog.js` — Guard Dog page JavaScript.
+- `scripts/guarddog/` — All Guard Dog monitor scripts (tak-port-watch.sh, tak-proc-watch.sh, tak-net-watch.sh, tak-pg-watch.sh, tak-cot-watch.sh, tak-oom-watch.sh, tak-disk-watch.sh, tak-cert-watch.sh, tak-intca-watch.sh), health endpoint script, sms_send.sh.
+- `docs/TAK_Server_OpenAPI_v0.json` — TAK Server OpenAPI 3.1 spec (in-repo reference).
+- `docs/REFERENCES.md` — Added OpenAPI spec entry.
+- `docs/GUARDDOG.md` — Guard Dog documentation with all monitors, VACUUM guidance, scope.
 - `mediamtx_ldap_overlay.py` — Stream visibility, share links, themed viewer, External Sources UI, Admin Active Streams UI
 
 ### Server Access
@@ -244,11 +318,11 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 | Field | Value |
 |---|---|
 | **Project name** | infra-TAK |
-| **Version** | 0.1.7-alpha |
+| **Version** | 0.1.9 |
 | **Purpose** | Unified web console for deploying and managing TAK ecosystem infrastructure (TAK Server, Authentik SSO, LDAP, Caddy reverse proxy, TAK Portal, Node-RED, MediaMTX, CloudTAK, Email Relay) |
 | **Intended users** | System administrators deploying TAK (Team Awareness Kit) infrastructure |
 | **Operating environment** | Ubuntu 22.04/24.04 or Rocky Linux 9, single VPS, accessible via `https://<ip>:5001` (backdoor) or `https://infratak.<fqdn>` (behind Authentik) |
-| **Current completion status** | Alpha. All modules deploy. LDAP fully working (SA bind, user bind, QR enrollment verified). |
+| **Current completion status** | Alpha → approaching beta. All modules deploy and run. Guard Dog monitoring active. Certificate management (create, rotate, revoke) operational. LDAP fully working. |
 
 ---
 
