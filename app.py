@@ -493,7 +493,9 @@ def takserver_page():
         settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
-        deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
+        deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False),
+        upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
+        upgrade_error=upgrade_status.get('error', False))
 
 @app.route('/mediamtx')
 @login_required
@@ -9744,6 +9746,68 @@ def check_existing_uploads():
 deploy_log = []
 deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
 
+upgrade_log = []
+upgrade_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/update', methods=['POST'])
+@login_required
+def takserver_update():
+    """Run TAK Server upgrade (Ubuntu: apt install ./takserver_*.deb). User uploads new .deb first."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'error': 'TAK Server not installed. Deploy TAK Server first.'}), 400
+    settings = load_settings()
+    if settings.get('pkg_mgr', 'apt') != 'apt':
+        return jsonify({'error': 'TAK Server update is supported on Ubuntu only for now. Rocky/RHEL coming later.'}), 400
+    if upgrade_status['running']:
+        return jsonify({'error': 'Update already in progress'}), 409
+    pkg_files = sorted([f for f in os.listdir(UPLOAD_DIR) if f.endswith('.deb')],
+        key=lambda f: os.path.getmtime(os.path.join(UPLOAD_DIR, f)), reverse=True)
+    if not pkg_files:
+        return jsonify({'error': 'No .deb package found. Upload the new TAK Server .deb from tak.gov first.'}), 400
+    upgrade_log.clear()
+    upgrade_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_takserver_upgrade, args=(os.path.join(UPLOAD_DIR, pkg_files[0]),), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/takserver/update/log')
+@login_required
+def takserver_update_log():
+    idx = int(request.args.get('index', 0))
+    return jsonify({'entries': upgrade_log[idx:], 'total': len(upgrade_log),
+        'running': upgrade_status['running'], 'complete': upgrade_status['complete'], 'error': upgrade_status['error']})
+
+def run_takserver_upgrade(pkg_path):
+    def ulog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        upgrade_log.append(entry)
+        print(entry, flush=True)
+    try:
+        pkg_name = os.path.basename(pkg_path)
+        ulog("=" * 50)
+        ulog("TAK Server update (upgrade)")
+        ulog("=" * 50)
+        wait_for_apt_lock(ulog, upgrade_log)
+        ulog("")
+        ulog("Installing upgrade package: " + pkg_name)
+        r = subprocess.run(
+            f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y ./{pkg_name} 2>&1',
+            shell=True, cwd=os.path.dirname(pkg_path), capture_output=True, text=True, timeout=600)
+        out = (r.stdout or '') + (r.stderr or '')
+        for line in out.strip().split('\n'):
+            if line.strip() and 'NEEDRESTART' not in line:
+                upgrade_log.append("  " + line)
+        if r.returncode != 0:
+            ulog("Update failed (exit " + str(r.returncode) + ")")
+            upgrade_status.update({'running': False, 'complete': False, 'error': True})
+            return
+        ulog("Restarting TAK Server...")
+        subprocess.run('systemctl restart takserver', shell=True, capture_output=True, text=True, timeout=30)
+        ulog("TAK Server update complete.")
+        upgrade_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        ulog("Error: " + str(e))
+        upgrade_status.update({'running': False, 'complete': False, 'error': True})
+
 @app.route('/api/deploy/cancel', methods=['POST'])
 @login_required
 def cancel_deploy():
@@ -11040,6 +11104,25 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="resync-notice" style="display:none;margin-top:8px;padding:10px 14px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.35);border-radius:8px;font-size:12px;color:var(--yellow)">TAK Portal user list may take a short moment to repopulate.</div>
 </div>
 {% endif %}
+{% if tak.installed and 'ubuntu' in settings.get('os_type', '') %}
+<div class="section-title">Update TAK Server</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">To upgrade to a newer release, download the new <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver_X.X_all.deb</span> from tak.gov, upload it below, then click Update. This runs <span style="font-family:'JetBrains Mono',monospace;font-size:12px">apt install ./package.deb</span> and restarts TAK Server.</p>
+<div class="upload-area" id="upgrade-upload-area" style="padding:24px;margin-bottom:16px" onclick="document.getElementById('upgrade-file-input').click()" ondrop="handleUpgradeDrop(event)" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="event.preventDefault();this.classList.remove('dragover')">
+<input type="file" id="upgrade-file-input" style="display:none" accept=".deb" onchange="handleUpgradeFile(event)">
+<div id="upgrade-upload-text" style="color:var(--text-dim);font-size:13px">Click or drop to select upgrade package (.deb)</div>
+<div id="upgrade-filename" style="display:none;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--cyan);margin-top:8px"></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="tak-update-btn" onclick="startTakUpdate()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Update TAK Server</button>
+<span id="tak-update-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div id="upgrade-log-wrap" style="display:{{ 'block' if upgrading or upgrade_done or upgrade_error else 'none' }};margin-top:20px">
+<div class="section-title">Update log</div>
+<div id="upgrade-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);max-height:400px;overflow-y:auto;line-height:1.7;white-space:pre-wrap;margin-top:8px">{% if upgrading %}Connecting...{% else %}{% if upgrade_done %}Done.{% elif upgrade_error %}Update failed.{% endif %}{% endif %}</div>
+</div>
+</div>
+{% endif %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
@@ -11507,6 +11590,45 @@ function pollDeployLog(){
 }
 {% if deploying or deploy_done or deploy_error %}
 pollDeployLog();
+{% endif %}
+var upgradeLogIndex=0;
+function uploadUpgradeDeb(file){
+  if(!file||!file.name.toLowerCase().endsWith('.deb')){var m=document.getElementById('tak-update-msg');if(m){m.textContent='Select a .deb file.';m.style.color='var(--red)';}return;}
+  var fd=new FormData();fd.append('files',file);
+  var fnEl=document.getElementById('upgrade-filename');if(fnEl){fnEl.textContent='Uploading '+file.name+'...';fnEl.style.display='block';}
+  fetch('/api/upload/takserver',{method:'POST',body:fd,credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+    if(d.error){if(fnEl)fnEl.textContent=d.error;return;}
+    if(fnEl)fnEl.textContent='Ready: '+file.name;
+    var m=document.getElementById('tak-update-msg');if(m)m.textContent='';
+  }).catch(function(e){if(fnEl)fnEl.textContent='Upload failed';var m=document.getElementById('tak-update-msg');if(m){m.textContent=e.message;m.style.color='var(--red)';}});
+}
+function handleUpgradeFile(ev){var f=ev.target.files[0];if(f)uploadUpgradeDeb(f);}
+function handleUpgradeDrop(ev){ev.preventDefault();ev.stopPropagation();document.getElementById('upgrade-upload-area').classList.remove('dragover');var f=ev.dataTransfer.files[0];if(f)uploadUpgradeDeb(f);}
+async function startTakUpdate(){
+  var btn=document.getElementById('tak-update-btn');var msg=document.getElementById('tak-update-msg');
+  if(btn)btn.disabled=true;if(msg){msg.textContent='Starting update...';msg.style.color='var(--text-dim)';}
+  try{
+    var r=await fetch('/api/takserver/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({}),credentials:'same-origin'});
+    var d=await r.json();
+    if(d.error){if(msg){msg.textContent=d.error;msg.style.color='var(--red)';}if(btn)btn.disabled=false;return;}
+    var wrap=document.getElementById('upgrade-log-wrap');if(wrap)wrap.style.display='block';
+    var el=document.getElementById('upgrade-log');if(el)el.textContent='Connecting...';
+    upgradeLogIndex=0;pollUpgradeLog();
+  }catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';}if(btn)btn.disabled=false;}
+}
+function pollUpgradeLog(){
+  var el=document.getElementById('upgrade-log');
+  if(!el)return;
+  function poll(){
+    fetch('/api/takserver/update/log?index='+upgradeLogIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      if(d.entries&&d.entries.length){if(upgradeLogIndex===0)el.textContent='';el.textContent+=d.entries.join(String.fromCharCode(10))+String.fromCharCode(10);el.scrollTop=el.scrollHeight;upgradeLogIndex=d.total;}
+      if(!d.running){var btn=document.getElementById('tak-update-btn');if(btn)btn.disabled=false;if(d.complete){if(btn)btn.textContent='Update complete';var m=document.getElementById('tak-update-msg');if(m)m.textContent='Done. Refreshing...';setTimeout(function(){location.reload();},2000);}else if(d.error){var m=document.getElementById('tak-update-msg');if(m){m.textContent='Update failed';m.style.color='var(--red)';}}}}else{setTimeout(poll,800);}
+    });
+  }
+  poll();
+}
+{% if upgrading %}
+if(document.getElementById('upgrade-log')){upgradeLogIndex=0;pollUpgradeLog();}
 {% endif %}
 </script></body></html>'''
 
