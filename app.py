@@ -11272,9 +11272,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .nav-icon{font-size:15px;width:18px;text-align:center}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:640px;margin:0 auto}
 .help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}
-.help-card-header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer}
+.help-card-header{display:flex;align-items:center;gap:10px;padding:16px 24px;cursor:pointer}
 .help-card-header h2{font-size:16px;font-weight:600;margin:0;color:var(--text-primary)}
-.help-card-toggle{font-size:18px;color:var(--text-dim);transition:transform 0.2s ease}
+.help-card-toggle{font-size:18px;color:var(--text-dim);transition:transform 0.2s ease;flex-shrink:0;order:-1}
 .help-card-body{display:none;padding:16px 24px 24px 24px;border-top:1px solid var(--border)}
 .help-card-body p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;margin-top:0}
 .help-card-body p:last-child{margin-bottom:0}
