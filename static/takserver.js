@@ -71,6 +71,30 @@ async function loadServices(){
 }
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
 if(document.getElementById('cot-db-size')){refreshCotSize();}
+if(document.getElementById('cert-expiry-info')){loadCertExpiry();}
+async function loadCertExpiry(){
+  var el=document.getElementById('cert-expiry-info');if(!el)return;
+  try{
+    var r=await fetch('/api/takserver/cert-expiry');var d=await r.json();
+    var h='';
+    var certs=[['root_ca','Root CA'],['intermediate_ca','Intermediate CA']];
+    for(var i=0;i<certs.length;i++){
+      var key=certs[i][0],label=certs[i][1],c=d[key];
+      if(!c)continue;
+      if(c.error){h+='<div style="margin-bottom:6px"><span style="color:var(--text-secondary)">'+label+'</span> <span style="color:var(--text-dim)">'+c.error+'</span></div>';continue;}
+      var days=c.days_left,color='var(--green)';
+      if(days<=90)color='var(--red)';else if(days<=365)color='var(--yellow)';
+      var yrs=Math.floor(days/365),rem=days%365,mo=Math.floor(rem/30),dd=rem%30;
+      var parts=[];if(yrs>0)parts.push(yrs+'y');if(mo>0)parts.push(mo+'mo');if(dd>0||parts.length===0)parts.push(dd+'d');
+      h+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">';
+      h+='<span style="color:var(--text-secondary);min-width:130px">'+label+'</span>';
+      h+='<span style="color:'+color+';font-weight:600">'+parts.join(' ')+'</span>';
+      h+='<span style="color:var(--text-dim)">'+c.expires+'</span>';
+      h+='</div>';
+    }
+    el.innerHTML=h||'No certificates found.';
+  }catch(e){el.textContent='Failed to load certificate info';}
+}
 async function refreshCotSize(){var el=document.getElementById('cot-db-size');if(!el)return;el.textContent='...';el.style.color='';try{var r=await fetch('/api/takserver/cot-db-size');var d=await r.json();if(d.error){el.textContent=d.error;}else{el.textContent=d.size_human||'-';var b=d.size_bytes;if(typeof b==='number'){var gb25=25*1024*1024*1024;var gb40=40*1024*1024*1024;if(b<gb25)el.style.color='var(--green)';else if(b<gb40)el.style.color='var(--yellow)';else el.style.color='var(--red)';}}}catch(e){el.textContent='Error';}}
 async function runVacuum(full){var msg=document.getElementById('vacuum-msg');var out=document.getElementById('vacuum-output');var btnA=document.getElementById('vacuum-analyze-btn');var btnF=document.getElementById('vacuum-full-btn');if(full&&!confirm("VACUUM FULL locks the CoT tables. Run when TAK Server is not running. Continue?"))return;if(msg){msg.textContent=full?'Running VACUUM FULL (may take a long time)...':'Running VACUUM ANALYZE...';msg.style.color='var(--text-dim)';}if(out){out.style.display='none';out.textContent='';}if(btnA){btnA.disabled=true;}if(btnF){btnF.disabled=true;}try{var r=await fetch('/api/takserver/vacuum',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({full:full})});var d=await r.json();if(d.success){if(msg){msg.textContent='Done.';msg.style.color='var(--green)';}if(out&&d.output){out.textContent=d.output;out.style.display='block';}if(document.getElementById('cot-db-size')){refreshCotSize();}}else{if(msg){msg.textContent=d.error||'Failed';msg.style.color='var(--red)';}if(out&&d.error){out.textContent=d.error;out.style.display='block';}}}catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';}}if(btnA){btnA.disabled=false;}if(btnF){btnF.disabled=false;}}
 
@@ -375,9 +399,10 @@ function pollDeployLog(){
     };poll();
 }
 var upgradeLogIndex=0;
-var upgradeXhr=null;
+var upgradeXhr=null,upgradeFileReady=false;
 function cancelUpgradeUpload(){
   if(upgradeXhr){upgradeXhr.abort();upgradeXhr=null;}
+  upgradeFileReady=false;
   var pa=document.getElementById('upgrade-progress-area');if(pa)pa.innerHTML='';
   var ua=document.getElementById('upgrade-upload-area');if(ua){ua.style.maxHeight='';ua.style.padding='';}
 }
@@ -407,7 +432,7 @@ function uploadUpgradeDeb(file){
     if(xhr.status===200){var d=JSON.parse(xhr.responseText);if(d.error){barInner.style.background='var(--red)';pct.textContent=d.error;pct.style.color='var(--red)';return;}
       barInner.style.background='var(--green)';pct.style.color='var(--green)';pct.textContent='\u2713 ';
       var rBtn=document.createElement('span');rBtn.textContent='\u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px;font-size:14px';rBtn.title='Remove';rBtn.onclick=function(){cancelUpgradeUpload();};pct.appendChild(rBtn);
-      if(fnEl){fnEl.textContent=file.name;fnEl.style.display='block';}var m=document.getElementById('tak-update-msg');if(m)m.textContent='';}
+      upgradeFileReady=true;if(fnEl){fnEl.textContent=file.name;fnEl.style.display='block';}var m=document.getElementById('tak-update-msg');if(m)m.textContent='';}
     else{barInner.style.background='var(--red)';pct.textContent='\u2717';pct.style.color='var(--red)';}
   };
   xhr.onerror=function(){upgradeXhr=null;barInner.style.background='var(--red)';pct.textContent='\u2717 Failed';pct.style.color='var(--red)';};
@@ -421,6 +446,7 @@ function handleUpgradeDrop(ev){ev.preventDefault();ev.stopPropagation();document
 function takToggleUpdate(){var body=document.getElementById('tak-update-body');var icon=document.getElementById('tak-update-toggle-icon');if(!body)return;var show=body.style.display==='none';body.style.display=show?'block':'none';if(icon)icon.style.transform=show?'rotate(180deg)':'';}
 async function startTakUpdate(){
   var btn=document.getElementById('tak-update-btn');var msg=document.getElementById('tak-update-msg');
+  if(!upgradeFileReady){if(msg){msg.textContent='Upload a .deb package first.';msg.style.color='var(--red)';}return;}
   if(btn)btn.disabled=true;if(msg){msg.textContent='Starting update...';msg.style.color='var(--text-dim)';}
   try{
     var r=await fetch('/api/takserver/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({}),credentials:'same-origin'});

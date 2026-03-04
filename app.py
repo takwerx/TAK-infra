@@ -550,6 +550,7 @@ def guarddog_page():
         {'name': 'OOM', 'interval': '1 min', 'desc': 'Scans TAK Server logs for OutOfMemoryError. Auto-restarts TAK Server and sends alert when detected.'},
         {'name': 'Disk', 'interval': '1 hour', 'desc': 'Checks root and TAK logs filesystem usage. Alert only when usage exceeds 80% (warning) or 90% (critical).'},
         {'name': 'Certificate', 'interval': 'Daily', 'desc': 'Checks Let\'s Encrypt / TAK Server cert expiry. Alert when 40 days or less remaining until expiry.'},
+        {'name': 'Root CA / Intermediate CA', 'interval': 'Escalating', 'desc': 'Monitors Root CA and Intermediate CA certificate expiry. First alert at 90 days, then at 75, 60, 45, 30 days, then daily until expiry.'},
     ]
     # Per-service list for expandable UI. "monitored" = Guard Dog monitors this (installed when Guard Dog was deployed).
     guarddog_services = [
@@ -978,7 +979,7 @@ def run_guarddog_deploy(alert_email):
         plog("✓ Directories created")
         script_files = [
             'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
-            'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-health-endpoint.py'
+            'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py'
         ]
         # Optional: monitors for other services (only install if that service is present)
         ak_dir = os.path.expanduser('~/authentik')
@@ -1023,6 +1024,8 @@ def run_guarddog_deploy(alert_email):
             ('takprocessguard.timer', '[Unit]\nDescription=TAK Server Process Monitor Timer\nRequires=takprocessguard.service\n\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
             ('takcertguard.service', '[Unit]\nDescription=TAK Certificate Expiry Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cert-watch.sh\n'),
             ('takcertguard.timer', '[Unit]\nDescription=Run TAK cert monitor daily\n\n[Timer]\nOnBootSec=1h\nOnUnitActiveSec=1d\nUnit=takcertguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takintcaguard.service', '[Unit]\nDescription=TAK Intermediate CA Expiry Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-intca-watch.sh\n'),
+            ('takintcaguard.timer', '[Unit]\nDescription=Run TAK Intermediate CA expiry monitor daily\n\n[Timer]\nOnBootSec=2h\nOnUnitActiveSec=1d\nUnit=takintcaguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('tak-health.service', '[Unit]\nDescription=TAK Server Health Check Endpoint\nAfter=network.target takserver.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-health-endpoint.py\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n'),
         ]
         # Optional timers for other services (only if we installed the script)
@@ -1064,7 +1067,7 @@ def run_guarddog_deploy(alert_email):
             guarddog_deploy_status.update({'running': False, 'error': True})
             return
         timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-                  'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer']
+                  'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer', 'takintcaguard.timer']
         if 'tak-authentik-watch.sh' in script_files:
             timers.append('takauthentikguard.timer')
         if 'tak-mediamtx-watch.sh' in script_files:
@@ -9550,6 +9553,40 @@ def takserver_cot_db_size():
         return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': str(e)})
 
 
+@app.route('/api/takserver/cert-expiry')
+@login_required
+def takserver_cert_expiry():
+    """Return Root CA and Intermediate CA expiry dates and days remaining."""
+    cert_dir = '/opt/tak/certs/files'
+    results = {}
+    for label, filename in [('root_ca', 'root-ca.pem'), ('intermediate_ca', 'ca.pem')]:
+        path = os.path.join(cert_dir, filename)
+        if not os.path.exists(path):
+            results[label] = {'error': 'Not found', 'file': filename}
+            continue
+        try:
+            r = subprocess.run(
+                ['openssl', 'x509', '-enddate', '-noout', '-in', path],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode != 0:
+                results[label] = {'error': 'Failed to read cert'}
+                continue
+            raw = r.stdout.strip().split('=', 1)[-1]
+            from datetime import datetime
+            expiry = datetime.strptime(raw, '%b %d %H:%M:%S %Y %Z')
+            now = datetime.utcnow()
+            days_left = (expiry - now).days
+            results[label] = {
+                'file': filename,
+                'expires': expiry.strftime('%Y-%m-%d'),
+                'days_left': days_left
+            }
+        except Exception as e:
+            results[label] = {'error': str(e)}
+    return jsonify(results)
+
+
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
 def takserver_control():
@@ -11166,10 +11203,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div class="section-title">Certificates</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;align-items:center;justify-content:space-between">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;&middot;&nbsp; /opt/tak/certs/files/</div>
 <a href="/certs" class="cert-btn cert-btn-secondary" style="text-decoration:none">📁 Browse Certificates</a>
 </div>
+<div id="cert-expiry-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading certificate expiry...</div>
 </div>
 <div class="section-title">Server Log <span style="font-size:11px;color:var(--text-dim);font-weight:400">takserver-messaging.log</span></div>
 <div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>
