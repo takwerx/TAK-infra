@@ -86,6 +86,8 @@ AUTHENTIK_LOGO_URL = "https://raw.githubusercontent.com/goauthentik/authentik/ma
 CADDY_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/5/56/Caddyserver_logo_dark.svg"
 # TAK (Team Awareness Kit) official brand logo from tak.gov
 TAK_LOGO_URL = "https://tak.gov/assets/logos/brand-06b80939.svg"
+# Login page logo: put your TAKWERX logo at static/takwerx-logo.png (recommended: 240×80px or 160px height max, PNG/SVG)
+LOGIN_LOGO_FILENAME = "takwerx-logo.png"
 update_cache = {'latest': None, 'checked': 0, 'notes': ''}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -324,22 +326,29 @@ def _get_unattended_upgrades_status():
 
 # === Routes ===
 
+def _login_logo_url():
+    """URL for login page logo if static/takwerx-logo.png exists; else None (show ⚡)."""
+    if os.path.exists(os.path.join(BASE_DIR, 'static', LOGIN_LOGO_FILENAME)):
+        return url_for('static', filename=LOGIN_LOGO_FILENAME)
+    return None
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'GET' and _apply_authentik_session():
         return redirect(url_for('console_page'))
+    logo_url = _login_logo_url()
     if request.method == 'POST':
         auth = load_auth()
         if not auth.get('password_hash'):
             return render_template_string(
                 LOGIN_TEMPLATE,
                 error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
-                version=VERSION)
+                version=VERSION, login_logo_url=logo_url)
         if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
-    return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION, login_logo_url=logo_url)
+    return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION, login_logo_url=logo_url)
 
 @app.route('/logout')
 def logout():
@@ -349,6 +358,7 @@ def logout():
 @app.route('/', methods=['GET', 'POST'])
 def index():
     """Landing: login at / (infratak.fqdn); when logged in redirect to console. Authentik headers = auto-login."""
+    logo_url = _login_logo_url()
     if request.method == 'GET' and _apply_authentik_session():
         return redirect(url_for('console_page'))
     if request.method == 'POST':
@@ -357,13 +367,13 @@ def index():
             return render_template_string(
                 LOGIN_TEMPLATE,
                 error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
-                version=VERSION)
+                version=VERSION, login_logo_url=logo_url)
         if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION, login_logo_url=logo_url)
     if not session.get('authenticated'):
-        return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION, login_logo_url=logo_url)
     return redirect(url_for('console_page'))
 
 @app.route('/api/forward-auth')
@@ -5502,7 +5512,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% else %}
   <div class="card"><div class="card-title">Deploy Guard Dog</div>
     <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 8 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed). Alert email is set in Notifications above.</p>
-    <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>&#128054; Deploy Guard Dog</button>
+    <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>🐕 Deploy Guard Dog</button>
     <p id="gd-deploy-email-err" style="margin-top:10px;font-size:12px;color:var(--red);display:none">Set an alert email in Notifications first.</p>
   </div>
   {% endif %}
@@ -10921,6 +10931,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 .card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 40px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
 .logo{text-align:center;margin-bottom:36px}
 .logo-icon{width:56px;height:56px;background:linear-gradient(135deg,#1e40af,#0891b2);border-radius:14px;display:inline-flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:16px;box-shadow:0 8px 24px rgba(59,130,246,0.25)}
+.logo .login-logo{max-height:80px;width:auto;display:block;margin:0 auto 16px;object-fit:contain}
 .logo h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f1f5f9}
 .logo p{color:#64748b;font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase}
 .logo .built-by{font-size:10px;color:#94a3b8;margin-top:8px;text-transform:none;letter-spacing:0}
@@ -10934,7 +10945,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 .ver{text-align:center;margin-top:20px;color:#64748b;font-family:'JetBrains Mono',monospace;font-size:11px}
 </style></head><body>
 <div class="lc"><div class="card">
-<div class="logo"><div class="logo-icon">⚡</div><h1>infra-TAK</h1><p>TAK Infrastructure Platform</p><p class="built-by">built by TAKWERX</p></div>
+<div class="logo">{% if login_logo_url %}<img src="{{ login_logo_url }}" alt="TAKWERX" class="login-logo">{% else %}<div class="logo-icon">⚡</div>{% endif %}<h1>infra-TAK</h1><p>TAK Infrastructure Platform</p><p class="built-by">built by TAKWERX</p></div>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 <form method="POST"><div class="fg"><label>Password</label><input type="password" name="password" autofocus placeholder="Enter admin password"></div><button type="submit" class="btn">Sign In</button></form>
 </div><div class="ver">v{{ version }}</div></div>
