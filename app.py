@@ -9587,6 +9587,108 @@ def takserver_cert_expiry():
     return jsonify(results)
 
 
+@app.route('/api/takserver/groups')
+@login_required
+def takserver_groups():
+    """List groups from TAK Server via the Marti API using admin cert."""
+    cert_dir = '/opt/tak/certs/files'
+    admin_pem = os.path.join(cert_dir, 'admin.pem')
+    admin_key = os.path.join(cert_dir, 'admin.key')
+    truststore_pem = os.path.join(cert_dir, 'ca.pem')
+    if not os.path.exists(admin_pem) or not os.path.exists(admin_key):
+        return jsonify({'error': 'Admin certificate not found', 'groups': []})
+    try:
+        r = subprocess.run(
+            ['curl', '-sk', '--cert', admin_pem, '--key', admin_key,
+             'https://127.0.0.1:8443/Marti/api/groups/all'],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode != 0:
+            return jsonify({'error': 'Failed to query TAK Server', 'groups': []})
+        import json as _json
+        data = _json.loads(r.stdout)
+        groups = []
+        if isinstance(data, dict) and 'data' in data:
+            for g in data['data']:
+                name = g.get('name', '')
+                if name and name != '__ANON__':
+                    groups.append({
+                        'name': name,
+                        'direction': g.get('direction', ''),
+                        'active': g.get('active', True)
+                    })
+        elif isinstance(data, list):
+            for g in data:
+                name = g.get('name', '')
+                if name and name != '__ANON__':
+                    groups.append({
+                        'name': name,
+                        'direction': g.get('direction', ''),
+                        'active': g.get('active', True)
+                    })
+        groups.sort(key=lambda x: x['name'])
+        return jsonify({'groups': groups})
+    except Exception as e:
+        return jsonify({'error': str(e), 'groups': []})
+
+
+@app.route('/api/takserver/create-client-cert', methods=['POST'])
+@login_required
+def takserver_create_client_cert():
+    """Create a client certificate with optional group assignment."""
+    data = request.json or {}
+    cert_name = (data.get('name') or '').strip()
+    if not cert_name:
+        return jsonify({'error': 'Certificate name is required'}), 400
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', cert_name):
+        return jsonify({'error': 'Name can only contain letters, numbers, dots, hyphens, underscores'}), 400
+    if len(cert_name) > 64:
+        return jsonify({'error': 'Name too long (max 64 chars)'}), 400
+
+    cert_dir = '/opt/tak/certs/files'
+    if os.path.exists(os.path.join(cert_dir, f'{cert_name}.p12')):
+        return jsonify({'error': f'Certificate "{cert_name}" already exists'}), 400
+
+    groups_in = data.get('groups_in', [])
+    groups_out = data.get('groups_out', [])
+
+    try:
+        r = subprocess.run(
+            f'cd /opt/tak/certs && sudo -u tak ./makeCert.sh client {cert_name} 2>&1',
+            shell=True, capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            return jsonify({'error': f'makeCert.sh failed: {r.stdout or r.stderr}'}), 500
+
+        p12_path = os.path.join(cert_dir, f'{cert_name}.p12')
+        if not os.path.exists(p12_path):
+            return jsonify({'error': 'Certificate file was not created'}), 500
+
+        if groups_in or groups_out:
+            pem_path = os.path.join(cert_dir, f'{cert_name}.pem')
+            cmd = f'java -jar /opt/tak/utils/UserManager.jar certmod'
+            if groups_in:
+                cmd += f' -ig {",".join(groups_in)}'
+            if groups_out:
+                cmd += f' -og {",".join(groups_out)}'
+            cmd += f' {pem_path} 2>&1'
+            gr = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+            if gr.returncode != 0:
+                pass  # cert still created, group assignment is best-effort
+
+        return jsonify({
+            'success': True,
+            'name': cert_name,
+            'p12': f'{cert_name}.p12',
+            'download_url': f'/api/certs/download/{cert_name}.p12',
+            'groups_in': groups_in,
+            'groups_out': groups_out
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
 def takserver_control():
@@ -11208,6 +11310,28 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <a href="/certs" class="cert-btn cert-btn-secondary" style="text-decoration:none">📁 Browse Certificates</a>
 </div>
 <div id="cert-expiry-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading certificate expiry...</div>
+</div>
+<div class="section-title">Create Client Certificate</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">Generate a signed client certificate and assign it to groups with read/write permissions. The .p12 file can be imported into ATAK, iTAK, or WinTAK.</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+<div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">Client Name</label><input type="text" id="cc-name" placeholder="e.g. operator1" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
+<div></div>
+</div>
+<div style="margin-bottom:16px">
+<label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Groups <span style="font-weight:400;color:var(--text-dim)">(select groups and permissions)</span></label>
+<div id="cc-groups-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading groups...</div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="cc-create-btn" onclick="createClientCert()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Create Certificate</button>
+<span id="cc-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div id="cc-result" style="display:none;margin-top:16px;background:rgba(6,182,212,0.06);border:1px solid var(--border);border-radius:10px;padding:16px">
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+<div><span style="color:var(--green);font-weight:600" id="cc-result-name"></span><span style="color:var(--text-dim);font-size:12px;margin-left:8px">Password: atakatak</span></div>
+<a id="cc-download-link" href="#" class="cert-btn cert-btn-secondary" style="text-decoration:none;font-size:12px;padding:8px 16px">⬇ Download .p12</a>
+</div>
+</div>
 </div>
 <div class="section-title">Server Log <span style="font-size:11px;color:var(--text-dim);font-weight:400">takserver-messaging.log</span></div>
 <div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>

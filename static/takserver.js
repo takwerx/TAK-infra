@@ -72,6 +72,67 @@ async function loadServices(){
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
 if(document.getElementById('cot-db-size')){refreshCotSize();}
 if(document.getElementById('cert-expiry-info')){loadCertExpiry();}
+if(document.getElementById('cc-groups-list')){loadGroups();}
+async function loadGroups(){
+  var el=document.getElementById('cc-groups-list');if(!el)return;
+  try{
+    var r=await fetch('/api/takserver/groups');var d=await r.json();
+    if(d.error&&!d.groups.length){el.textContent=d.error;return;}
+    if(!d.groups||d.groups.length===0){el.innerHTML='<span style="color:var(--text-dim)">No groups found. Groups are created in the TAK Server WebGUI or via LDAP.</span>';return;}
+    var h='<div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px 16px;align-items:center">';
+    h+='<div style="color:var(--text-dim);font-size:11px;font-weight:600;padding-bottom:4px">GROUP</div>';
+    h+='<div style="color:var(--text-dim);font-size:11px;font-weight:600;text-align:center;padding-bottom:4px">READ</div>';
+    h+='<div style="color:var(--text-dim);font-size:11px;font-weight:600;text-align:center;padding-bottom:4px">WRITE</div>';
+    h+='<div style="color:var(--text-dim);font-size:11px;font-weight:600;text-align:center;padding-bottom:4px">BOTH</div>';
+    for(var i=0;i<d.groups.length;i++){
+      var g=d.groups[i],n=g.name,safe=n.replace(/"/g,'&quot;');
+      h+='<div style="color:var(--text-secondary);padding:4px 0">'+n+'</div>';
+      h+='<div style="text-align:center"><input type="checkbox" class="cc-grp-read" data-group="'+safe+'" style="width:16px;height:16px;accent-color:var(--cyan)" onchange="ccGroupChanged(this,\'read\')"></div>';
+      h+='<div style="text-align:center"><input type="checkbox" class="cc-grp-write" data-group="'+safe+'" style="width:16px;height:16px;accent-color:var(--cyan)" onchange="ccGroupChanged(this,\'write\')"></div>';
+      h+='<div style="text-align:center"><input type="checkbox" class="cc-grp-both" data-group="'+safe+'" style="width:16px;height:16px;accent-color:var(--accent)" onchange="ccGroupChanged(this,\'both\')"></div>';
+    }
+    h+='</div>';
+    el.innerHTML=h;
+  }catch(e){el.textContent='Failed to load groups';}
+}
+function ccGroupChanged(cb,type){
+  var grp=cb.getAttribute('data-group');
+  var r=document.querySelector('.cc-grp-read[data-group="'+grp+'"]');
+  var w=document.querySelector('.cc-grp-write[data-group="'+grp+'"]');
+  var b=document.querySelector('.cc-grp-both[data-group="'+grp+'"]');
+  if(type==='both'){
+    if(cb.checked){r.checked=true;w.checked=true;}else{r.checked=false;w.checked=false;}
+  }else{
+    b.checked=(r.checked&&w.checked);
+  }
+}
+async function createClientCert(){
+  var nameEl=document.getElementById('cc-name');
+  var btn=document.getElementById('cc-create-btn');
+  var msg=document.getElementById('cc-msg');
+  var result=document.getElementById('cc-result');
+  var name=(nameEl?nameEl.value:'').trim();
+  if(!name){if(msg){msg.textContent='Enter a client name.';msg.style.color='var(--red)';}return;}
+  var groupsIn=[],groupsOut=[];
+  document.querySelectorAll('.cc-grp-read:checked').forEach(function(c){var g=c.getAttribute('data-group');if(groupsOut.indexOf(g)<0)groupsOut.push(g);});
+  document.querySelectorAll('.cc-grp-write:checked').forEach(function(c){var g=c.getAttribute('data-group');if(groupsIn.indexOf(g)<0)groupsIn.push(g);});
+  if(btn)btn.disabled=true;
+  if(msg){msg.textContent='Creating certificate...';msg.style.color='var(--text-dim)';}
+  if(result)result.style.display='none';
+  try{
+    var r=await fetch('/api/takserver/create-client-cert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,groups_in:groupsIn,groups_out:groupsOut})});
+    var d=await r.json();
+    if(d.error){if(msg){msg.textContent=d.error;msg.style.color='var(--red)';}if(btn)btn.disabled=false;return;}
+    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
+    if(result){
+      result.style.display='block';
+      document.getElementById('cc-result-name').textContent=d.name+'.p12';
+      document.getElementById('cc-download-link').href=d.download_url;
+    }
+    if(btn)btn.disabled=false;
+    if(nameEl)nameEl.value='';
+  }catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';}if(btn)btn.disabled=false;}
+}
 async function loadCertExpiry(){
   var el=document.getElementById('cert-expiry-info');if(!el)return;
   try{
