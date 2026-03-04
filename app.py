@@ -11271,10 +11271,14 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
 .nav-icon{font-size:15px;width:18px;text-align:center}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:640px;margin:0 auto}
-.help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px}
-.help-card h2{font-size:16px;font-weight:600;margin-bottom:12px;color:var(--text-primary)}
-.help-card p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px}
-.help-card p:last-child{margin-bottom:0}
+.help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}
+.help-card-header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer}
+.help-card-header h2{font-size:16px;font-weight:600;margin:0;color:var(--text-primary)}
+.help-card-toggle{font-size:18px;color:var(--text-dim);transition:transform 0.2s ease}
+.help-card-body{display:none;padding:16px 24px 24px 24px;border-top:1px solid var(--border)}
+.help-card-body p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;margin-top:0}
+.help-card-body p:last-child{margin-bottom:0}
+.help-card-body .form-field{margin-bottom:14px}
 .backdoor-url{font-family:'JetBrains Mono',monospace;font-size:13px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--cyan);word-break:break-all;user-select:all}
 .form-field{margin-bottom:14px}.form-field label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
 .form-field input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
@@ -11291,38 +11295,43 @@ body{display:flex;flex-direction:row;min-height:100vh}
 {{ sidebar_html }}
 <main class="main">
 <div class="help-card">
-<h2>Backdoor (IP:5001)</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Backdoor (IP:5001)</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>If Authentik or the domain is down, you can always reach the console at:</p>
 <p class="backdoor-url">https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</p>
 <p>Accept the self-signed cert and log in with your <strong>console password</strong>. <strong>Full lockout?</strong> If you can't log in at all, you have to get on the CLI: the <strong>README on the GitHub repo</strong> has the exact commands to run on the server to reset the password (e.g. <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">./reset-console-password.sh</code>).</p>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Console password</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Console password</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Use the form below if you're logged in; for a full lockout you need the CLI — see the README on the GitHub repo.</p>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Server hardening — SSH port</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Server hardening — SSH port</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>Changing the SSH port from the default (22) reduces automated scans and is a common hardening step. <strong>Keep another session open</strong> (e.g. a second SSH or the console in the browser) until you confirm you can connect on the new port, or you may lock yourself out.</p>
 <p style="font-size:12px;color:var(--text-dim)">Current port: <code style="color:var(--cyan)">{{ current_ssh_port }}</code>. We update <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">/etc/ssh/sshd_config</code>, allow the new port in UFW if present, and restart SSH.</p>
 <div class="form-field"><label>SSH port (1–65535)</label><input type="number" id="ssh-port-input" min="1" max="65535" value="{{ current_ssh_port }}" placeholder="22" style="width:100px"></div>
 <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">Suggestions (commonly unused ports): <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=2222">2222</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=3022">3022</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=4822">4822</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=22222">22222</button></p>
 <button type="button" class="btn btn-primary" onclick="doApplySshPort()">Apply SSH port</button>
 <div id="ssh-port-msg" style="margin-top:12px;font-size:13px;min-height:20px"></div>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Reset console password</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Reset console password</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>Enter your current password and choose a new one. The console will restart and you'll use the new password for 5001 and Uninstall all. <em>Only works when you're already logged in.</em> For a full lockout, use the CLI (README has the commands).</p>
 <div class="form-field"><label>Current password</label><input type="password" id="reset-current" placeholder="Current console password"></div>
 <div class="form-field"><label>New password</label><input type="password" id="reset-new" placeholder="At least 8 characters"></div>
 <div class="form-field"><label>Confirm new password</label><input type="password" id="reset-confirm" placeholder="Same as above"></div>
 <button type="button" class="btn btn-primary" onclick="doResetPassword()">Reset password</button>
 <div id="reset-msg"></div>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Uninstall all services</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Uninstall all services</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>Remove all deployed services (TAK Server, Authentik, Caddy, TAK Portal, MediaMTX, Node-RED, CloudTAK, Email Relay). The console stays so you can redeploy from Marketplace without burning the VPS.</p>
 <button type="button" onclick="document.getElementById('full-uninstall-modal').classList.add('open');setTimeout(function(){fullUninstallCheckFields();var p=document.getElementById('full-uninstall-password');if(p&&p.value.trim())fullUninstallValidatePassword();},50)" style="padding:8px 16px;background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.4);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Uninstall all services</button>
-</div>
+</div></div>
 <div id="full-uninstall-modal" class="modal-overlay" style="z-index:9999;padding:24px">
 <div class="modal" style="max-width:480px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
 <div style="font-weight:600;margin-bottom:16px">Uninstall all deployed services</div>
@@ -11339,15 +11348,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 </div>
 <div class="help-card">
-<h2>Deployment order</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Deployment order</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>(1) Caddy — set FQDN and TLS · (2) Authentik · (3) Email Relay · (4) TAK Server — upload .deb/.rpm and deploy · (5) TAK Portal · (6) Connect TAK Server to LDAP (button on TAK Server page) · (7) Node-RED, MediaMTX, CloudTAK as needed.</p>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Docs</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Docs</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p><a href="https://github.com/takwerx/infra-TAK" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">github.com/takwerx/infra-TAK</a> (README, docs/COMMANDS.md, docs/HANDOFF-LDAP-AUTHENTIK.md)</p>
-</div>
+</div></div>
 </main>
 <script>
+function helpToggle(header){var body=header.nextElementSibling;var icon=header.querySelector('.help-card-toggle');if(!body)return;if(body.style.display==='block'){body.style.display='none';icon.style.transform='rotate(0deg)';}else{body.style.display='block';icon.style.transform='rotate(180deg)';}}
 function closeFullUninstallModal(){document.getElementById('full-uninstall-modal').classList.remove('open');}
 var fullUninstallPwValidateTimer=null;
 function fullUninstallPasswordInput(){var c=document.getElementById('full-uninstall-pw-check');if(c)c.style.display='none';clearTimeout(fullUninstallPwValidateTimer);var p=document.getElementById('full-uninstall-password');if(!p||!p.value.trim())return;fullUninstallPwValidateTimer=setTimeout(fullUninstallValidatePassword,400);}
@@ -11497,6 +11509,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="module-desc">{{ mod.description }}</div>
 {% if module_versions.get(key) %}{% set v = module_versions.get(key) %}{% if v.version or v.update_available %}<div class="meta-line module-version-line" id="module-version-{{ key }}" style="margin-bottom:4px">{% if v.version %}v{{ v.version }}{% endif %}{% if v.update_available %} <span style="color:var(--cyan);font-size:10px" title="Update available">update</span>{% endif %}</div>{% endif %}{% endif %}
 <span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
+{% if key == 'takserver' and mod.installed %}<div id="takserver-card-cert-expiry" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-top:6px;line-height:1.5"></div>{% endif %}
 {% if mod.installed %}<span class="module-action">Manage</span>{% else %}<span class="module-action">Deploy</span>{% endif %}
 </a>
 {% endfor %}
@@ -11554,6 +11567,28 @@ function refreshModuleVersions(){
 }
 setInterval(refreshModuleVersions,30000);
 refreshModuleVersions();
+function loadTakCertExpiry(){
+    var el=document.getElementById('takserver-card-cert-expiry');
+    if(!el)return;
+    fetch('/api/takserver/cert-expiry').then(function(r){return r.json()}).then(function(d){
+        function fmt(days){
+            var y=Math.floor(days/365),r=days%365,m=Math.floor(r/30),dd=r%30;
+            var p=[];if(y>0)p.push(y+'y');if(m>0)p.push(m+'mo');if(dd>0||p.length===0)p.push(dd+'d');
+            return p.join(' ');
+        }
+        var h='';
+        var certs=[['root_ca','Root'],['intermediate_ca','Int']];
+        for(var i=0;i<certs.length;i++){
+            var key=certs[i][0],label=certs[i][1],c=d[key];
+            if(!c||c.error)continue;
+            var days=c.days_left,color='#22c55e';
+            if(days<=90)color='#ef4444';else if(days<=365)color='#eab308';
+            h+='<div>'+label+' CA <span style="color:'+color+';font-weight:600">'+fmt(days)+'</span></div>';
+        }
+        el.innerHTML=h;
+    }).catch(function(){});
+}
+loadTakCertExpiry();
 var updateBody='';
 async function checkUpdate(){
     try{
