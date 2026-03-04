@@ -277,7 +277,9 @@ def render_sidebar(modules, active_path):
     nr = modules.get('nodered', {})
     if nr.get('installed'):
         parts.append(link('/nodered', f'<img src="{html.escape(NODERED_LOGO_URL)}" alt="" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block"><span>Node-RED</span>'))
-    parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
+    gd = modules.get('guarddog', {})
+    if gd.get('installed'):
+        parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
     email = modules.get('emailrelay', {})
     if email.get('installed'):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
