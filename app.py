@@ -5360,7 +5360,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
           <span id="gd-sms-sender-warn" style="font-size:12px;color:var(--text-dim);display:none"></span>
         </div>
         <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To: digits + country code, e.g. 15551234567" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
-        <p style="font-size:11px;color:var(--text-dim);margin-top:0">To: digits + country code (e.g. 19512338808). Sender: up to 11 letters/numbers (Brevo has no separate SMS sender page — we send it in the API). If test fails, Brevo’s error appears below.</p>
+        <p style="font-size:11px;color:var(--text-dim);margin-top:0">To: digits + country code (e.g. 15551234567). Sender: up to 11 letters/numbers (Brevo has no separate SMS sender page — we send it in the API). If test fails, Brevo’s error appears below.</p>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
