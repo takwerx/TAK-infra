@@ -173,6 +173,26 @@ sudo systemctl restart takwerx-console
 
 ---
 
+## Disk full / container logs (Node-RED, Authentik, etc.)
+
+If root is 100% full, the cause is often **one huge container log** (e.g. Node-RED 8+ GB). Fix and prevent:
+
+1. **Free space now:** Find and truncate the biggest log (containers keep running):
+   ```bash
+   sudo du -sh /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -hr | head -5
+   sudo truncate -s 0 /var/lib/docker/containers/CONTAINER_ID/CONTAINER_ID-json.log
+   ```
+2. **Prevent it:** Set Docker log limits, then restart Docker:
+   ```bash
+   cd ~/infra-TAK && sudo ./scripts/set-docker-log-limits.sh
+   sudo systemctl restart docker
+   ```
+   Each container will keep at most 150 MB of logs (3 × 50 MB).
+
+**Full guide:** [docs/DISK-AND-LOGS.md](DISK-AND-LOGS.md) — truncate steps, optional journal/prune, moving Docker to a larger disk at `/mnt`.
+
+---
+
 ## Pull dev and restart console (both)
 
 ```bash

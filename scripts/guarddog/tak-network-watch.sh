@@ -54,7 +54,7 @@ Check network status:
 TAK Server may still be functioning for local connections.
 "
 
-      echo -e "$BODY" | mail -s "$SUBJ" "ALERT_EMAIL_PLACEHOLDER"
+      [ -n "ALERT_EMAIL_PLACEHOLDER" ] && echo -e "$BODY" | mail -s "$SUBJ" "ALERT_EMAIL_PLACEHOLDER"
       if [ -f /opt/tak-guarddog/sms_send.sh ]; then
         TMPF="/tmp/gd-sms-$$.txt"
         printf '%s' "$BODY" > "$TMPF"

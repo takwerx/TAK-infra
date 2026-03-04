@@ -52,7 +52,7 @@ Largest log files:
 $(du -h /opt/tak/logs/*.log 2>/dev/null | sort -rh | head -5 || echo 'N/A')
 "
 
-    echo -e "$BODY" | mail -s "$SUBJ" "ALERT_EMAIL_PLACEHOLDER"
+    [ -n "ALERT_EMAIL_PLACEHOLDER" ] && echo -e "$BODY" | mail -s "$SUBJ" "ALERT_EMAIL_PLACEHOLDER"
     if [ -f /opt/tak-guarddog/sms_send.sh ]; then
       TMPF="/tmp/gd-sms-$$.txt"
       printf '%s' "$BODY" > "$TMPF"

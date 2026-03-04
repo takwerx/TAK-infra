@@ -71,6 +71,26 @@ The Root CA / Intermediate CA monitor is the first step in a rotation workflow:
 
 For **Root CA rotation** (rare, ~10 year cycle): this is a hard cutover. New Root CA, new Intermediate CA, all certs regenerated. All clients must re-enroll. Use **TAK Server → Rotate Root CA** during a planned maintenance window.
 
+## Runbook vs Guard Dog (disk full, Docker logs, etc.)
+
+If you have a **TAK Server VM runbook** (disk full, Docker container logs, PostgreSQL recovery, journal limits), here’s how it maps:
+
+| Runbook “watch for” | In Guard Dog? | Where else |
+|--------------------|----------------|------------|
+| **Root disk full** | Yes — **Disk** monitor (alert at 80% / 90%) | [DISK-AND-LOGS.md](DISK-AND-LOGS.md): truncate big container logs, set Docker log limits |
+| **Docker container logs (e.g. Node-RED 8 GB)** | No — Guard Dog doesn’t truncate or cap logs | One-time: truncate + `scripts/set-docker-log-limits.sh`; see DISK-AND-LOGS.md |
+| **PostgreSQL down / recovery** | Yes — **PostgreSQL** monitor + TAK starts *after* Postgres (Guard Dog deploy sets that) | — |
+| **TAK Server down (port 8089, processes)** | Yes — **Port 8089**, **Process** monitors (auto-restart after 3 failures) | — |
+| **CoT DB size / retention** | Yes — **CoT database size** monitor (alert at 25 GB / 40 GB); VACUUM via TAK Server page | — |
+| **OOM in TAK logs** | Yes — **OOM** monitor (scans logs, restart + alert) | — |
+| **Authentik / Node-RED / MediaMTX / CloudTAK down** | Yes — service monitors (alert + restart after 3 failures) when those services are installed | — |
+| **Journal / APT / Docker build cache** | No | One-time or periodic: journald limit, `apt-get clean`, `docker builder prune`; see runbook or DISK-AND-LOGS.md |
+
+**Do Guard Dog monitors “just have to run”?** Yes. Once Guard Dog is **deployed**, systemd **timers** run the watch scripts on a schedule (every 1 min, 5 min, 1 hr, 6 hr, or daily). You don’t run them by hand; they run automatically. Use the Guard Dog page **Activity log** (or `/var/log/takguard/restarts.log`) to see restarts and alerts.
+
+**Can you add more?** Yes. If you install more services later (e.g. another Docker stack), **re-deploy Guard Dog** and it will enable the matching service monitors (Authentik, Node-RED, MediaMTX, CloudTAK) for whatever is present. To add new *kinds* of checks (e.g. “Docker log size” or “run builder prune”), you’d add a new script and timer in the Guard Dog deploy logic.
+
 ## More
 
 - [infra-TAK README](https://github.com/takwerx/infra-TAK) — Quick start, deployment order, backdoor access
+- [DISK-AND-LOGS.md](DISK-AND-LOGS.md) — Disk full, container logs, Docker log limits, optional move to /mnt

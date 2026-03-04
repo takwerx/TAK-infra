@@ -597,8 +597,7 @@ def guarddog_deploy_api():
     settings = load_settings()
     if not alert_email:
         alert_email = (settings.get('guarddog_alert_email') or '').strip()
-    if not alert_email:
-        return jsonify({'error': 'At least one alert email address is required'}), 400
+    # Allow deploy with no email (monitors run; alerts only after user configures email)
     settings['guarddog_alert_email'] = alert_email
     save_settings(settings)
     guarddog_deploy_log.clear()
@@ -710,6 +709,45 @@ def guarddog_activity_log():
         entries.append({'raw': raw, 'date': parsed_date.isoformat() if parsed_date else None, 'time_display': display_ts})
     return jsonify({'entries': entries, 'log_path': log_path})
 
+def _guarddog_timer_list():
+    """All Guard Dog timer unit names (core + optional service monitors)."""
+    return ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
+            'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer',
+            'takintcaguard.timer',
+            'takauthentikguard.timer', 'takmediamtxguard.timer', 'taknoderedguard.timer', 'takcloudtakguard.timer']
+
+def _guarddog_is_enabled():
+    """True if Guard Dog timers are enabled (at least the core 8089 timer)."""
+    r = subprocess.run(['systemctl', 'is-enabled', 'tak8089guard.timer'], capture_output=True, text=True, timeout=5)
+    return r.returncode == 0 and r.stdout.strip() == 'enabled'
+
+@app.route('/api/guarddog/disable', methods=['POST'])
+@login_required
+def guarddog_disable():
+    """Stop and disable all Guard Dog timers and health service. Scripts stay installed; user can enable again."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'error': 'Guard Dog is not installed'}), 400
+    for t in _guarddog_timer_list():
+        subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
+    return jsonify({'success': True, 'enabled': False})
+
+@app.route('/api/guarddog/enable', methods=['POST'])
+@login_required
+def guarddog_enable():
+    """Enable and start all Guard Dog timers and health service."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'error': 'Guard Dog is not installed'}), 400
+    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+    for t in _guarddog_timer_list():
+        subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+    return jsonify({'success': True, 'enabled': True})
+
 @app.route('/api/guarddog/uninstall', methods=['POST'])
 @login_required
 def guarddog_uninstall():
@@ -718,9 +756,7 @@ def guarddog_uninstall():
     auth = load_auth()
     if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
         return jsonify({'error': 'Invalid admin password'}), 403
-    timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-              'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer',
-              'takauthentikguard.timer', 'takmediamtxguard.timer', 'taknoderedguard.timer', 'takcloudtakguard.timer']
+    timers = _guarddog_timer_list()
     for t in timers:
         subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
         subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
@@ -728,6 +764,7 @@ def guarddog_uninstall():
     subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
     services_extra = ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
                       'takcotdbguard.service', 'taknetguard.service', 'takprocessguard.service', 'takcertguard.service',
+                      'takintcaguard.service',
                       'takauthentikguard.service', 'takmediamtxguard.service', 'taknoderedguard.service', 'takcloudtakguard.service', 'tak-health.service']
     for name in timers + services_extra:
         path = os.path.join('/etc/systemd/system', name)
@@ -971,7 +1008,7 @@ def guarddog_send_sms():
         return jsonify({'error': str(e)}), 500
 
 def run_guarddog_deploy(alert_email):
-    """Deploy Guard Dog: 7 monitors + health endpoint. Requires TAK Server at /opt/tak. Alert email required."""
+    """Deploy Guard Dog: monitors + health endpoint. Requires TAK Server at /opt/tak. Alert email optional (alerts only when set)."""
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         guarddog_deploy_log.append(entry)
@@ -2347,6 +2384,8 @@ def run_takportal_deploy():
             plog(f"  {r.stdout.strip()}")
             plog("\u2713 Docker available")
 
+        _ensure_docker_log_limits(plog)
+
         # Step 2: Clone repo
         plog("")
         plog("\u2501\u2501\u2501 Step 2/6: Cloning TAK Portal \u2501\u2501\u2501")
@@ -3552,6 +3591,8 @@ def run_cloudtak_deploy():
             plog(f"  {r.stdout.strip()}")
         plog("✓ Docker available")
 
+        _ensure_docker_log_limits(plog)
+
         # Step 2: Clone or update repo
         plog("")
         plog("━━━ Step 2/7: Cloning CloudTAK ━━━")
@@ -4558,6 +4599,35 @@ def emailrelay_configure_authentik():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# ── Docker log limits (prevents Node-RED / Authentik LDAP etc. from filling disk) ──
+def _ensure_docker_log_limits(log_fn=None):
+    """Ensure /etc/docker/daemon.json has log-opts (max-size 50m, max-file 3). If we write or change it, restart Docker.
+    Call before deploying any Docker-based service (Node-RED, etc.) so container logs cannot grow unbounded."""
+    daemon_json = '/etc/docker/daemon.json'
+    if not os.path.isdir('/etc/docker'):
+        return
+    try:
+        data = {}
+        if os.path.isfile(daemon_json) and os.path.getsize(daemon_json) > 0:
+            with open(daemon_json) as f:
+                data = json.load(f)
+        opts = data.get('log-opts') or {}
+        if opts.get('max-size') == '50m' and opts.get('max-file') == '3':
+            return
+        data['log-driver'] = 'json-file'
+        data['log-opts'] = {'max-size': '50m', 'max-file': '3'}
+        os.makedirs('/etc/docker', exist_ok=True)
+        with open(daemon_json, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.write('\n')
+        subprocess.run(['systemctl', 'restart', 'docker'], capture_output=True, timeout=30)
+        time.sleep(5)
+        if log_fn:
+            log_fn("✓ Docker log limits set (50 MB × 3 per container). Docker was restarted; other containers may need starting from their pages.")
+    except Exception:
+        pass
+
+
 # ── Node-RED ──────────────────────────────────────────────────────────────────
 nodered_deploy_log = []
 nodered_deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
@@ -5129,9 +5199,14 @@ def run_nodered_deploy():
             nodered_deploy_status.update({'running': False, 'complete': False, 'cancelled': True})
             return
         settings = load_settings()
+        plog("━━━ Ensuring Docker log limits (prevents container logs from filling disk) ━━━")
+        _ensure_docker_log_limits(plog)
+        if nodered_deploy_status.get('cancelled'):
+            return
         domain = (settings.get('fqdn') or '').strip()
         nr_dir = os.path.expanduser('~/node-red')
         os.makedirs(nr_dir, exist_ok=True)
+        plog("")
         plog("━━━ Step 1/3: Creating Docker Compose ━━━")
         compose_yml = os.path.join(nr_dir, 'docker-compose.yml')
         settings_js = os.path.join(nr_dir, 'settings.js')
@@ -5366,10 +5441,10 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 <body data-gd-deploying="{{ 'true' if deploying else 'false' }}">
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery.</p></div>
-  {% if gd.running %}<div class="status-banner running"><div class="dot"></div>Guard Dog is running (timers active)</div>
-  {% elif gd.installed %}<div class="status-banner stopped"><div class="dot"></div>Guard Dog is installed but timers may be stopped</div>
-  {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed</div>{% endif %}
+  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery. Runs automatically after TAK Server deploy; configure notifications below.</p></div>
+  {% if gd.running %}<div class="status-banner running" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is running</div><button type="button" class="btn btn-ghost" style="border-color:var(--yellow);color:var(--yellow)" onclick="gdSetEnabled(false)">Disable</button></div>
+  {% elif gd.installed %}<div class="status-banner stopped" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is disabled</div><button type="button" class="btn btn-primary" onclick="gdSetEnabled(true)">Enable</button></div>
+  {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed (it will install automatically when you deploy TAK Server)</div>{% endif %}
 
   {% if not tak.installed %}
   <div class="card" style="border-color:var(--yellow)">
@@ -5512,9 +5587,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div></div>
   {% else %}
   <div class="card"><div class="card-title">Deploy Guard Dog</div>
-    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Installs 8 systemd timers that monitor TAK Server (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate expiry) and a health endpoint on port 8080. Requires TAK Server at /opt/tak and a working mail command (e.g. Email Relay deployed). Alert email is set in Notifications above.</p>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Guard Dog usually installs automatically when you deploy TAK Server. If you skipped that or need to reinstall, use this. Installs monitors (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate expiry) and a health endpoint. Alert email is optional — set it in Notifications above to receive alerts (or add it later).</p>
     <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>🐕 Deploy Guard Dog</button>
-    <p id="gd-deploy-email-err" style="margin-top:10px;font-size:12px;color:var(--red);display:none">Set an alert email in Notifications first.</p>
   </div>
   {% endif %}
 
@@ -7383,6 +7457,9 @@ def run_authentik_deploy(reconfigure=False):
             else:
                 plog(f"  {r.stdout.strip()}")
             plog("\u2713 Docker available")
+
+            # Ensure container log limits so Node-RED / LDAP etc. cannot fill the disk
+            _ensure_docker_log_limits(plog)
 
             # Step 2: Create directory
             plog("")
@@ -10822,6 +10899,15 @@ def run_takserver_deploy(config):
                 install_le_cert_on_8446(fqdn, log_step, wait_for_cert=True)
 
         deploy_status.update({'complete': True, 'running': False})
+
+        # Auto-deploy Guard Dog so it runs from the start (user can disable or configure notifications later)
+        if not os.path.exists('/opt/tak-guarddog'):
+            log_step("")
+            log_step("━━━ Guard Dog (monitoring) — installing automatically ━━━")
+            alert_email = (load_settings().get('guarddog_alert_email') or '').strip()
+            run_guarddog_deploy(alert_email)
+            if guarddog_deploy_status.get('complete') and not guarddog_deploy_status.get('error'):
+                log_step("✓ Guard Dog installed. Configure notifications on the Guard Dog page.")
     except Exception as e:
         log_step(f"✗ FATAL ERROR: {str(e)}")
         deploy_status.update({'error': True, 'running': False})
