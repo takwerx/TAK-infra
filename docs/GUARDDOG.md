@@ -38,6 +38,9 @@ Guard Dog is designed so that **a restart does not trigger another monitor to re
 - **TAK Server soft start**  
   When Guard Dog is deployed, it installs a systemd drop-in for `takserver.service` so TAK Server starts **after** `network-online.target` and `postgresql.service` (or `postgresql-15.service`). That prevents TAK Server from starting before the network or database are ready, which can cause immediate failure and a restart loop on boot.
 
+- **4GB swap**  
+  On deploy, Guard Dog ensures a 4GB swap file exists at `/swapfile` (create if missing, enable and add to `/etc/fstab`). This matches the reference TAK Server Hardening script and helps memory stability under load (reduces OOM risk during spikes).
+
 ## Health endpoint
 
 Guard Dog runs a small HTTP service that answers on port 8888 (by default). The path `/health` returns 200 when TAK Server is considered healthy (port 8089 and processes). Use this URL in Uptime Robot or other outside-in monitoring.

@@ -259,6 +259,9 @@ def render_sidebar(modules, active_path):
     logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
     parts = [logo]
     parts.append(link('/console', '<span class="nav-icon material-symbols-outlined">dashboard</span>Console'))
+    gd = modules.get('guarddog', {})
+    if gd.get('installed'):
+        parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
     caddy = modules.get('caddy', {})
     if caddy.get('installed'):
         parts.append(link('/caddy', f'<img src="{html.escape(CADDY_LOGO_URL)}" alt="Caddy SSL" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block">', 'Caddy SSL'))
@@ -280,9 +283,6 @@ def render_sidebar(modules, active_path):
     nr = modules.get('nodered', {})
     if nr.get('installed'):
         parts.append(link('/nodered', f'<img src="{html.escape(NODERED_LOGO_URL)}" alt="" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block"><span>Node-RED</span>'))
-    gd = modules.get('guarddog', {})
-    if gd.get('installed'):
-        parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
     email = modules.get('emailrelay', {})
     if email.get('installed'):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
@@ -1124,6 +1124,33 @@ def run_guarddog_deploy(alert_email):
         with open(tak_dropin, 'w') as f:
             f.write('[Unit]\nAfter=network-online.target postgresql.service postgresql-15.service\nWants=network-online.target\n')
         plog("✓ TAK Server soft-start drop-in installed (starts after network + PostgreSQL)")
+        # 4GB swap for memory stability (from reference TAK Server Hardening script)
+        try:
+            r = subprocess.run(['swapon', '--show'], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and '/swapfile' in (r.stdout or ''):
+                plog("✓ Swap already configured, skipping")
+            else:
+                if os.path.exists('/swapfile'):
+                    subprocess.run(['swapon', '/swapfile'], capture_output=True, timeout=5)
+                    with open('/etc/fstab', 'r') as f:
+                        fstab = f.read()
+                    if '/swapfile' not in fstab:
+                        with open('/etc/fstab', 'a') as f:
+                            f.write('\n/swapfile swap swap defaults 0 0\n')
+                    plog("✓ Swap file enabled")
+                else:
+                    subprocess.run(['fallocate', '-l', '4G', '/swapfile'], check=True, timeout=30)
+                    os.chmod('/swapfile', 0o600)
+                    subprocess.run(['mkswap', '/swapfile'], check=True, capture_output=True, timeout=10)
+                    subprocess.run(['swapon', '/swapfile'], check=True, timeout=10)
+                    with open('/etc/fstab', 'r') as f:
+                        fstab = f.read()
+                    if '/swapfile' not in fstab:
+                        with open('/etc/fstab', 'a') as f:
+                            f.write('\n/swapfile swap swap defaults 0 0\n')
+                    plog("✓ 4GB swap configured (memory stability)")
+        except Exception as e:
+            plog(f"⚠ Swap setup skipped: {e}")
         r = subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             plog(f"✗ daemon-reload failed: {r.stderr}")
@@ -5449,6 +5476,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .guard-service-row.open .guard-service-expand{transform:rotate(180deg)}
 .guard-service-body{display:none;padding:0 16px 12px 16px}
 .guard-service-row.open .guard-service-body{display:block}
+.gd-collapse-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;margin:0 0 0 0;font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em}
+.gd-collapse-header:hover{color:var(--text-secondary)}
+.gd-collapse-toggle{font-size:18px;color:var(--text-dim);transition:transform .2s ease;flex-shrink:0;margin-left:8px}
+.gd-collapse-body{display:none;padding-top:16px;border-top:1px solid var(--border);margin-top:16px}
+.gd-collapse-body.open{display:block}
 .guard-item{display:flex;align-items:flex-start;gap:16px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--bg-deep);font-size:13px;border-radius:8px;margin-bottom:4px}
 .guard-item:last-child{border-bottom:none;margin-bottom:0}
 .guard-item-name{font-weight:600;color:var(--cyan);min-width:120px;flex-shrink:0}
@@ -5510,11 +5542,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div>
   {% endif %}
 
-  <div class="card"><div class="card-title">Notifications</div>
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Notifications</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
     {% if notifications_configured %}
     <div id="gd-notify-banner" class="status-banner running" style="margin-bottom:12px"><div class="dot"></div>Notifications configured</div>
-    <button type="button" class="btn btn-ghost" id="gd-notify-toggle-btn" onclick="gdToggleNotifications()" style="margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px">expand_more</span><span id="gd-notify-toggle-label">Expand to edit</span></button>
-    <div id="gd-notify-body" style="display:none">
     {% endif %}
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts.</p>
     <div class="gd-section" style="margin-bottom:20px">
@@ -5564,14 +5596,13 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       <div id="gd-sms-msg" style="margin-top:8px;font-size:12px"></div>
       <div id="gd-sms-events" style="display:none;margin-top:10px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-size:12px;max-height:180px;overflow-y:auto"></div>
     </div>
-    {% if notifications_configured %}
-    <button type="button" class="btn btn-ghost" onclick="gdToggleNotifications()" style="margin-top:12px"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px">expand_less</span>Collapse</button>
     </div>
-    {% endif %}
   </div>
 
   {% if tak.installed %}
-  <div class="card"><div class="card-title">Database maintenance (CoT)</div>
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Database maintenance (CoT)</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
     <p style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">The CoT database can grow large. Data retention deletes rows but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE to reclaim space (safe while TAK Server is running).</p>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">CoT database size: <span id="gd-cot-db-size" style="font-weight:600">—</span> <button type="button" onclick="gdRefreshCotSize()" class="btn btn-ghost" style="margin-left:8px;padding:4px 12px;font-size:12px">Refresh</button> <span style="font-size:10px;color:var(--text-dim);margin-left:6px">(green &lt; 25 GB · yellow 25–40 GB · red &gt; 40 GB)</span></p>
     <div style="display:flex;flex-direction:column;gap:12px">
@@ -5586,11 +5617,14 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     </div>
     <div id="gd-vacuum-output" style="display:none;margin-top:14px;padding:12px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
     <div id="gd-vacuum-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>
   </div>
   {% endif %}
 
   {% if gd.installed %}
-  <div class="card"><div class="card-title">Activity log</div>
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Activity log</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Restarts, alerts, and monitor events from Guard Dog. Filter by date or leave blank for all.</p>
     <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px">
       <label style="font-size:12px;color:var(--text-secondary)">From <input type="date" id="gd-log-from" class="form-input" style="width:140px;display:inline-block;margin-left:6px"></label>
@@ -5600,6 +5634,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     </div>
     <div class="log-box" id="gd-activity-log" style="max-height:320px">Loading…</div>
     <p style="font-size:11px;color:var(--text-dim);margin-top:8px">Log file: <code>/var/log/takguard/restarts.log</code></p>
+    </div>
   </div>
   {% endif %}
 
