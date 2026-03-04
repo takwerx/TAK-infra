@@ -834,15 +834,28 @@ def _guarddog_send_sms_now(sms, text):
             req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
             urllib.request.urlopen(req, timeout=15)
     else:
+        import urllib.error
         api_key = sms.get('api_key', '')
         sender = (sms.get('sender', '') or 'GuardDog')[:11]
         to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
         if not to_list:
             raise ValueError('No To numbers configured')
         for to_num in to_list:
-            payload = json.dumps({'sender': sender, 'recipient': to_num.lstrip('+'), 'content': text, 'type': 'transactional'}).encode()
+            recipient = ''.join(c for c in to_num if c.isdigit())
+            if not recipient or len(recipient) < 10:
+                raise ValueError(f'Brevo recipient must be digits with country code (e.g. 15551234567). Got: {to_num[:25]}')
+            payload = json.dumps({'sender': sender, 'recipient': recipient, 'content': text, 'type': 'transactional'}).encode()
             req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json'})
-            urllib.request.urlopen(req, timeout=15)
+            try:
+                urllib.request.urlopen(req, timeout=15)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ''
+                try:
+                    err_json = json.loads(body) if body else {}
+                    msg = err_json.get('message') or err_json.get('code') or body[:200] or f'HTTP {e.code}'
+                except Exception:
+                    msg = body[:200] or f'HTTP {e.code}'
+                raise ValueError(f'Brevo SMS: {msg}')
 
 @app.route('/api/guarddog/test-sms', methods=['POST'])
 @login_required
@@ -5331,7 +5344,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       <div id="gd-sms-brevo" style="display:{{ 'block' if guarddog_sms.get('provider')=='brevo' else 'none' }};margin-bottom:10px">
         <input class="form-input" type="password" id="gd-sms-br-api" placeholder="Brevo API key" value="{{ guarddog_sms.get('api_key','') }}" style="margin-bottom:6px" autocomplete="off">
         <input class="form-input" type="text" id="gd-sms-br-sender" placeholder="Sender (max 11 chars)" value="{{ guarddog_sms.get('sender','') }}" style="margin-bottom:6px">
-        <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To number(s) with country code, comma-separated" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
+        <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To: digits + country code, e.g. 15551234567" value="{{ guarddog_sms.get('to_numbers','') }}" style="margin-bottom:6px">
+        <p style="font-size:11px;color:var(--text-dim);margin-top:0">Use digits only for To (no + or spaces). In Brevo, enable SMS and validate your Sender. If test fails, the error from Brevo will appear below.</p>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
