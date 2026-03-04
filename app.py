@@ -10927,11 +10927,11 @@ LOGIN_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 body{font-family:'DM Sans',sans-serif;background:#0a0e17;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(59,130,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.03) 1px,transparent 1px);background-size:60px 60px;z-index:0}
 body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#3b82f6,#06b6d4,transparent);z-index:10}
-.lc{position:relative;z-index:1;width:100%;max-width:420px;padding:20px}
-.card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 40px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
+.lc{position:relative;z-index:1;width:100%;max-width:560px;padding:24px}
+.card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 44px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
 .logo{text-align:center;margin-bottom:36px}
 .logo-icon{width:56px;height:56px;background:linear-gradient(135deg,#1e40af,#0891b2);border-radius:14px;display:inline-flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:16px;box-shadow:0 8px 24px rgba(59,130,246,0.25)}
-.logo .login-logo{max-height:140px;width:auto;display:block;margin:0 auto 20px;object-fit:contain}
+.logo .login-logo{width:100%;max-width:100%;height:auto;display:block;margin:0 auto 28px;object-fit:contain}
 .logo h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f1f5f9}
 .logo p{color:#64748b;font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase}
 .logo .built-by{font-size:10px;color:#94a3b8;margin-top:8px;text-transform:none;letter-spacing:0}
