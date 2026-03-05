@@ -1219,7 +1219,8 @@ def cloudtak_page():
         cloudtak_icon=CLOUDTAK_ICON,
         container_info=container_info,
         deploying=cloudtak_deploy_status.get('running', False),
-        deploy_done=cloudtak_deploy_status.get('complete', False))
+        deploy_done=cloudtak_deploy_status.get('complete', False),
+        deploy_error=cloudtak_deploy_status.get('error', False))
 
 @app.route('/cloudtak/page.js')
 @login_required
@@ -3640,8 +3641,8 @@ def run_cloudtak_deploy():
             if r.returncode != 0:
                 plog(f"  ⚠ git pull warning: {r.stderr.strip()[:100]}")
         else:
-            plog("  Cloning from GitHub...")
-            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
+            plog("  Cloning from GitHub (shallow, latest only)...")
+            r = subprocess.run(f'git clone --depth 1 https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=180)
             if r.returncode != 0:
                 plog(f"✗ Clone failed: {r.stderr.strip()[:200]}")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
@@ -3654,7 +3655,7 @@ def run_cloudtak_deploy():
         if not os.path.exists(compose_yml) and not os.path.exists(compose_yaml):
             plog("  docker-compose.yml missing — re-cloning...")
             subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True, timeout=30)
-            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
+            r = subprocess.run(f'git clone --depth 1 https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=180)
             if r.returncode != 0:
                 plog(f"✗ Re-clone failed: {r.stderr.strip()[:200]}")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
@@ -5430,7 +5431,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 var logIndex=0,logInterval=null;
 function startDeploy(){var btn=document.getElementById('deploy-btn');btn.disabled=true;document.getElementById('log-card').style.display='block';document.getElementById('deploy-log-dyn').textContent='Starting...';logIndex=0;
 fetch('/api/nodered/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
-if(d.error){document.getElementById('deploy-log-dyn').textContent='Error: '+d.error;btn.disabled=false;return;}pollLog();});}
+if(d.error){var lg=document.getElementById('log-card');var dyn=document.getElementById('deploy-log-dyn');if(dyn)dyn.textContent='Error: '+d.error;if(lg&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';lg.insertBefore(b,lg.querySelector('.log-box')||lg.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Node-RED';btn.style.background='';startDeploy();};return;}pollLog();});}
 function pollLog(){function pickLogEl(){var lc=document.getElementById('log-card');return (lc&&lc.style.display!=='none'?document.getElementById('deploy-log-dyn'):null)||document.getElementById('deploy-log')||document.getElementById('deploy-log-dyn');}
 var logEl=pickLogEl();function showCancel(show){var s=document.getElementById('nodered-cancel-btn-static'),d=document.getElementById('nodered-cancel-btn-dyn');if(s)s.style.display=show?'inline-block':'none';if(d)d.style.display=show?'inline-block':'none';}
 function doPoll(){logEl=pickLogEl();fetch('/api/nodered/deploy/log?index='+logIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
@@ -5438,6 +5439,7 @@ if(d.entries&&d.entries.length){if(logIndex===0&&logEl)logEl.textContent='';if(l
 showCancel(d.running);
 if(!d.running){clearInterval(logInterval);var btn=document.getElementById('deploy-btn');if(btn)btn.disabled=false;
 if(d.cancelled){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Cancelled.';}
+else if(d.error){var lc=document.getElementById('log-card');if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'\u2717 Deployment failed (see log above).';if(lc&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';lc.insertBefore(b,lc.querySelector('.log-box')||lc.firstChild);}if(btn){btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Node-RED';btn.style.background='';startDeploy();};}}
 else if(d.complete){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Deploy complete - page will reload in 15s (or refresh now).';setTimeout(function(){location.reload();},15000);}}});}doPoll();logInterval=setInterval(doPoll,800);}
 function cancelNoderedDeploy(){if(!confirm('Cancel the deployment? You can deploy again after.'))return;fetch('/api/nodered/deploy/cancel',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin'}).then(function(){/* next poll will show cancelled */});}
 if(document.getElementById('deploy-log-card')){logIndex=0;pollLog();}
@@ -5839,8 +5841,18 @@ function startDeploy() {
   fetch('/api/mediamtx/deploy', {method:'POST', headers:{'Content-Type':'application/json'}})
     .then(r => r.json()).then(d => {
       if (d.error) {
-        document.getElementById('deploy-log').textContent = 'Error: ' + d.error;
-        document.getElementById('deploy-btn').disabled = false;
+        var lg = document.getElementById('log-card');
+        var dyn = document.getElementById('deploy-log');
+        if (dyn) dyn.textContent = 'Error: ' + d.error;
+        if (lg && !document.getElementById('deploy-fail-banner')) {
+          var banner = document.createElement('div');
+          banner.id = 'deploy-fail-banner';
+          banner.style.cssText = 'background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';
+          banner.innerHTML = '<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';
+          lg.insertBefore(banner, lg.querySelector('.log-box') || lg.firstChild);
+        }
+        var btn = document.getElementById('deploy-btn');
+        if (btn) { btn.disabled = false; btn.textContent = '\u2717 Deployment failed \u2014 Retry'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.onclick = function() { btn.textContent = '\u1f680 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
       } else {
         pollLog();
       }
@@ -5871,8 +5883,16 @@ function pollLog() {
             box.appendChild(refreshBtn);
             box.scrollTop = box.scrollHeight;
           } else if (d.error) {
+            var logCard = document.getElementById('log-card');
+            if (logCard && !document.getElementById('deploy-fail-banner')) {
+              var banner = document.createElement('div');
+              banner.id = 'deploy-fail-banner';
+              banner.style.cssText = 'background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';
+              banner.innerHTML = '<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';
+              logCard.insertBefore(banner, logCard.querySelector('.log-box') || logCard.firstChild);
+            }
             var btn = document.getElementById('deploy-btn');
-            if (btn) { btn.textContent = '✗ Deployment Failed'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '🚀 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
+            if (btn) { btn.textContent = '\u2717 Deployment failed \u2014 Retry'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '\u1f680 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
           }
         }
       });
@@ -6029,7 +6049,25 @@ window.pollLog = function(redeployBtn) {
           clearInterval(window.logInterval);
           window.logInterval = null;
           if (redeployBtn) redeployBtn.disabled = false;
-          if (d.error && dyn) dyn.textContent = (dyn.textContent || "") + "\nError (see log above)";
+          if (d.error) {
+            if (dyn) dyn.textContent = (dyn.textContent || "") + "\n\n\u2717 Deployment failed (see log above).";
+            var logCard = document.getElementById("log-card");
+            if (logCard && !document.getElementById("deploy-fail-banner")) {
+              var banner = document.createElement("div");
+              banner.id = "deploy-fail-banner";
+              banner.style.cssText = "background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)";
+              banner.innerHTML = "<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.";
+              logCard.insertBefore(banner, logCard.querySelector(".log-box") || logCard.firstChild);
+            }
+            var btn = document.getElementById("deploy-btn");
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = "\u2717 Deployment failed \u2014 Retry";
+              btn.style.background = "var(--red)";
+              btn.style.opacity = "1";
+              btn.onclick = function() { btn.textContent = "\u1f680 Deploy CloudTAK"; btn.style.background = ""; startDeploy(); };
+            }
+          }
           if (d.complete) setTimeout(function() { location.reload(); }, 1500);
         }
       })
@@ -6290,10 +6328,16 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div>
   {% endif %}
 
-  <div id="log-card" class="card" style="display:none">
+  <div id="log-card" class="card" style="display:{% if deploying or deploy_error %}block{% else %}none{% endif %}">
     <div class="card-title">Deploy Log</div>
-    <div class="log-box" id="deploy-log-dyn">Waiting...</div>
+    {% if deploy_error %}
+    <div id="deploy-fail-banner" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)"><strong>&#x2717; Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.</div>
+    {% endif %}
+    <div class="log-box" id="deploy-log-dyn">{% if deploy_error %}Deployment failed. See log above.{% else %}Waiting...{% endif %}</div>
   </div>
+  {% if deploy_error %}
+  <script>(function(){ var btn = document.getElementById("deploy-btn"); if(btn){ btn.disabled = false; btn.textContent = "\u2717 Deployment failed \u2014 Retry"; btn.style.background = "var(--red)"; btn.style.opacity = "1"; btn.onclick = function(){ btn.textContent = "\u1f680 Deploy CloudTAK"; btn.style.background = ""; startDeploy(); }; } })();</script>
+  {% endif %}
 </div>
 
 <!-- Uninstall modal -->
@@ -6423,7 +6467,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
     var iv=setInterval(async()=>{
         var r=await fetch('/api/emailrelay/log');var d=await r.json();
         if(d.entries&&d.entries.length>last){el.textContent=d.entries.join('\\n');el.scrollTop=el.scrollHeight;last=d.entries.length}
-        if(!d.running){clearInterval(iv);setTimeout(()=>location.reload(),1500)}
+        if(!d.running){clearInterval(iv);
+        if(d.error){var card=el.parentElement;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,el);}var rbtn=document.createElement('button');rbtn.textContent='\u2717 Deployment failed \u2014 Retry';rbtn.style.cssText='margin-top:12px;padding:12px 24px;background:var(--red);color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer';rbtn.onclick=function(){location.reload();};card.appendChild(rbtn);}
+        else if(d.complete){setTimeout(()=>location.reload(),1500)}}
     },1500);
 })();
 </script>
@@ -6511,6 +6557,9 @@ Switching providers later requires only updating Postfix credentials — no chan
 
 <div class="section-title">Deploy Email Relay</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+{% if deploy_error %}
+<div id="deploy-fail-banner" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)"><strong>&#x2717; Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.</div>
+{% endif %}
 <div class="form-grid">
 <div class="form-group full">
 <label class="input-label">Email Provider</label>
@@ -6532,9 +6581,12 @@ Switching providers later requires only updating Postfix credentials — no chan
 <div><label class="input-label">Port</label><input type="text" id="deploy-custom_port" class="input-field" placeholder="587" value="587"></div>
 </div></div>
 <div style="margin-top:20px;text-align:center">
-<button onclick="deployRelay()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">📧 Deploy Email Relay</button>
+<button onclick="deployRelay()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">{% if deploy_error %}&#x2717; Deployment failed — Retry{% else %}📧 Deploy Email Relay{% endif %}</button>
 </div>
 </div>
+{% if deploy_error %}
+<script>(function(){ var btn=document.getElementById('deploy-btn'); if(btn){ btn.style.background='var(--red)'; btn.onclick=function(){ btn.textContent='📧 Deploy Email Relay'; btn.style.background=''; deployRelay(); }; } })();</script>
+{% endif %}
 {% endif %}
 
 </div>
@@ -6574,7 +6626,9 @@ async function deployRelay(){
     var r=await fetch('/api/emailrelay/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     var d=await r.json();
     if(d.success){location.reload()}
-    else{alert('Error: '+d.error);btn.disabled=false;btn.textContent='📧 Deploy Email Relay';btn.style.opacity='1'}
+    else{var card=btn.closest('div[style*="background:var(--bg-card)"]')||btn.parentElement;
+    if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+    btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f4e7 Deploy Email Relay';btn.style.background='';deployRelay();};}
 }
 
 async function swapProvider(){
@@ -6788,7 +6842,7 @@ async function deployCaddy(){
         var r=await fetch('/api/caddy/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain:domain})});
         var d=await r.json();
         if(d.success){pollCaddyLog()}
-        else{alert('Error: '+d.error);btn.disabled=false;btn.textContent='🚀 Deploy Caddy';btn.style.opacity='1'}
+        else{var el=document.getElementById('deploy-log');var card=el?(el.closest('.card')||el.parentElement):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,el||card.firstChild);}if(el)el.textContent='Error: '+d.error;btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Caddy';btn.style.background='';deployCaddy();};}
     }catch(e){alert('Error: '+e.message);btn.disabled=false;btn.textContent='🚀 Deploy Caddy';btn.style.opacity='1'}
 }
 function pollCaddyLog(){
@@ -6815,7 +6869,9 @@ function pollCaddyLog(){
                 });
                 lastCount=d.entries.length;el.scrollTop=el.scrollHeight;
             }
-            if(!d.running){clearInterval(iv);if(d.complete||d.error){setTimeout(()=>location.reload(),3000)}}
+            if(!d.running){clearInterval(iv);
+            if(d.complete){setTimeout(()=>location.reload(),3000)}
+            else if(d.error){var card=el.closest('.card');if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}var btn=document.getElementById('deploy-btn');if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Caddy';btn.style.background='';deployCaddy();};}}}
         }catch(e){}
     },1000);
 }
@@ -7190,7 +7246,7 @@ async function deployPortal(){
         var r=await fetch('/api/takportal/deploy',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
         if(d.success)pollDeployLog();
-        else{document.getElementById('deploy-log').textContent='\\u2717 '+d.error;btn.disabled=false;btn.textContent='\\ud83d\\ude80 Deploy TAK Portal';btn.style.opacity='1';btn.style.cursor='pointer'}
+        else{var lg=document.getElementById('deploy-log');if(lg)lg.textContent='\u2717 '+d.error;var card=lg?lg.closest('.card'):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='\u1f680 Deploy TAK Portal';btn.style.background='';deployPortal();};}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
 }
 
@@ -7226,6 +7282,13 @@ function pollDeployLog(){
             refreshBtn.onclick=function(){window.location.href='/takportal';};
             el.appendChild(refreshBtn);
             el.scrollTop=el.scrollHeight;
+        }
+        else if(d.error){
+            var el=document.getElementById('deploy-log');
+            var card=el?el.closest('.card'):null;
+            if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+            var btn=document.getElementById('deploy-btn');
+            if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='\u1f680 Deploy TAK Portal';btn.style.background='';deployPortal();};}
         }
     });
 }
@@ -8977,7 +9040,7 @@ async function deployAk(){
         var r=await fetch('/api/authentik/deploy',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
         if(d.success)pollDeployLog();
-        else{document.getElementById('deploy-log').textContent='Error: '+d.error;btn.disabled=false;btn.textContent='Deploy Authentik';btn.style.opacity='1';btn.style.cursor='pointer'}
+        else{var lg=document.getElementById('deploy-log');if(lg)lg.textContent='Error: '+d.error;var card=lg?lg.closest('.card'):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='Deploy Authentik';btn.style.background='';deployAk();};}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
 }
 async function reconfigureAk(){
@@ -9029,6 +9092,13 @@ function pollDeployLog(){
             refreshBtn.onclick=function(){window.location.href='/authentik';};
             el.appendChild(refreshBtn);
             el.scrollTop=el.scrollHeight;
+        }
+        else if(d.error){
+            var el=document.getElementById('deploy-log');
+            var card=el?el.closest('.card'):null;
+            if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+            var btn=document.getElementById('deploy-btn');
+            if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='Deploy Authentik';btn.style.background='';deployAk();};}
         }
     });
 }
