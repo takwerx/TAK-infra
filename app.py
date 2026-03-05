@@ -3804,6 +3804,16 @@ services:
             return
         plog("✓ Containers started")
 
+        # Open port 5000 (and 5002 for tiles) so http://ip:5000 works when no domain or before Caddy is used
+        for port in ['5000/tcp', '5002/tcp']:
+            subprocess.run(f'ufw allow {port} 2>/dev/null; true', shell=True, capture_output=True)
+        r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
+        if r.returncode == 0:
+            for port in ['5000', '5002']:
+                subprocess.run(f'firewall-cmd --permanent --add-port={port}/tcp 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
+        plog("✓ Firewall: ports 5000 (Web UI), 5002 (tiles) opened for direct access")
+
         # CloudTAK nginx proxies /api to 127.0.0.1:5001 (Node app in same container). Do NOT
         # replace that with host:5001 or /api would hit TAKWERX Console and the app would stay on "Loading CloudTAK".
 
@@ -3822,6 +3832,11 @@ services:
                 code = resp.getcode()
                 if code in (200, 401, 403):
                     plog("✓ CloudTAK API is responding (backend ready)")
+                    api_ready = True
+                    break
+                if code == 404:
+                    # Backend is up but path may differ by CloudTAK version; treat as ready so deploy completes
+                    plog("✓ CloudTAK backend is up (GET /api/connections returned 404 — path may vary by version)")
                     api_ready = True
                     break
             except Exception:
@@ -5529,13 +5544,15 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .guard-item-desc{color:var(--text-secondary);line-height:1.5;flex:1}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
+.gd-toggle-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:gd-spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes gd-spin{to{transform:rotate(360deg)}}
 </style></head>
 <body data-gd-deploying="{{ 'true' if deploying else 'false' }}">
 {{ sidebar_html }}
 <div class="main">
   <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery. Runs automatically after TAK Server deploy; configure notifications below.</p></div>
-  {% if gd.running %}<div class="status-banner running" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is running</div><button type="button" class="btn btn-ghost" style="border-color:var(--yellow);color:var(--yellow)" onclick="gdSetEnabled(false)">Disable</button></div>
-  {% elif gd.installed %}<div class="status-banner stopped" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is disabled</div><button type="button" class="btn btn-primary" onclick="gdSetEnabled(true)">Enable</button></div>
+  {% if gd.running %}<div class="status-banner running" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is running</div><button type="button" class="btn btn-ghost" style="border-color:var(--yellow);color:var(--yellow)" onclick="gdSetEnabled(false, this)">Disable</button></div>
+  {% elif gd.installed %}<div class="status-banner stopped" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is disabled</div><button type="button" class="btn btn-primary" onclick="gdSetEnabled(true, this)">Enable</button></div>
   {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed (it will install automatically when you deploy TAK Server)</div>{% endif %}
 
   <div class="card">

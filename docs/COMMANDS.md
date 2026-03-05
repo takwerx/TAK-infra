@@ -269,7 +269,8 @@ On a **fresh deployment**, if you create a user, assign two (or more) groups, an
 
 **If a user still ends up with only ROLE_ADMIN:**
 
-- **Authentik**: Directory → Users → that user → **Groups** → add the correct `tak_*` groups (e.g. `tak_Field`). Remove `tak_ROLE_ADMIN` if they are not an admin. Save, wait ~1 min, then have the client reconnect.
+- **Check Authentik first.** Directory → Users → that user → **Groups**. If they already have the right `tak_*` groups there, the problem is the client connection (stale cert or cached membership), not TAK Portal sync. Have them **delete the connection in the TAK client and rescan the QR code** to re-enroll; the new connection will get the correct groups from LDAP.
+- If the user’s groups in Authentik are wrong: add the correct `tak_*` groups (e.g. `tak_Field`), remove `tak_ROLE_ADMIN` if they are not an admin. Save, wait ~1 min, then have the client reconnect (or delete connection and rescan).
 - **Group names**: TAK Server only uses LDAP groups whose `cn` starts with `tak_`. In Authentik, use names like `tak_Field`, `tak_MyTeam`. Names without the `tak_` prefix do not become channels.
 - If you created the user **before** creating any groups in TAK Portal, recreate the user's group membership in Authentik as above, or in TAK Portal (and wait for sync), then reconnect the client.
 
