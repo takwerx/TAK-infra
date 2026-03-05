@@ -328,6 +328,17 @@ Or by CPU: `top -o %CPU`.
 
 ---
 
+## CloudTAK deploy: long build and “Failed to fetch”
+
+The first CloudTAK deploy builds several Docker images (api, tiles, events) and can take **10–15+ minutes**. The browser polls the deploy log; if the tab is closed, the network drops, or the server is very busy, you may see **“Request failed: Failed to fetch”**. The deploy often **continues on the server**.
+
+- **Don’t click Deploy again** — only one deploy runs at a time; a second click is ignored.
+- **Check whether it’s still running:** Open the CloudTAK page again; if it shows “Deployment in progress” and new log lines, it’s still going.
+- **Check containers:** `docker ps` (look for `cloudtak-api`, `cloudtak-tiles`, etc.). If they’re up, open the map URL (e.g. `https://map.<your-domain>`) to confirm.
+- If the deploy actually failed, fix the cause (e.g. disk space, memory) and run Deploy again.
+
+---
+
 ## Disk full / container logs (Node-RED, Authentik, etc.)
 
 If root is 100% full, the cause is often **one huge container log** (e.g. Node-RED 8+ GB). Fix and prevent:

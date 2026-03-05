@@ -3502,15 +3502,17 @@ WantedBy=multi-user.target
 cloudtak_deploy_log = []
 cloudtak_deploy_status = {'running': False, 'complete': False, 'error': False}
 cloudtak_uninstall_status = {'running': False, 'done': False, 'error': None}
+_cloudtak_deploy_lock = threading.Lock()
 
 @app.route('/api/cloudtak/deploy', methods=['POST'])
 @login_required
 def cloudtak_deploy_api():
-    if cloudtak_deploy_status.get('running'):
-        return jsonify({'error': 'Deployment already in progress'}), 409
-    cloudtak_deploy_log.clear()
-    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
+    with _cloudtak_deploy_lock:
+        if cloudtak_deploy_status.get('running'):
+            return jsonify({'error': 'Deployment already in progress'}), 409
+        cloudtak_deploy_log.clear()
+        cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+        threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/cloudtak/deploy/log')
@@ -3525,13 +3527,13 @@ def cloudtak_deploy_log_api():
 @login_required
 def cloudtak_redeploy_api():
     """Update .env and override, restart containers, re-apply nginx patch. Use when CloudTAK is already installed."""
-    if cloudtak_deploy_status.get('running'):
-        return jsonify({'error': 'Another operation is in progress'}), 409
-    cloudtak_deploy_log.clear()
-    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    # First line so pollers see activity immediately
-    cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
-    threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
+    with _cloudtak_deploy_lock:
+        if cloudtak_deploy_status.get('running'):
+            return jsonify({'error': 'Another operation is in progress'}), 409
+        cloudtak_deploy_log.clear()
+        cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+        cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
+        threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
     return jsonify({'success': True, 'message': 'Update config & restart started'})
 
 @app.route('/api/cloudtak/control', methods=['POST'])
