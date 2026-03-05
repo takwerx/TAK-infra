@@ -3746,16 +3746,31 @@ services:
         plog(f"  API URL: {api_url}")
         plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
 
-        # Step 4: Build Docker images (use -f so compose file is found regardless of cwd)
+        # Step 4: Build Docker images (stream output, 45 min timeout)
         plog("")
         plog("━━━ Step 4/7: Building Docker Images ━━━")
         plog("  This may take 5-10 minutes on first run...")
-        r = subprocess.run(f'docker compose -f {compose_yml} build 2>&1', shell=True, capture_output=True, text=True, timeout=1800, cwd=cloudtak_dir)
-        if r.returncode != 0:
-            plog(f"✗ Docker build failed")
-            for line in r.stdout.strip().split('\n')[-20:]:
-                if line.strip():
+        proc = subprocess.Popen(
+            f'docker compose -f {compose_yml} build 2>&1',
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cloudtak_dir, bufsize=1
+        )
+        def _read_build():
+            for line in iter(proc.stdout.readline, ''):
+                line = line.rstrip()
+                if line:
                     plog(f"  {line}")
+        reader = threading.Thread(target=_read_build, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=2700)  # 45 min max
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            plog("✗ Docker build timed out after 45 minutes — try again or check server resources (RAM, disk)")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        reader.join(timeout=5)
+        if proc.returncode != 0:
+            plog(f"✗ Docker build failed")
             cloudtak_deploy_status.update({'running': False, 'error': True})
             return
         plog("✓ Images built")
