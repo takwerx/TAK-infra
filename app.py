@@ -3782,7 +3782,7 @@ services:
         plog("  Standalone MediaMTX stays on original ports — no conflict")
         r = subprocess.run(
             f'docker compose -f {compose_yml} up -d 2>&1',
-            shell=True, capture_output=True, text=True, timeout=120, cwd=cloudtak_dir
+            shell=True, capture_output=True, text=True, timeout=300, cwd=cloudtak_dir
         )
         if r.returncode != 0:
             plog(f"✗ docker compose up failed")
@@ -9469,17 +9469,34 @@ def _apply_ldap_to_coreconfig():
     with open(coreconfig_path, 'r') as f:
         original = f.read()
     if _coreconfig_has_ldap():
-        # LDAP already configured — check if password needs updating
+        # LDAP already configured — ensure adminGroup="ROLE_ADMIN" (required for admin UI; without it everyone gets WebTAK)
         import re as _re
+        def _ensure_admin_group(text):
+            if 'adminGroup="ROLE_ADMIN"' in text:
+                return text
+            # Add adminGroup to the <ldap ... /> element so 8446 shows admin UI for ROLE_ADMIN users
+            return _re.sub(r'(<ldap\s[^>]*?)(\s*/>)', r'\1 adminGroup="ROLE_ADMIN"\2', text, count=1, flags=_re.DOTALL)
+        # Check if password needs updating
         m = _re.search(r'serviceAccountCredential="([^"]*)"', original)
         existing_pass = m.group(1) if m else ''
         if existing_pass == ldap_pass:
+            if 'adminGroup="ROLE_ADMIN"' not in original:
+                patched = _ensure_admin_group(original)
+                patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
+                with open(patch_path, 'w') as f:
+                    f.write(patched)
+                r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path],
+                    capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    subprocess.run('sudo systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                return True, 'CoreConfig already has LDAP (adminGroup restored — restart TAK Server if 8446 still shows WebTAK)'
             return True, 'CoreConfig already has LDAP (password matches .env)'
-        # Password mismatch — update it in place
+        # Password mismatch — update it in place and ensure adminGroup
         updated = original.replace(
             f'serviceAccountCredential="{existing_pass}"',
             f'serviceAccountCredential="{ldap_pass}"')
-        if updated != original:
+        updated = _ensure_admin_group(updated)
+        if updated != original or 'adminGroup="ROLE_ADMIN"' not in original:
             patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
             with open(patch_path, 'w') as f:
                 f.write(updated)

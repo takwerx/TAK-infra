@@ -218,6 +218,32 @@ If Authentik keeps going unhealthy or Caddy logs `127.0.0.1:9090: connection ref
 
 ---
 
+## TAK client: No channels found
+
+When you scan the QR code and the client connects but says **No channels found** (or "Enable channels" with nothing listed), the server isn’t returning any groups/channels for that user. Common causes:
+
+1. **User has no TAK groups**  
+   Channels come from LDAP groups with the `tak_` prefix. The user must be in at least one such group.  
+   - In **TAK Portal**: open the user → **Groups** → add a group (e.g. create one like "Field" or use an existing one). Those map to `tak_<name>` in LDAP and become channels.  
+   - In **Authentik** (Directory → Users → user → Groups): the user can have `tak_ROLE_ADMIN` or custom `tak_*` groups. TAK Portal–created groups show up here after sync.
+
+2. **Connect LDAP not run**  
+   TAK Server must use LDAP for auth and groups. In infra-TAK: **TAK Server** page → **Connect LDAP**. Run it if you haven’t; it patches CoreConfig and creates the webadmin user. Then restart TAK Server.
+
+3. **TAK Server slow or stuck**  
+   If the box was under load (e.g. CloudTAK build, low RAM), TAK Server might not answer in time and the client gets an empty list. Restart TAK Server and try again:
+   ```bash
+   sudo systemctl restart takserver
+   ```
+   Check resources: `free -h` and `docker stats --no-stream` (if you run Docker services).
+
+4. **CoreConfig has no connections**  
+   TAK Server needs at least one Input and one Output in CoreConfig. A fresh install usually has defaults. If you replaced or heavily edited CoreConfig and removed all connections, add them back (or restore a known-good CoreConfig) and restart TAK Server.
+
+**Quick sequence:** Ensure the user has a TAK group in TAK Portal → run **Connect LDAP** if needed → **Restart TAK Server** → scan QR again.
+
+---
+
 ## Disk full / container logs (Node-RED, Authentik, etc.)
 
 If root is 100% full, the cause is often **one huge container log** (e.g. Node-RED 8+ GB). Fix and prevent:
