@@ -7870,14 +7870,53 @@ entries:
             # Step 7: Pull and start core services (no verbose docker output in log)
             plog("")
             plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
+            # Ensure 4GB swap before stressing the box (reduces OOM/unhealthy on small VPS)
+            try:
+                r_sw = subprocess.run(['swapon', '--show'], capture_output=True, text=True, timeout=5)
+                if r_sw.returncode == 0 and '/swapfile' in (r_sw.stdout or ''):
+                    plog("  Swap already configured")
+                else:
+                    if os.path.exists('/swapfile'):
+                        subprocess.run(['swapon', '/swapfile'], capture_output=True, timeout=5)
+                        with open('/etc/fstab', 'r') as f:
+                            fstab = f.read()
+                        if '/swapfile' not in fstab:
+                            with open('/etc/fstab', 'a') as f:
+                                f.write('\n/swapfile swap swap defaults 0 0\n')
+                        plog("  Swap file enabled")
+                    else:
+                        subprocess.run(['fallocate', '-l', '4G', '/swapfile'], check=True, timeout=30)
+                        os.chmod('/swapfile', 0o600)
+                        subprocess.run(['mkswap', '/swapfile'], check=True, capture_output=True, timeout=10)
+                        subprocess.run(['swapon', '/swapfile'], check=True, timeout=10)
+                        with open('/etc/fstab', 'r') as f:
+                            fstab = f.read()
+                        if '/swapfile' not in fstab:
+                            with open('/etc/fstab', 'a') as f:
+                                f.write('\n/swapfile swap swap defaults 0 0\n')
+                        plog("  4GB swap configured (reduces Authentik OOM on small VPS)")
+            except Exception as e:
+                plog(f"  \u26a0 Swap setup skipped: {e}")
             plog("  Pulling images (this may take a few minutes)...")
             r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 plog(f"  \u26a0 Pull had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
             else:
                 plog("  \u2713 Images pulled")
-            plog("  Starting core services...")
-            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            plog("  Starting PostgreSQL...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Postgres start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            for attempt in range(24):
+                rp = subprocess.run(f'cd {ak_dir} && docker compose exec -T postgresql pg_isready 2>/dev/null', shell=True, capture_output=True, text=True, timeout=10)
+                if rp.returncode == 0:
+                    plog("  \u2713 PostgreSQL ready")
+                    break
+                time.sleep(2)
+            else:
+                plog("  \u26a0 PostgreSQL not ready in time, starting server anyway")
+            plog("  Starting server and worker...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 plog(f"  \u26a0 Start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
             else:
