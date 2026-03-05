@@ -1167,14 +1167,28 @@ def run_guarddog_deploy(alert_email):
         if 'tak-cloudtak-watch.sh' in script_files:
             timers.append('takcloudtakguard.timer')
         for t in timers:
-            subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
-            subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
-        subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+            re = subprocess.run(['systemctl', 'enable', t], capture_output=True, text=True, timeout=5)
+            if re.returncode != 0:
+                plog(f"✗ systemctl enable {t} failed: {re.stderr or re.stdout or 'unknown'}")
+                guarddog_deploy_status.update({'running': False, 'error': True})
+                return
+            rs = subprocess.run(['systemctl', 'start', t], capture_output=True, text=True, timeout=5)
+            if rs.returncode != 0:
+                plog(f"⚠ systemctl start {t} failed (continuing): {rs.stderr or rs.stdout or 'unknown'}")
+        re = subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, text=True, timeout=5)
+        if re.returncode != 0:
+            plog(f"✗ systemctl enable tak-health.service failed: {re.stderr or re.stdout or 'unknown'}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
         subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
         for f in ['process_alert_sent', 'disk_alert_sent', 'db_alert_sent', 'cotdb_alert_sent', 'network_alert_sent', 'cert_alert_sent']:
             p = os.path.join('/var/lib/takguard', f)
             if not os.path.exists(p):
                 open(p, 'a').close()
+        if not _guarddog_is_enabled():
+            plog("✗ Timers did not end up enabled; run Enable on the Guard Dog page or retry deploy.")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
         plog("✓ Timers and health endpoint started")
         plog("✓ Deployment complete")
         guarddog_deploy_status.update({'running': False, 'complete': True, 'error': False})
@@ -11139,6 +11153,17 @@ def run_takserver_deploy(config):
             run_guarddog_deploy(alert_email)
             if guarddog_deploy_status.get('complete') and not guarddog_deploy_status.get('error'):
                 log_step("✓ Guard Dog installed. Configure notifications on the Guard Dog page.")
+            elif os.path.exists('/opt/tak-guarddog') and not _guarddog_is_enabled():
+                # Partial install (e.g. enable failed): ensure timers are enabled so Guard Dog runs
+                log_step("Enabling Guard Dog timers…")
+                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+                for t in _guarddog_timer_list():
+                    subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
+                    subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+                if _guarddog_is_enabled():
+                    log_step("✓ Guard Dog enabled. Configure notifications on the Guard Dog page.")
     except Exception as e:
         log_step(f"✗ FATAL ERROR: {str(e)}")
         deploy_status.update({'error': True, 'running': False})
