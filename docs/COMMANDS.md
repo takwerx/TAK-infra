@@ -9,7 +9,7 @@ chmod +x start.sh
 sudo ./start.sh
 ```
 
-Then open the URL shown (e.g. `https://<VPS_IP>:5001`) and set your admin password.
+Then open the URL shown (e.g. `https://<VPS_IP>:5001`) and set your admin password. **start.sh** adds port 5001 to UFW/firewalld (if present) so the backdoor is allowed as soon as the console is running. Caddy deploy also adds 5001; TAK Server deploy adds 22, 8089, 8443, 8446, 5001 and may enable UFW.
 
 ---
 
@@ -170,6 +170,51 @@ cd ~/infra-TAK && git fetch origin dev && git checkout dev && git pull origin de
 ```bash
 sudo systemctl restart takwerx-console
 ```
+
+---
+
+## Can't reach console (backdoor 5001 times out)
+
+If **https://YOUR_VPS_IP:5001** never loads (browser says "taking too long" or times out) but the console is running on the server:
+
+1. **Port is 5001** (five-zero-zero-one), not 50001.
+2. **During heavy installs** (e.g. TAK Server deploy, unattended-upgrades) the VPS load can spike and the backdoor may be slow or time out — wait a few minutes and retry, or use a second SSH session to check `systemctl status takwerx-console` and `ss -ltn 'sport = :5001'`.
+3. **Open the port on the server** (if it wasn't added — e.g. UFW was enabled before start.sh ran):
+   ```bash
+   sudo ufw allow 5001/tcp
+   sudo ufw reload
+   sudo ufw status | grep 5001
+   ```
+4. **Open the port in the cloud** (AWS Security Group, DigitalOcean Firewall, GCP VPC, etc.): add an **inbound** rule for **TCP 5001** from your IP or 0.0.0.0/0.
+5. **Confirm the app is listening** (on the VPS):
+   ```bash
+   ss -ltn 'sport = :5001'
+   # Should show LISTEN 0.0.0.0:5001
+   curl -k -s -o /dev/null -w "%{http_code}" https://127.0.0.1:5001/
+   # Should return 200 or 302
+   ```
+   If `curl` works but the browser still times out, the block is between your network and the VPS (firewall or ISP).
+6. **Try another network** (e.g. phone hotspot) to rule out corporate or home firewall blocking 5001.
+
+---
+
+## Authentik 502 / connection refused (9090) on fresh deploys
+
+If Authentik keeps going unhealthy or Caddy logs `127.0.0.1:9090: connection refused` (502) soon after deploy:
+
+1. **Ensure swap is present** so the server doesn't thrash under load (Guard Dog deploy adds 4GB; if you skipped it, run Guard Dog deploy or create swap manually).
+2. **Don't overload the box during first 15–20 minutes** after Authentik deploy — avoid deploying TAK Server, Node-RED, and MediaMTX all at once; space them out.
+3. **Check Authentik server container:**
+   ```bash
+   docker ps -a --filter name=authentik-server
+   docker logs authentik-server-1 --tail 100
+   ```
+   Look for OOM, PostgreSQL connection errors, or repeated restarts.
+4. **Restart Authentik if it's stuck:** from the infra-TAK Authentik page use **Restart**, or on the server:
+   ```bash
+   cd ~/authentik && docker compose restart
+   ```
+5. **Use the backdoor** (https://VPS_IP:5001) to reach the console when the domain path (Caddy → Authentik) is broken.
 
 ---
 

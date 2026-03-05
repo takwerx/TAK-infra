@@ -1998,18 +1998,20 @@ def run_caddy_deploy(domain):
 
         plog("")
         plog("━━━ Step 3/4: Configuring Firewall ━━━")
-        # Open ports 80 and 443
+        # Open ports 80, 443, and 5001 (backdoor) so console is reachable before/after Caddy
         r = subprocess.run('which ufw', shell=True, capture_output=True)
         if r.returncode == 0:
             subprocess.run('ufw allow 80/tcp 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('ufw allow 443/tcp 2>/dev/null; true', shell=True, capture_output=True)
-            plog("  ✓ UFW: ports 80 and 443 opened")
+            subprocess.run('ufw allow 5001/tcp 2>/dev/null; true', shell=True, capture_output=True)
+            plog("  ✓ UFW: ports 80, 443, 5001 (backdoor) opened")
         r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
         if r.returncode == 0:
             subprocess.run('firewall-cmd --permanent --add-service=http 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('firewall-cmd --permanent --add-service=https 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --permanent --add-port=5001/tcp 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
-            plog("  ✓ firewalld: ports 80 and 443 opened")
+            plog("  ✓ firewalld: ports 80, 443, 5001 (backdoor) opened")
         plog("✓ Firewall configured")
 
         plog("")
@@ -8624,9 +8626,22 @@ entries:
             plog(f"  - Service password: {ldap_svc_pass}")
         plog(f"  - Base DN: DC=takldap")
         plog(f"  - LDAP port: 389")
-        # Regenerate Caddyfile if Caddy is configured
+        # Regenerate Caddyfile if Caddy is configured — wait for HTTP 9090 first so Caddy doesn't get 502s
         if settings.get('fqdn'):
             plog("")
+            plog("  Waiting for Authentik HTTP (9090) before updating Caddy...")
+            for _ in range(12):
+                try:
+                    req = urllib.request.Request('http://127.0.0.1:9090/', method='GET')
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    if resp.status in (200, 302, 301):
+                        plog("  ✓ Authentik HTTP ready")
+                        break
+                except Exception:
+                    pass
+                time.sleep(5)
+            else:
+                plog("  ⚠ Authentik HTTP not ready in time — Caddy may 502 briefly; retry in a minute.")
             plog("  Updating Caddy config...")
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
