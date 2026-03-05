@@ -4,6 +4,8 @@ Tea Awarness Kit Infrastructure Management Platform.
 
 One clone. One password. One URL. Manage everything from your browser.
 
+**Goal: universal installer.** Currently supported platform: **Ubuntu 22.04 LTS**.
+
 ## What Is This?
 
 A unified web console for deploying and managing TAK ecosystem infrastructure:
@@ -34,7 +36,7 @@ sudo ./start.sh
 For the stable branch use `git clone --depth 1 https://github.com/takwerx/infra-TAK.git` (no `-b dev`).
 
 The script will:
-1. Detect your OS (Ubuntu 22.04, Rocky 9)
+1. Detect your OS (**Ubuntu 22.04 only** for now; goal is a universal installer)
 2. Install Python dependencies
 3. Ask you to set an admin password
 4. Start the web console
@@ -94,7 +96,7 @@ After deployment, create users in TAK Portal — they flow through Authentik →
 
 ## Requirements
 
-- Ubuntu 22.04 LTS or Rocky Linux 9 (fresh installation recommended)
+- **Ubuntu 22.04 LTS** (currently the only supported platform; goal is a universal installer). Fresh installation recommended.
 - Root access
 - 8GB+ RAM recommended for TAK Server
 - Internet connection for initial setup
