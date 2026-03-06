@@ -59,6 +59,38 @@ TAK Portal is left unbound so all authenticated users see it. No manual steps re
 
 ---
 
+## Authentik — what deploy sets up (and what it doesn’t)
+
+**When you click “Deploy Authentik” in infra-TAK, we do this:**
+
+| What we set up | Details |
+|----------------|--------|
+| **One brand** | We create/use the default brand and set its **domain** to the configured Authentik host (from Caddy/Domains; default `tak.<your-fqdn>` = hub / app tiles). We do **not** set logo, background, or “Default flows” on that brand. |
+| **LDAP** | Blueprint installs LDAP provider, service account (`adm_ldapservice`), outpost (port 389). TAK Server CoreConfig is patched if TAK is already installed. |
+| **Users & groups** | We create the **tak_ROLE_ADMIN** group and the **webadmin** user (for TAK Server admin). We create **adm_ldapservice** and set its password. |
+| **TAK Portal proxy** | We create the “TAK Portal Proxy” provider and application, and add it to the embedded outpost so `takportal.<fqdn>` goes through Authentik. We use Authentik’s existing **authorization** and **invalidation** flows; we don’t create or change those flows. |
+| **Policies** | We create **Allow authentik Admins** and **Allow MediaMTX users** and bind them to the right applications so only admins see infra-TAK/Node-RED and the right users see MediaMTX. |
+| **Cookie domain** | On reconfigure we set cookie domain so the same session works across subdomains (e.g. stream., takportal., tak.). |
+
+**What we do *not* set up on deploy:**
+
+- **Recovery flow (“Forgot password”)** — We do **not** create or link the recovery flow during Authentik deploy. That happens when you run **Email Relay → “Configure Authentik to use these settings”**. That step pushes SMTP into Authentik and creates/links the **default-password-recovery** flow so “Forgot password?” works. So if you haven’t run that, the brand’s “Recovery flow” can stay empty and Forgot password won’t work until you configure Authentik from the Email Relay page.
+- **Brand “Default flows”** — We never set **Authentication flow**, **Recovery flow**, or **User settings flow** on the brand. Whatever Authentik ships with (or you set manually) is what you get. You don’t have to mirror anything unless you add a **new** brand (e.g. for takportal.<fqdn>) and want that brand to use the same flows.
+- **Logo / background / Custom CSS** — All of that is optional and done by you in **System → Brands** → [your brand] → Branding settings.
+- **Extra brands** — We only ensure one brand exists and set its domain. If you want a different look for `takportal.<fqdn>`, you create a **new** brand yourself and set its domain to that hostname.
+
+**Short version:** Deploy gives you one brand (domain set), LDAP, webadmin, TAK Portal proxy, and policies. Forgot password comes from **Email Relay → Configure Authentik**. Everything else (flows on the brand, logo, background, extra brands) is optional and up to you.
+
+---
+
+## Authentik — configurable “home” subdomain
+
+The “home” is the hostname where you open Authentik and see the application tiles (infra-TAK, TAK Portal, Node-RED, MediaMTX, etc.). You can also go directly to e.g. `nodered.<fqdn>` or `stream.<fqdn>` and sign in there; the tiles are just one place to start. **Defaults:** Authentik home = `tak.<fqdn>`, TAK Server WebGUI = `takserver.<fqdn>`. Other service URLs (stream, map, takportal, nodered, etc.) are unchanged.
+
+**You can set the Authentik home to any subdomain.** In **Caddy** (Domains), set the **Authentik** service domain to the subdomain you want (default: `tak` → `tak.<fqdn>`). You can change it to e.g. `portal` or `apps` so the home is `portal.<fqdn>` or `apps.<fqdn>`. Do this before you deploy Authentik, or change it later: update the domain in **Caddy → Domains**, save, then on the **Authentik** page click **Update config & reconnect**. We sync the new host to .env, LDAP outpost, brand, and embedded outpost, then restart so everything matches.
+
+---
+
 ## Authentik — landing page background (branding)
 
 **Requires authentik 2025.4.0+.** The login/landing page background is controlled by the **Default flow background** setting on the brand.
@@ -67,7 +99,7 @@ TAK Portal is left unbound so all authenticated users see it. No manual steps re
 
 1. Log in to Authentik as an admin.
 2. Go to **System** → **Brands**.
-3. Open your brand (e.g. the one used for `authentik.<your-domain>`).
+3. Open your brand (e.g. the one used for `tak.<your-domain>` or whatever you set in Caddy/Domains for Authentik).
 4. In **Branding settings**, set **Default flow background** to an image (upload or URL). You can also set **Logo**, **Favicon**, **Branding title**, and **Custom CSS** there.
 
 **Via API**

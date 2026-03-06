@@ -400,7 +400,8 @@ def console_page():
     module_versions = get_all_module_versions()
     resp = render_template_string(CONSOLE_TEMPLATE,
         settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION,
-        module_versions=module_versions)
+        module_versions=module_versions, authentik_base_url=_get_authentik_base_url(settings),
+        takserver_base_url=_get_takserver_base_url(settings))
     from flask import make_response
     r = make_response(resp)
     r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
@@ -505,6 +506,8 @@ def takserver_page():
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
+        authentik_base_url=_get_authentik_base_url(load_settings()),
+        takserver_base_url=_get_takserver_base_url(load_settings()),
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False),
         upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
@@ -1490,8 +1493,8 @@ def caddy_save_domains():
 
 SERVICE_DOMAIN_DEFAULTS = {
     'infratak': 'infratak',
-    'takserver': 'tak',
-    'authentik': 'authentik',
+    'takserver': 'takserver',
+    'authentik': 'tak',
     'takportal': 'takportal',
     'nodered': 'nodered',
     'cloudtak_map': 'map',
@@ -1516,6 +1519,30 @@ def _get_service_domain(settings, service_key):
 def _get_all_service_domains(settings):
     """Return dict of service_key → current domain for all services."""
     return {k: _get_service_domain(settings, k) for k in SERVICE_DOMAIN_DEFAULTS}
+
+def _get_authentik_host(settings):
+    """Return the hostname for the Authentik service (configurable via Caddy/Domains, default tak.<fqdn> = hub)."""
+    return _get_service_domain(settings, 'authentik')
+
+def _get_takserver_host(settings):
+    """Return the hostname for TAK Server WebGUI (configurable via Caddy/Domains, default takserver.<fqdn>)."""
+    return _get_service_domain(settings, 'takserver')
+
+def _get_takserver_base_url(settings):
+    """Return https://<takserver_host> or https://<server_ip> for TAK Server (no port)."""
+    host = _get_takserver_host(settings)
+    if host:
+        return f'https://{host}'
+    server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
+    return f'https://{server_ip}'
+
+def _get_authentik_base_url(settings):
+    """Return the full base URL for Authentik (for links, AUTHENTIK_PUBLIC_URL, brand, outposts)."""
+    host = _get_authentik_host(settings)
+    if host:
+        return f'https://{host}'
+    server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
+    return f'http://{server_ip}:9090'
 
 def generate_caddyfile(settings=None):
     """Generate Caddyfile based on current settings and deployed services.
@@ -1769,7 +1796,7 @@ def wait_for_apt_lock(log_fn, log_list):
         log_list.append(f"  ⏳ {m:02d}:{s:02d}")
 
 
-def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
+def install_le_cert_on_8446(takserver_host, log_fn, wait_for_cert=True):
     """
     Install the Caddy-managed Let's Encrypt cert on TAK Server's port 8446
     so TAK clients trust the enrollment endpoint without a data package.
@@ -1779,17 +1806,16 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
       - run_takserver_deploy (end)   — wait_for_cert=False (Caddy already running, cert should exist)
 
     Args:
-        domain:        Base FQDN, e.g. "taktical.net"
-        log_fn:        Logging function (plog or log_step)
-        wait_for_cert: If True, poll up to 60s for cert files before giving up
+        takserver_host: TAK Server hostname (e.g. "takserver.example.com"), must match Caddy vhost
+        log_fn:         Logging function (plog or log_step)
+        wait_for_cert:  If True, poll up to 120s for cert files before giving up
     """
     import re, shutil
 
-    tak_domain = f"tak.{domain}"
     cert_dir = (f"/var/lib/caddy/.local/share/caddy/certificates/"
-                f"acme-v02.api.letsencrypt.org-directory/{tak_domain}")
-    cert_crt = f"{cert_dir}/{tak_domain}.crt"
-    cert_key = f"{cert_dir}/{tak_domain}.key"
+                f"acme-v02.api.letsencrypt.org-directory/{takserver_host}")
+    cert_crt = f"{cert_dir}/{takserver_host}.crt"
+    cert_key = f"{cert_dir}/{takserver_host}.key"
     core_config = "/opt/tak/CoreConfig.xml"
 
     # Optionally wait for Caddy to finish obtaining the cert
@@ -1806,12 +1832,12 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
         log_fn("  Re-run Caddy deploy once the cert is available")
         return False
 
-    log_fn(f"  ✓ LE cert files found for {tak_domain}")
+    log_fn(f"  ✓ LE cert files found for {takserver_host}")
 
     # Step A: LE cert → PKCS12
     r = subprocess.run(
         f'openssl pkcs12 -export -in "{cert_crt}" -inkey "{cert_key}" '
-        f'-out /tmp/takserver-le.p12 -name "{tak_domain}" -password pass:atakatak 2>&1',
+        f'-out /tmp/takserver-le.p12 -name "{takserver_host}" -password pass:atakatak 2>&1',
         shell=True, capture_output=True, text=True)
     if r.returncode != 0:
         log_fn(f"  ⚠ PKCS12 conversion failed: {r.stderr.strip()[:200]}")
@@ -1862,7 +1888,7 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
 # within 40 days of expiry, then restarts TAK Server.
 set -euo pipefail
 
-TAK_DOMAIN="{tak_domain}"
+TAK_DOMAIN="{takserver_host}"
 CERT_DIR="{cert_dir}"
 CERT_CRT="$CERT_DIR/$TAK_DOMAIN.crt"
 CERT_KEY="$CERT_DIR/$TAK_DOMAIN.key"
@@ -2619,9 +2645,9 @@ def run_takportal_deploy():
             "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
             "PORTAL_AUTH_ENABLED": "true" if settings.get('fqdn') else "false",
             "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
-            "AUTHENTIK_PUBLIC_URL": f"https://authentik.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:9090",
+            "AUTHENTIK_PUBLIC_URL": _get_authentik_base_url(settings),
             "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
-            "TAK_URL": f"https://tak.{settings['fqdn']}:8443/Marti" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
+            "TAK_URL": f"https://{_get_takserver_host(settings)}:8443/Marti" if _get_takserver_host(settings) else f"https://{server_ip}:8443/Marti",
             "TAK_API_P12_PATH": "data/certs/tak-client.p12",
             "TAK_API_P12_PASSPHRASE": "atakatak",
             "TAK_CA_PATH": "data/certs/tak-ca.pem",
@@ -2683,11 +2709,13 @@ def run_takportal_deploy():
                     brands = json_mod.loads(resp.read().decode())['results']
                     if brands:
                         brand_id = brands[0]['brand_uuid']
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
-                            data=json_mod.dumps({'domain': f'authentik.{fqdn}'}).encode(),
-                            headers=_ak_headers, method='PATCH')
-                        _urlreq.urlopen(req, timeout=10)
-                        plog(f"  \u2713 Brand domain set to authentik.{fqdn}")
+                        ak_host = _get_authentik_host(settings)
+                        if ak_host:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
+                                data=json_mod.dumps({'domain': ak_host}).encode(),
+                                headers=_ak_headers, method='PATCH')
+                            _urlreq.urlopen(req, timeout=10)
+                            plog(f"  \u2713 Brand domain set to {ak_host}")
                 except Exception as e:
                     plog(f"  \u26a0 Brand update: {str(e)[:80]}")
 
@@ -4484,8 +4512,7 @@ services:
                 message += ' ' + recovery_msg
                 if recovery_slug:
                     settings = load_settings()
-                    fqdn = settings.get('fqdn', '').strip()
-                    base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
+                    base = _get_authentik_base_url(settings)
                     message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
             else:
                 message += f' Recovery flow issue: {recovery_msg}.'
@@ -7237,17 +7264,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(portal_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :{{ portal_port }}{% endif %}</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ authentik_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}:8446" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
 <div class="section-title">Configuration</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;line-height:2">
-<div><span style="color:var(--text-dim)">TAK Server:</span> <span style="color:var(--cyan)">{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip','') + ':8443' }}</span></div>
-<div><span style="color:var(--text-dim)">Authentik URL:</span> <span style="color:var(--cyan)">{{ 'https://authentik.' + settings.get('fqdn') if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':9090' }}</span></div>
+<div><span style="color:var(--text-dim)">TAK Server:</span> <span style="color:var(--cyan)">{{ takserver_base_url }}:8443</span></div>
+<div><span style="color:var(--text-dim)">Authentik URL:</span> <span style="color:var(--cyan)">{{ authentik_base_url }}</span></div>
 <div><span style="color:var(--text-dim)">Forward Auth:</span> <span style="color:var(--green)">{{ 'Enabled via Caddy' if settings.get('fqdn') else 'Disabled (no FQDN)' }}</span></div>
 <div><span style="color:var(--text-dim)">Self-Service Enrollment:</span> <span style="color:var(--cyan)">{{ 'https://takportal.' + settings.get('fqdn') + '/request-access' if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':3000/request-access' }}</span></div>
 <div style="margin-top:8px;font-size:11px;color:var(--text-dim)">Users created in TAK Portal flow through Authentik → LDAP → TAK Server automatically</div>
@@ -7512,7 +7539,8 @@ def authentik_page():
     ) and len(container_info.get('containers', [])) > 0
     return render_template_string(AUTHENTIK_TEMPLATE,
         settings=settings, ak=ak, container_info=container_info,
-        ak_port=ak_port, version=VERSION,
+        ak_port=ak_port, authentik_base_url=_get_authentik_base_url(settings),
+        takserver_base_url=_get_takserver_base_url(settings), version=VERSION,
         deploying=authentik_deploy_status.get('running', False),
         deploy_done=authentik_deploy_status.get('complete', False),
         deploy_error=authentik_deploy_status.get('error', False),
@@ -7693,6 +7721,62 @@ def run_authentik_deploy(reconfigure=False):
                         _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog)
                         plog("  Configuring application access policies...")
                         _ensure_app_access_policies(ak_url, ak_headers, plog)
+                        # Sync Authentik home URL from Caddy/Domains (so changing domain in Caddy then reconfiguring updates Authentik)
+                        ak_host = _get_authentik_host(settings)
+                        ak_base = _get_authentik_base_url(settings)
+                        if ak_host and ak_base:
+                            plog("  Syncing Authentik domain from Caddy/Domains...")
+                            try:
+                                with open(env_path) as f:
+                                    env_lines = f.readlines()
+                                new_env = []
+                                seen = False
+                                for line in env_lines:
+                                    if line.strip().startswith('AUTHENTIK_HOST='):
+                                        new_env.append(f'AUTHENTIK_HOST={ak_base}\n')
+                                        seen = True
+                                    else:
+                                        new_env.append(line)
+                                if not seen:
+                                    new_env.append(f'AUTHENTIK_HOST={ak_base}\n')
+                                with open(env_path, 'w') as f:
+                                    f.writelines(new_env)
+                                with open(compose_path) as f:
+                                    comp_lines = f.readlines()
+                                comp_new = []
+                                for line in comp_lines:
+                                    if 'AUTHENTIK_HOST:' in line:
+                                        line = re.sub(r'AUTHENTIK_HOST:\s*\S+', f'AUTHENTIK_HOST: {ak_base}', line)
+                                    if ':host-gateway"' in line and '"' in line:
+                                        line = re.sub(r'(")([^"]+)(":host-gateway")', r'\1' + ak_host + r'\3', line)
+                                    comp_new.append(line)
+                                with open(compose_path, 'w') as f:
+                                    f.writelines(comp_new)
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                brands = json.loads(resp.read().decode())['results']
+                                if brands:
+                                    bid = brands[0]['brand_uuid']
+                                    urllib.request.urlopen(urllib.request.Request(f'{ak_url}/api/v3/core/brands/{bid}/',
+                                        data=json.dumps({'domain': ak_host}).encode(), headers=ak_headers, method='PATCH'), timeout=10)
+                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=embedded', headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                outposts = json.loads(resp.read().decode())['results']
+                                for op in outposts:
+                                    if 'embed' in op.get('name', '').lower() or op.get('type') == 'proxy':
+                                        cfg = dict(op.get('config', {}))
+                                        cfg['authentik_host'] = ak_base
+                                        cfg['authentik_host_insecure'] = False
+                                        put_payload = {'name': op.get('name', 'authentik Embedded Outpost'), 'type': op.get('type', 'proxy'), 'providers': list(op.get('providers', [])), 'config': cfg}
+                                        urllib.request.urlopen(urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{op["pk"]}/',
+                                            data=json.dumps(put_payload).encode(), headers=ak_headers, method='PUT'), timeout=10)
+                                        break
+                                plog("  \u2713 Authentik domain synced (env, compose, brand, outpost)")
+                                subprocess.run(f'cd {ak_dir} && docker compose up -d --force-recreate ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                                subprocess.run(f'cd {ak_dir} && docker compose restart server worker 2>&1', shell=True, capture_output=True, text=True, timeout=90)
+                                plog("  \u2713 Restarted Authentik (LDAP + server/worker to pick up new domain)")
+                            except Exception as e:
+                                plog(f"  \u26a0 Domain sync: {str(e)[:80]}")
                     else:
                         plog("  \u26a0 API not ready in time — run Update config & reconnect again to apply app access policies")
                 else:
@@ -7754,7 +7838,7 @@ AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD={ldap_svc_pass}
 AUTHENTIK_BOOTSTRAP_LDAP_BASEDN=DC=takldap
 AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST=http://authentik-server-1:9000/
 # Embedded outpost host — prevents 0.0.0.0:9000 redirect issue
-AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
+AUTHENTIK_HOST={_get_authentik_base_url(settings)}
 """ + (f"\n# Cookie domain so session is shared across subdomains (stream., infratak., etc.) — avoids redirect loop\nAUTHENTIK_COOKIE_DOMAIN=.{settings.get('fqdn').split(':')[0]}" if settings.get("fqdn") else "") + """
 # Email Configuration (uncomment and configure)
 # AUTHENTIK_EMAIL__HOST=smtp.example.com
@@ -7974,7 +8058,7 @@ entries:
       managed: goauthentik.io/outposts/embedded
     attrs:
       config:
-        authentik_host: https://authentik.{settings.get('fqdn') or server_ip}
+        authentik_host: {_get_authentik_base_url(settings)}
         authentik_host_insecure: false
 """
             with open(bp_embedded_path, 'w') as f:
@@ -8036,9 +8120,10 @@ entries:
                     ak_tag = m.group(1).strip()
                     break
             if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-                _fqdn = (settings.get('fqdn') or '').split(':')[0]
-                if _fqdn:
-                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    extra_hosts:\n      - \"authentik.{_fqdn}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: https://authentik.{_fqdn}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                _ak_host = _get_authentik_host(settings)
+                if _ak_host:
+                    _ak_base = _get_authentik_base_url(settings)
+                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    extra_hosts:\n      - \"{_ak_host}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: {_ak_base}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 else:
                     ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 new_lines = []
@@ -8664,16 +8749,18 @@ entries:
                     # 12a: Update Brand domain
                     plog("  Updating Authentik brand domain...")
                     try:
-                        req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
-                        resp = urllib.request.urlopen(req, timeout=15)
-                        brands = json.loads(resp.read().decode())['results']
-                        if brands:
-                            brand_id = brands[0]['brand_uuid']
-                            req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/{brand_id}/',
-                                data=json.dumps({'domain': f'authentik.{fqdn}'}).encode(),
-                                headers=ak_headers, method='PATCH')
-                            urllib.request.urlopen(req, timeout=10)
-                            plog(f"  ✓ Brand domain set to authentik.{fqdn}")
+                        ak_host = _get_authentik_host(settings)
+                        if ak_host:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
+                            resp = urllib.request.urlopen(req, timeout=15)
+                            brands = json.loads(resp.read().decode())['results']
+                            if brands:
+                                brand_id = brands[0]['brand_uuid']
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/{brand_id}/',
+                                    data=json.dumps({'domain': ak_host}).encode(),
+                                    headers=ak_headers, method='PATCH')
+                                urllib.request.urlopen(req, timeout=10)
+                                plog(f"  ✓ Brand domain set to {ak_host}")
                     except Exception as e:
                         plog(f"  ⚠ Brand update: {str(e)[:100]}")
 
@@ -8793,7 +8880,7 @@ entries:
                                 if provider_pk not in current_providers:
                                     current_providers.append(provider_pk)
                                 existing_config = dict(embedded.get('config', {}))
-                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
+                                existing_config['authentik_host'] = _get_authentik_base_url(settings)
                                 existing_config['authentik_host_insecure'] = False
                                 # Single PUT: providers + config (PATCH with only config can 400)
                                 put_payload = {
@@ -8807,7 +8894,7 @@ entries:
                                     headers=ak_headers, method='PUT')
                                 urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ TAK Portal added to embedded outpost")
-                                plog(f"  ✓ Embedded outpost authentik_host set to https://authentik.{fqdn}")
+                                plog(f"  ✓ Embedded outpost authentik_host set to {_get_authentik_base_url(settings)}")
                             else:
                                 plog("  ⚠ No embedded outpost found — create one in Authentik admin")
                         except Exception as e:
@@ -8847,10 +8934,7 @@ entries:
         plog("")
         plog("=" * 50)
         plog("\u2713 Authentik deployed successfully!")
-        if fqdn:
-            plog(f"  Admin UI: https://authentik.{fqdn}")
-        else:
-            plog(f"  Admin UI: http://{server_ip}:9090")
+        plog(f"  Admin UI: {_get_authentik_base_url(settings)}")
         plog(f"  Admin user: akadmin")
         if bootstrap_pass_display:
             plog(f"  Admin password: {bootstrap_pass_display}")
@@ -9022,10 +9106,10 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<a href="{{ authentik_base_url }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}:8446" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
@@ -9090,7 +9174,7 @@ It provides centralized user authentication and management for all your services
   <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
 </div>
 {% endif %}
-<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}">Waiting for deployment to start...</div>
+<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ authentik_base_url }}">Waiting for deployment to start...</div>
 {% endif %}
 
 {% if deploy_done %}
@@ -9103,7 +9187,7 @@ It provides centralized user authentication and management for all your services
 3. <strong>Deploy TAK Portal</strong> — go to <a href="/takportal" style="color:var(--cyan)">TAK Portal</a> and deploy when ready.<br>
 You can also open the Authentik admin UI below to make additional Admin users (Admin → Groups → authentik Admins → Users).
 </div>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
+<a href="{{ authentik_base_url }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
 <a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay</a>
 <a href="/takserver" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Server</a>
 <a href="/takportal" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Portal</a>
@@ -11237,7 +11321,7 @@ def run_takserver_deploy(config):
             if caddy_active.stdout.strip() == 'active':
                 log_step("")
                 log_step("━━━ Installing LE Cert on Port 8446 ━━━")
-                install_le_cert_on_8446(fqdn, log_step, wait_for_cert=True)
+                install_le_cert_on_8446(_get_service_domain(settings, 'takserver'), log_step, wait_for_cert=True)
 
         deploy_status.update({'complete': True, 'running': False})
 
@@ -12307,10 +12391,10 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}:8446" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
+<a href="{{ authentik_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">8446 login: <span style="color:var(--cyan)">webadmin</span> · <button type="button" onclick="showWebadminPassword()" id="webadmin-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="webadmin-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
