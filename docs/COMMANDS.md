@@ -151,6 +151,8 @@ The “home” is the hostname where you open Authentik and see the application 
 
 **You can set the Authentik home to any subdomain.** In **Caddy** (Domains), set the **Authentik** service domain to the subdomain you want (default: `tak` → `tak.<fqdn>`). You can change it to e.g. `portal` or `apps` so the home is `portal.<fqdn>` or `apps.<fqdn>`. Do this before you deploy Authentik, or change it later: update the domain in **Caddy → Domains**, save, then on the **Authentik** page click **Update config & reconnect**. We sync the new host to .env, LDAP outpost, brand, and embedded outpost, then restart so everything matches.
 
+**Changing Authentik or other service domains (full flow)** — If you change the FQDN or any subdomain (e.g. switch Authentik from `tak` to `authentik` or back): (1) **Caddy SSL** → **Domains** → set Authentik (and any others) → **Save & Reload Caddy**. (2) **Authentik** → **⬆ Update** — syncs the new URL into .env, LDAP compose, brand, outpost, and proxy providers; LDAP is recreated with the correct `AUTHENTIK_HOST`. (3) When the default Authentik host is `tak.<fqdn>`, Caddy also serves **authentik.<fqdn>** (same backend), so redirects to `authentik.*` still get valid TLS. If LDAP stays unhealthy, on the server check `grep AUTHENTIK_HOST ~/authentik/docker-compose.yml` and fix the URL if needed, then `cd ~/authentik && docker compose up -d --force-recreate ldap`. If the browser still redirects to an old host and shows "not secure", run **Authentik → Update** again or use the API workaround below for the brand.
+
 ---
 
 ## Authentik — how to update (server + LDAP)
