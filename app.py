@@ -6,6 +6,8 @@ from flask import (Flask, render_template_string, request, jsonify,
 from werkzeug.security import check_password_hash, generate_password_hash
 from functools import wraps
 import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
 app = Flask(__name__)
@@ -74,7 +76,7 @@ MEDIAMTX_LOGO_URL = "https://raw.githubusercontent.com/bluenviron/mediamtx/main/
 # MediaMTX web editor: regular repo (no LDAP); when Authentik/LDAP is installed we use LDAP branch if set
 MEDIAMTX_EDITOR_REPO = "https://github.com/takwerx/mediamtx-installer.git"
 MEDIAMTX_EDITOR_PATH = "config-editor"  # subdir containing mediamtx_config_editor.py
-MEDIAMTX_EDITOR_LDAP_BRANCH = "infratak"  # when LDAP/Authentik installed, try this branch first; None = always use default branch
+MEDIAMTX_EDITOR_LDAP_BRANCH = None  # LDAP behavior comes from mediamtx_ldap_overlay.py in this repo; use repo default branch
 # Node-RED official icons (https://nodered.org/about/resources/media/)
 NODERED_LOGO_URL = "https://nodered.org/about/resources/media/node-red-icon.png"       # icon only (e.g. small nav)
 NODERED_LOGO_URL_2 = "https://nodered.org/about/resources/media/node-red-icon-2.png"   # icon + "Node-RED" text (card, sidebar)
@@ -84,6 +86,9 @@ AUTHENTIK_LOGO_URL = "https://raw.githubusercontent.com/goauthentik/authentik/ma
 CADDY_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/5/56/Caddyserver_logo_dark.svg"
 # TAK (Team Awareness Kit) official brand logo from tak.gov
 TAK_LOGO_URL = "https://tak.gov/assets/logos/brand-06b80939.svg"
+# Login page logo: put your TAKWERX logo at static/takwerx-logo.png
+# For sharp display (no fuzz): export at 2x display size — e.g. 960px wide or 400–500px height (PNG, transparent).
+LOGIN_LOGO_FILENAME = "takwerx-logo.png"
 update_cache = {'latest': None, 'checked': 0, 'notes': ''}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -251,9 +256,12 @@ def render_sidebar(modules, active_path):
         cls = 'nav-item active' if path == active else 'nav-item'
         t = f' title="{html.escape(title)}"' if title else ''
         return f'<a href="{href}" class="{cls}"{t}>{content}</a>'
-    logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>TAK Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
+    logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
     parts = [logo]
     parts.append(link('/console', '<span class="nav-icon material-symbols-outlined">dashboard</span>Console'))
+    gd = modules.get('guarddog', {})
+    if gd.get('installed'):
+        parts.append(link('/guarddog', '<span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span>', 'Guard Dog'))
     caddy = modules.get('caddy', {})
     if caddy.get('installed'):
         parts.append(link('/caddy', f'<img src="{html.escape(CADDY_LOGO_URL)}" alt="Caddy SSL" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block">', 'Caddy SSL'))
@@ -319,22 +327,29 @@ def _get_unattended_upgrades_status():
 
 # === Routes ===
 
+def _login_logo_url():
+    """URL for login page logo if static/takwerx-logo.png exists; else None (show ⚡)."""
+    if os.path.exists(os.path.join(BASE_DIR, 'static', LOGIN_LOGO_FILENAME)):
+        return url_for('static', filename=LOGIN_LOGO_FILENAME)
+    return None
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'GET' and _apply_authentik_session():
         return redirect(url_for('console_page'))
+    logo_url = _login_logo_url()
     if request.method == 'POST':
         auth = load_auth()
         if not auth.get('password_hash'):
             return render_template_string(
                 LOGIN_TEMPLATE,
                 error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
-                version=VERSION)
+                version=VERSION, login_logo_url=logo_url)
         if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
-    return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION, login_logo_url=logo_url)
+    return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION, login_logo_url=logo_url)
 
 @app.route('/logout')
 def logout():
@@ -344,6 +359,7 @@ def logout():
 @app.route('/', methods=['GET', 'POST'])
 def index():
     """Landing: login at / (infratak.fqdn); when logged in redirect to console. Authentik headers = auto-login."""
+    logo_url = _login_logo_url()
     if request.method == 'GET' and _apply_authentik_session():
         return redirect(url_for('console_page'))
     if request.method == 'POST':
@@ -352,13 +368,13 @@ def index():
             return render_template_string(
                 LOGIN_TEMPLATE,
                 error='Password not set or wrong install path. Use backdoor: https://YOUR_SERVER_IP:5001 and run ./reset-console-password.sh from the install directory.',
-                version=VERSION)
+                version=VERSION, login_logo_url=logo_url)
         if check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
             return redirect(url_for('console_page'))
-        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION, login_logo_url=logo_url)
     if not session.get('authenticated'):
-        return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
+        return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION, login_logo_url=logo_url)
     return redirect(url_for('console_page'))
 
 @app.route('/api/forward-auth')
@@ -384,7 +400,8 @@ def console_page():
     module_versions = get_all_module_versions()
     resp = render_template_string(CONSOLE_TEMPLATE,
         settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION,
-        module_versions=module_versions)
+        module_versions=module_versions, authentik_base_url=_get_authentik_base_url(settings),
+        takserver_base_url=_get_takserver_base_url(settings))
     from flask import make_response
     r = make_response(resp)
     r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
@@ -407,9 +424,10 @@ def marketplace_page():
 @app.route('/help')
 @login_required
 def help_page():
-    """Help: backdoor URL, console password info, reset password."""
+    """Help: backdoor URL, console password info, reset password, hardening."""
     settings = load_settings()
-    return render_template_string(HELP_TEMPLATE, settings=settings, version=VERSION)
+    current_ssh_port = _get_current_ssh_port()
+    return render_template_string(HELP_TEMPLATE, settings=settings, version=VERSION, current_ssh_port=current_ssh_port)
 
 @app.route('/api/update/check')
 @login_required
@@ -488,8 +506,12 @@ def takserver_page():
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
+        authentik_base_url=_get_authentik_base_url(load_settings()),
+        takserver_base_url=_get_takserver_base_url(load_settings()),
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
-        deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
+        deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False),
+        upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
+        upgrade_error=upgrade_status.get('error', False))
 
 @app.route('/mediamtx')
 @login_required
@@ -504,10 +526,678 @@ def mediamtx_page():
         deploying=mediamtx_deploy_status.get('running', False),
         deploy_done=mediamtx_deploy_status.get('complete', False))
 
+# ── Guard Dog (TAK Server hardening / 7 monitors) ─────────────────────────────
+guarddog_deploy_log = []
+guarddog_deploy_status = {'running': False, 'complete': False, 'error': False}
+
+def _guarddog_health_url(settings):
+    """Build the health endpoint URL for this server (for Uptime Robot / display)."""
+    fqdn = (settings.get('fqdn') or '').strip()
+    server_ip = (settings.get('server_ip') or '').strip()
+    if fqdn:
+        return f"http://{fqdn.split(':')[0]}:8080/health"
+    if server_ip:
+        return f"http://{server_ip}:8080/health"
+    return "http://YOUR_SERVER_IP:8080/health"
+
+@app.route('/guarddog.js')
+def guarddog_js():
+    return send_from_directory(os.path.join(BASE_DIR, 'static'), 'guarddog.js', mimetype='application/javascript')
+
+@app.route('/takserver.js')
+def takserver_js():
+    return send_from_directory(os.path.join(BASE_DIR, 'static'), 'takserver.js', mimetype='application/javascript')
+
 @app.route('/guarddog')
 @login_required
 def guarddog_page():
-    return redirect(url_for('marketplace_page'))
+    settings = load_settings()
+    modules = detect_modules()
+    gd = modules.get('guarddog', {})
+    tak = modules.get('takserver', {})
+    relay = settings.get('email_relay', {})
+    email_relay_configured = bool(relay.get('relay_host') and relay.get('smtp_user'))
+    guarddog_monitors_tak = [
+        {'name': 'Port 8089', 'interval': '1 min', 'desc': 'Checks that TAK Server port 8089 is listening and accepting connections. Auto-restarts TAK Server after 3 consecutive failures.'},
+        {'name': 'Process', 'interval': '1 min', 'desc': 'Verifies all 5 TAK Server Java processes (messaging, api, config, plugins, retention). Auto-restart after 3 consecutive failures.'},
+        {'name': 'Network', 'interval': '1 min', 'desc': 'Pings Cloudflare (1.1.1.1) and Google (8.8.8.8). Alerts only (no restart) after 3 failures — helps distinguish network issues from server issues.'},
+        {'name': 'PostgreSQL', 'interval': '5 min', 'desc': 'Checks that the PostgreSQL service is running. Attempts restart if down; sends alert.'},
+        {'name': 'CoT database size', 'interval': '6 hours', 'desc': 'CoT DB size. Alert at 25GB (warning) or 40GB (critical). Retention deletes rows; run VACUUM to reclaim disk. Alert email includes tips.'},
+        {'name': 'OOM', 'interval': '1 min', 'desc': 'Scans TAK Server logs for OutOfMemoryError. Auto-restarts TAK Server and sends alert when detected.'},
+        {'name': 'Disk', 'interval': '1 hour', 'desc': 'Checks root and TAK logs filesystem usage. Alert only when usage exceeds 80% (warning) or 90% (critical).'},
+        {'name': 'Certificate', 'interval': 'Daily', 'desc': 'Checks Let\'s Encrypt / TAK Server cert expiry. Alert when 40 days or less remaining until expiry.'},
+        {'name': 'Root CA / Intermediate CA', 'interval': 'Escalating', 'desc': 'Monitors Root CA and Intermediate CA certificate expiry. First alert at 90 days, then at 75, 60, 45, 30 days, then daily until expiry.'},
+    ]
+    # Per-service list for expandable UI. "monitored" = Guard Dog monitors this (installed when Guard Dog was deployed).
+    guarddog_services = [
+        {'id': 'takserver', 'name': 'TAK Server', 'monitored': gd.get('installed'), 'monitors': guarddog_monitors_tak},
+        {'id': 'authentik', 'name': 'Authentik', 'monitored': modules.get('authentik', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '1 min', 'desc': 'Checks Authentik HTTP (9090). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
+        {'id': 'mediamtx', 'name': 'MediaMTX', 'monitored': modules.get('mediamtx', {}).get('installed'), 'monitors': [{'name': 'Service', 'interval': '1 min', 'desc': 'Checks systemd mediamtx. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
+        {'id': 'nodered', 'name': 'Node-RED', 'monitored': modules.get('nodered', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '1 min', 'desc': 'Checks Node-RED HTTP (1880). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
+        {'id': 'cloudtak', 'name': 'CloudTAK', 'monitored': modules.get('cloudtak', {}).get('installed'), 'monitors': [{'name': 'Container', 'interval': '1 min', 'desc': 'Checks CloudTAK container. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
+    ]
+    guarddog_docs_url = f'https://github.com/{GITHUB_REPO}/blob/main/docs/GUARDDOG.md'
+    notifications_configured = bool((settings.get('guarddog_alert_email') or '').strip())
+    return render_template_string(GUARDDOG_TEMPLATE,
+        settings=settings, gd=gd, tak=tak, version=VERSION,
+        guarddog_alert_email=settings.get('guarddog_alert_email', ''),
+        guarddog_sms=settings.get('guarddog_sms', {}),
+        guarddog_services=guarddog_services,
+        guarddog_docs_url=guarddog_docs_url,
+        notifications_configured=notifications_configured,
+        email_relay_configured=email_relay_configured,
+        health_url=_guarddog_health_url(settings),
+        deploying=guarddog_deploy_status.get('running', False),
+        deploy_done=guarddog_deploy_status.get('complete', False))
+
+@app.route('/api/guarddog/deploy', methods=['POST'])
+@login_required
+def guarddog_deploy_api():
+    if guarddog_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    data = request.json or {}
+    alert_email = (data.get('alert_email') or '').strip()
+    settings = load_settings()
+    if not alert_email:
+        alert_email = (settings.get('guarddog_alert_email') or '').strip()
+    # Allow deploy with no email (monitors run; alerts only after user configures email)
+    settings['guarddog_alert_email'] = alert_email
+    save_settings(settings)
+    guarddog_deploy_log.clear()
+    guarddog_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_guarddog_deploy, args=(alert_email,), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/guarddog/deploy/log')
+@login_required
+def guarddog_deploy_log_api():
+    idx = request.args.get('index', 0, type=int)
+    return jsonify({'entries': guarddog_deploy_log[idx:], 'total': len(guarddog_deploy_log),
+        'running': guarddog_deploy_status['running'], 'complete': guarddog_deploy_status['complete'],
+        'error': guarddog_deploy_status['error']})
+
+def _parse_guarddog_log_date(line):
+    """Return (date, display_str) for a restarts.log line, or (None, line) if unparseable."""
+    line = line.strip()
+    if not line:
+        return None, line
+    # ISO: 2026-03-03T15:00:00Z | ...
+    if len(line) >= 20 and line[10] == 'T' and line[19] in 'Z| ':
+        try:
+            dt = datetime.strptime(line[:19], '%Y-%m-%dT%H:%M:%S')
+            return dt.date(), line[:19].replace('T', ' ')
+        except ValueError:
+            pass
+    # date(1): Tue Mar  3 15:00:00 UTC 2026: message
+    idx = line.find(': ')
+    if idx > 20:
+        prefix = line[:idx].strip()
+        try:
+            dt = datetime.strptime(prefix, '%a %b %d %H:%M:%S %Z %Y')
+            return dt.date(), prefix
+        except ValueError:
+            pass
+    return None, ''
+
+def _guarddog_health_check(service_id):
+    """Quick health check for one service. Returns True if healthy, False otherwise. Used for UI and optional monitors."""
+    try:
+        if service_id == 'takserver':
+            r = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True, timeout=3)
+            if r.returncode != 0:
+                return False
+            # Optional: also check 8089
+            r2 = subprocess.run('ss -ltn "sport = :8089" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=2)
+            return 'LISTEN' in (r2.stdout or '')
+        if service_id == 'authentik':
+            req = urllib.request.Request('http://127.0.0.1:9090/', method='GET')
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status in (200, 302, 301)
+        if service_id == 'mediamtx':
+            r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True, timeout=3)
+            return r.returncode == 0
+        if service_id == 'nodered':
+            req = urllib.request.Request('http://127.0.0.1:1880/', method='GET')
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status in (200, 302, 301)
+        if service_id == 'cloudtak':
+            r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}"', shell=True, capture_output=True, text=True, timeout=5)
+            return bool(r.stdout and 'Up' in r.stdout)
+    except Exception:
+        return False
+    return False
+
+@app.route('/api/guarddog/health')
+@login_required
+def guarddog_health_api():
+    """Return health status per service (for UI). Only includes services that Guard Dog can monitor."""
+    result = {}
+    for sid in ('takserver', 'authentik', 'mediamtx', 'nodered', 'cloudtak'):
+        result[sid] = _guarddog_health_check(sid)
+    return jsonify(result)
+
+@app.route('/api/guarddog/activity-log')
+@login_required
+def guarddog_activity_log():
+    """Return Guard Dog restarts/alert log entries, optionally filtered by date. Newest first."""
+    from_arg = request.args.get('from', '').strip()
+    to_arg = request.args.get('to', '').strip()
+    date_from = None
+    date_to = None
+    try:
+        if from_arg:
+            date_from = datetime.strptime(from_arg, '%Y-%m-%d').date()
+        if to_arg:
+            date_to = datetime.strptime(to_arg, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date; use YYYY-MM-DD'}), 400
+    log_path = '/var/log/takguard/restarts.log'
+    entries = []
+    try:
+        if not os.path.exists(log_path):
+            return jsonify({'entries': [], 'log_path': log_path})
+        with open(log_path, 'r') as f:
+            lines = f.readlines()
+    except (OSError, PermissionError):
+        return jsonify({'entries': [], 'error': 'Could not read log file', 'log_path': log_path})
+    for raw in reversed(lines):
+        raw = raw.rstrip('\n')
+        if not raw:
+            continue
+        parsed_date, display_ts = _parse_guarddog_log_date(raw)
+        if date_from is not None and parsed_date is not None and parsed_date < date_from:
+            continue
+        if date_to is not None and parsed_date is not None and parsed_date > date_to:
+            continue
+        entries.append({'raw': raw, 'date': parsed_date.isoformat() if parsed_date else None, 'time_display': display_ts})
+    return jsonify({'entries': entries, 'log_path': log_path})
+
+def _guarddog_timer_list():
+    """All Guard Dog timer unit names (core + optional service monitors)."""
+    return ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
+            'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer',
+            'takintcaguard.timer',
+            'takauthentikguard.timer', 'takmediamtxguard.timer', 'taknoderedguard.timer', 'takcloudtakguard.timer']
+
+def _guarddog_is_enabled():
+    """True if Guard Dog timers are enabled (at least the core 8089 timer)."""
+    r = subprocess.run(['systemctl', 'is-enabled', 'tak8089guard.timer'], capture_output=True, text=True, timeout=5)
+    return r.returncode == 0 and r.stdout.strip() == 'enabled'
+
+@app.route('/api/guarddog/disable', methods=['POST'])
+@login_required
+def guarddog_disable():
+    """Stop and disable all Guard Dog timers and health service. Scripts stay installed; user can enable again."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'error': 'Guard Dog is not installed'}), 400
+    for t in _guarddog_timer_list():
+        subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
+    return jsonify({'success': True, 'enabled': False})
+
+@app.route('/api/guarddog/enable', methods=['POST'])
+@login_required
+def guarddog_enable():
+    """Enable and start all Guard Dog timers and health service."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'error': 'Guard Dog is not installed'}), 400
+    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+    for t in _guarddog_timer_list():
+        subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+    return jsonify({'success': True, 'enabled': True})
+
+@app.route('/api/guarddog/apply-docker-log-limits', methods=['POST'])
+@login_required
+def guarddog_apply_docker_log_limits():
+    """Apply Docker log limits (50m × 3 per container) so Node-RED/Authentik etc. cannot fill the disk. No redeploy needed."""
+    restarted, err = _ensure_docker_log_limits()
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+    return jsonify({
+        'success': True,
+        'docker_restarted': restarted,
+        'message': 'Docker log limits applied (50 MB × 3 files per container).' + (' Docker was restarted — start other containers from their pages if needed.' if restarted else ' Limits were already set.')
+    })
+
+@app.route('/api/guarddog/uninstall', methods=['POST'])
+@login_required
+def guarddog_uninstall():
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    timers = _guarddog_timer_list()
+    for t in timers:
+        subprocess.run(['systemctl', 'stop', t], capture_output=True, timeout=5)
+        subprocess.run(['systemctl', 'disable', t], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'stop', 'tak-health.service'], capture_output=True, timeout=5)
+    subprocess.run(['systemctl', 'disable', 'tak-health.service'], capture_output=True, timeout=5)
+    services_extra = ['tak8089guard.service', 'takoomguard.service', 'takdiskguard.service', 'takdbguard.service',
+                      'takcotdbguard.service', 'taknetguard.service', 'takprocessguard.service', 'takcertguard.service',
+                      'takintcaguard.service',
+                      'takauthentikguard.service', 'takmediamtxguard.service', 'taknoderedguard.service', 'takcloudtakguard.service', 'tak-health.service']
+    for name in timers + services_extra:
+        path = os.path.join('/etc/systemd/system', name)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    if os.path.exists('/opt/tak-guarddog'):
+        shutil.rmtree('/opt/tak-guarddog', ignore_errors=True)
+    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+    return jsonify({'success': True})
+
+@app.route('/api/guarddog/test-email', methods=['POST'])
+@login_required
+def guarddog_test_email():
+    """Send a test email to the configured Guard Dog alert address (uses Email Relay / Brevo when deployed)."""
+    settings = load_settings()
+    data = request.json or {}
+    to_addr = data.get('to', '').strip() or (settings.get('guarddog_alert_email') or '').strip()
+    if not to_addr:
+        return jsonify({'success': False, 'error': 'No email address configured'}), 400
+    if data.get('save'):
+        settings['guarddog_alert_email'] = to_addr
+        save_settings(settings)
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        relay = settings.get('email_relay', {})
+        from_addr = relay.get('from_addr', 'noreply@localhost')
+        from_name = relay.get('from_name', 'Guard Dog')
+        msg = MIMEText('Test alert from infra-TAK Guard Dog.\n\nIf you received this, email notifications are working (via Email Relay/Brevo when deployed).', 'plain')
+        msg['From'] = f'{from_name} <{from_addr}>'
+        msg['To'] = to_addr
+        msg['Subject'] = 'Guard Dog Test Alert'
+        with smtplib.SMTP('localhost', 25, timeout=15) as s:
+            s.sendmail(from_addr, [to_addr], msg.as_string())
+        return jsonify({'success': True, 'message': f'Test email sent to {to_addr}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/guarddog/sms/save', methods=['POST'])
+@login_required
+def guarddog_sms_save():
+    """Save SMS provider config (Twilio or Brevo) and write sms_send.sh for watch scripts."""
+    data = request.json or {}
+    provider = (data.get('provider') or '').strip().lower()
+    settings = load_settings()
+    if provider not in ('twilio', 'brevo', ''):
+        return jsonify({'success': False, 'error': 'Provider must be Twilio, Brevo, or empty to disable'}), 400
+    if provider == '':
+        settings['guarddog_sms'] = {}
+        save_settings(settings)
+        for path in ['/opt/tak-guarddog/sms_send.sh', '/opt/tak-guarddog/sms_send.py']:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        return jsonify({'success': True, 'message': 'SMS disabled'})
+    if provider == 'twilio':
+        account_sid = (data.get('account_sid') or '').strip()
+        auth_token = (data.get('auth_token') or '').strip()
+        from_number = (data.get('from_number') or '').strip()
+        to_numbers = (data.get('to_numbers') or '').strip()
+        if not all([account_sid, auth_token, from_number, to_numbers]):
+            return jsonify({'success': False, 'error': 'Twilio: Account SID, Auth Token, From number, and To number(s) required'}), 400
+        settings['guarddog_sms'] = {'provider': 'twilio', 'account_sid': account_sid, 'auth_token': auth_token, 'from_number': from_number, 'to_numbers': to_numbers}
+    else:
+        api_key = (data.get('api_key') or '').strip()
+        sender = (data.get('sender') or '').strip()
+        to_numbers = (data.get('to_numbers') or '').strip()
+        if not all([api_key, sender, to_numbers]):
+            return jsonify({'success': False, 'error': 'Brevo: API key, Sender (max 11 chars), and To number(s) with country code required'}), 400
+        settings['guarddog_sms'] = {'provider': 'brevo', 'api_key': api_key, 'sender': sender, 'to_numbers': to_numbers}
+    save_settings(settings)
+    _guarddog_write_sms_send_script(settings)
+    return jsonify({'success': True, 'message': 'SMS settings saved'})
+
+def _guarddog_write_sms_send_script(settings):
+    """Write /opt/tak-guarddog/sms_send.sh that watch scripts can call to send SMS via console API."""
+    sms = settings.get('guarddog_sms', {})
+    if not sms or not sms.get('provider'):
+        return
+    os.makedirs('/opt/tak-guarddog', exist_ok=True)
+    py_script = '''#!/usr/bin/env python3
+import urllib.request, json, sys
+if len(sys.argv) < 3:
+    sys.exit(0)
+subj, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f: body = f.read()
+except Exception:
+    body = subj
+data = json.dumps({"subject": subj, "body": body}).encode()
+req = urllib.request.Request("http://127.0.0.1:5001/api/guarddog/send-sms", data=data, headers={"Content-Type": "application/json"}, method="POST")
+try:
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+'''
+    sh_script = '''#!/bin/bash
+SUBJ="$1"
+BODY_FILE="$2"
+[ -z "$BODY_FILE" ] || [ ! -f "$BODY_FILE" ] && exit 0
+/usr/bin/python3 /opt/tak-guarddog/sms_send.py "$SUBJ" "$BODY_FILE"
+'''
+    for name, content in [('sms_send.py', py_script), ('sms_send.sh', sh_script)]:
+        p = os.path.join('/opt/tak-guarddog', name)
+        with open(p, 'w') as f:
+            f.write(content)
+        os.chmod(p, 0o755)
+
+def _guarddog_send_sms_now(sms, text):
+    """Send SMS via Twilio or Brevo. sms = settings['guarddog_sms'], text = message body (max 1600 chars). Raises on error. Returns optional dict with e.g. {'brevo_message_id': ...} for debugging."""
+    text = (text or '')[:1600]
+    out = {}
+    if sms.get('provider') == 'twilio':
+        import base64
+        import urllib.error
+        account_sid = sms.get('account_sid', '')
+        auth_token = sms.get('auth_token', '')
+        from_num = sms.get('from_number', '')
+        to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+        if not to_list:
+            raise ValueError('No To numbers configured')
+        auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+        for to_num in to_list:
+            to_e164 = '+' + ''.join(c for c in to_num if c.isdigit()).lstrip('+') or to_num.lstrip('+')
+            req_body = f"To={urllib.parse.quote(to_e164)}&From={urllib.parse.quote(from_num)}&Body={urllib.parse.quote(text)}"
+            req = urllib.request.Request(f'https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json', data=req_body.encode(), method='POST', headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            try:
+                urllib.request.urlopen(req, timeout=15)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ''
+                try:
+                    err_json = json.loads(body) if body else {}
+                    msg = err_json.get('message') or str(err_json.get('code', '')) or body[:200] or f'HTTP {e.code}'
+                except Exception:
+                    msg = body[:200] or f'HTTP {e.code}'
+                raise ValueError(f'Twilio SMS: {msg}')
+    else:
+        import urllib.error
+        api_key = sms.get('api_key', '')
+        sender = (sms.get('sender', '') or 'GuardDog')[:11]
+        to_list = [n.strip() for n in (sms.get('to_numbers') or '').split(',') if n.strip()]
+        if not to_list:
+            raise ValueError('No To numbers configured')
+        for to_num in to_list:
+            recipient = ''.join(c for c in to_num if c.isdigit())
+            if not recipient or len(recipient) < 10:
+                raise ValueError(f'Brevo recipient must be digits with country code (e.g. 15551234567). Got: {to_num[:25]}')
+            payload = json.dumps({'sender': sender, 'recipient': recipient, 'content': text, 'type': 'transactional', 'tag': 'GuardDog', 'unicodeEnabled': True}).encode()
+            req = urllib.request.Request('https://api.brevo.com/v3/transactionalSMS/send', data=payload, method='POST', headers={'api-key': api_key, 'Content-Type': 'application/json', 'accept': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read().decode()
+                    try:
+                        data = json.loads(body) if body else {}
+                        if data.get('messageId') is not None:
+                            out['brevo_message_id'] = data.get('messageId')
+                    except Exception:
+                        pass
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ''
+                try:
+                    err_json = json.loads(body) if body else {}
+                    msg = err_json.get('message') or err_json.get('code') or body[:200] or f'HTTP {e.code}'
+                except Exception:
+                    msg = body[:200] or f'HTTP {e.code}'
+                raise ValueError(f'Brevo SMS: {msg}')
+    return out
+
+@app.route('/api/guarddog/brevo-sms-events', methods=['GET'])
+@login_required
+def guarddog_brevo_sms_events():
+    """Fetch last SMS events from Brevo (sent, delivered, rejected, etc.) so user can see delivery status without digging in Brevo UI."""
+    settings = load_settings()
+    sms = settings.get('guarddog_sms', {})
+    if not sms or sms.get('provider') != 'brevo':
+        return jsonify({'error': 'Brevo SMS not configured'}), 400
+    api_key = sms.get('api_key', '')
+    if not api_key:
+        return jsonify({'error': 'Brevo API key not set'}), 400
+    days = request.args.get('days', '1')
+    try:
+        days_int = max(1, min(7, int(days)))
+    except ValueError:
+        days_int = 1
+    url = f'https://api.brevo.com/v3/transactionalSMS/statistics/events?days={days_int}&tags=GuardDog&limit=50&sort=desc'
+    req = urllib.request.Request(url, method='GET', headers={'api-key': api_key, 'accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ''
+        try:
+            err = json.loads(body) if body else {}
+            msg = err.get('message') or err.get('code') or body[:200] or f'HTTP {e.code}'
+        except Exception:
+            msg = body[:200] or f'HTTP {e.code}'
+        return jsonify({'error': f'Brevo: {msg}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    events = data.get('events') or []
+    return jsonify({'events': events})
+
+@app.route('/api/guarddog/test-sms', methods=['POST'])
+@login_required
+def guarddog_test_sms():
+    """Send a test SMS using saved Guard Dog SMS config (Twilio or Brevo)."""
+    settings = load_settings()
+    sms = settings.get('guarddog_sms', {})
+    if not sms or sms.get('provider') not in ('twilio', 'brevo'):
+        return jsonify({'success': False, 'error': 'SMS not configured. Save Twilio or Brevo settings first.'}), 400
+    try:
+        info = _guarddog_send_sms_now(sms, 'Guard Dog test - if you got this, SMS is working.')
+        msg = 'Test SMS sent to configured number(s).'
+        if info.get('brevo_message_id') is not None:
+            msg += f' Brevo message ID: {info["brevo_message_id"]} (check Brevo SMS logs if the text did not arrive).'
+        return jsonify({'success': True, 'message': msg})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/guarddog/send-sms', methods=['POST'])
+def guarddog_send_sms():
+    """Called by Guard Dog scripts (localhost only) to send SMS via Twilio or Brevo."""
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'error': 'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    subj = (data.get('subject') or '')[:100]
+    body = (data.get('body') or '')[:1600]
+    settings = load_settings()
+    sms = settings.get('guarddog_sms', {})
+    if not sms or sms.get('provider') not in ('twilio', 'brevo'):
+        return jsonify({'error': 'SMS not configured'}), 400
+    try:
+        _guarddog_send_sms_now(sms, f"{subj}: {body}")
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def run_guarddog_deploy(alert_email):
+    """Deploy Guard Dog: monitors + health endpoint. Requires TAK Server at /opt/tak. Alert email optional (alerts only when set)."""
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        guarddog_deploy_log.append(entry)
+    alert_sms = ''  # Optional SMS; scripts accept empty
+    try:
+        if not os.path.exists('/opt/tak'):
+            plog("✗ TAK Server not found at /opt/tak. Deploy TAK Server first.")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("━━━ Guard Dog deployment ━━━")
+        scripts_dir = os.path.join(BASE_DIR, 'scripts', 'guarddog')
+        if not os.path.isdir(scripts_dir):
+            plog(f"✗ Scripts directory not found: {scripts_dir}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        for d in ['/opt/tak-guarddog', '/var/lib/takguard', '/var/log/takguard']:
+            os.makedirs(d, exist_ok=True)
+        plog("✓ Directories created")
+        script_files = [
+            'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
+            'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py'
+        ]
+        # Optional: monitors for other services (only install if that service is present)
+        ak_dir = os.path.expanduser('~/authentik')
+        nr_dir = os.path.expanduser('~/node-red')
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+            script_files.append('tak-authentik-watch.sh')
+        if os.path.exists('/usr/local/bin/mediamtx') and os.path.exists('/usr/local/etc/mediamtx.yml'):
+            script_files.append('tak-mediamtx-watch.sh')
+        if os.path.exists(os.path.join(nr_dir, 'docker-compose.yml')):
+            script_files.append('tak-nodered-watch.sh')
+        if os.path.exists(cloudtak_dir) and os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml')):
+            script_files.append('tak-cloudtak-watch.sh')
+        for name in script_files:
+            src = os.path.join(scripts_dir, name)
+            if not os.path.isfile(src):
+                plog(f"✗ Missing script: {name}")
+                guarddog_deploy_status.update({'running': False, 'error': True})
+                return
+            content = open(src, 'r').read()
+            content = content.replace('ALERT_EMAIL_PLACEHOLDER', alert_email).replace('ALERT_SMS_PLACEHOLDER', alert_sms or '')
+            dest = os.path.join('/opt/tak-guarddog', name)
+            with open(dest, 'w') as f:
+                f.write(content)
+            if name.endswith('.sh'):
+                os.chmod(dest, 0o755)
+        plog("✓ Scripts installed")
+        units = [
+            ('tak8089guard.service', '[Unit]\nDescription=TAK 8089 Health Guard Dog\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-8089-watch.sh\n'),
+            ('tak8089guard.timer', '[Unit]\nDescription=Run TAK 8089 guard dog every 1 minute\n\n[Timer]\nOnBootSec=10min\nOnUnitActiveSec=1min\nUnit=tak8089guard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takoomguard.service', '[Unit]\nDescription=TAK OOM Guard Dog\nAfter=takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-oom-watch.sh\n'),
+            ('takoomguard.timer', '[Unit]\nDescription=Run TAK OOM guard dog every 1 minute\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1min\nUnit=takoomguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takdiskguard.service', '[Unit]\nDescription=TAK Disk Space Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-disk-watch.sh\n'),
+            ('takdiskguard.timer', '[Unit]\nDescription=Run TAK disk monitor every hour\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=1h\nUnit=takdiskguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takdbguard.service', '[Unit]\nDescription=TAK PostgreSQL Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-db-watch.sh\n'),
+            ('takdbguard.timer', '[Unit]\nDescription=Run TAK DB monitor every 5 minutes\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=5min\nUnit=takdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takcotdbguard.service', '[Unit]\nDescription=TAK CoT Database Size Monitor\nAfter=postgresql.service postgresql-15.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cotdb-watch.sh\n'),
+            ('takcotdbguard.timer', '[Unit]\nDescription=Run TAK CoT DB size monitor every 6 hours\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=6h\nUnit=takcotdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('taknetguard.service', '[Unit]\nDescription=TAK Network Monitor\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-network-watch.sh\n'),
+            ('taknetguard.timer', '[Unit]\nDescription=TAK Network Monitor Timer\nRequires=taknetguard.service\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takprocessguard.service', '[Unit]\nDescription=TAK Server Process Monitor\nAfter=network.target takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-process-watch.sh\n'),
+            ('takprocessguard.timer', '[Unit]\nDescription=TAK Server Process Monitor Timer\nRequires=takprocessguard.service\n\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takcertguard.service', '[Unit]\nDescription=TAK Certificate Expiry Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cert-watch.sh\n'),
+            ('takcertguard.timer', '[Unit]\nDescription=Run TAK cert monitor daily\n\n[Timer]\nOnBootSec=1h\nOnUnitActiveSec=1d\nUnit=takcertguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('takintcaguard.service', '[Unit]\nDescription=TAK Intermediate CA Expiry Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-intca-watch.sh\n'),
+            ('takintcaguard.timer', '[Unit]\nDescription=Run TAK Intermediate CA expiry monitor daily\n\n[Timer]\nOnBootSec=2h\nOnUnitActiveSec=1d\nUnit=takintcaguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ('tak-health.service', '[Unit]\nDescription=TAK Server Health Check Endpoint\nAfter=network.target takserver.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-health-endpoint.py\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n'),
+        ]
+        # Optional timers for other services (only if we installed the script)
+        if 'tak-authentik-watch.sh' in script_files:
+            units.extend([
+                ('takauthentikguard.service', '[Unit]\nDescription=Guard Dog Authentik Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-authentik-watch.sh\n'),
+                ('takauthentikguard.timer', '[Unit]\nDescription=Run Authentik guard every 1 minute\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1min\nUnit=takauthentikguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-mediamtx-watch.sh' in script_files:
+            units.extend([
+                ('takmediamtxguard.service', '[Unit]\nDescription=Guard Dog MediaMTX Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-mediamtx-watch.sh\n'),
+                ('takmediamtxguard.timer', '[Unit]\nDescription=Run MediaMTX guard every 1 minute\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1min\nUnit=takmediamtxguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-nodered-watch.sh' in script_files:
+            units.extend([
+                ('taknoderedguard.service', '[Unit]\nDescription=Guard Dog Node-RED Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-nodered-watch.sh\n'),
+                ('taknoderedguard.timer', '[Unit]\nDescription=Run Node-RED guard every 1 minute\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1min\nUnit=taknoderedguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        if 'tak-cloudtak-watch.sh' in script_files:
+            units.extend([
+                ('takcloudtakguard.service', '[Unit]\nDescription=Guard Dog CloudTAK Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cloudtak-watch.sh\n'),
+                ('takcloudtakguard.timer', '[Unit]\nDescription=Run CloudTAK guard every 1 minute\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1min\nUnit=takcloudtakguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        for name, content in units:
+            path = os.path.join('/etc/systemd/system', name)
+            with open(path, 'w') as f:
+                f.write(content)
+        plog("✓ Systemd units installed")
+        # TAK Server soft start: start after network and PostgreSQL to avoid boot race / restart loops
+        tak_dropin_dir = '/etc/systemd/system/takserver.service.d'
+        os.makedirs(tak_dropin_dir, exist_ok=True)
+        tak_dropin = os.path.join(tak_dropin_dir, 'soft-start.conf')
+        with open(tak_dropin, 'w') as f:
+            f.write('[Unit]\nAfter=network-online.target postgresql.service postgresql-15.service\nWants=network-online.target\n')
+        plog("✓ TAK Server soft-start drop-in installed (starts after network + PostgreSQL)")
+        # 4GB swap for memory stability (from reference TAK Server Hardening script)
+        try:
+            r = subprocess.run(['swapon', '--show'], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and '/swapfile' in (r.stdout or ''):
+                plog("✓ Swap already configured, skipping")
+            else:
+                if os.path.exists('/swapfile'):
+                    subprocess.run(['swapon', '/swapfile'], capture_output=True, timeout=5)
+                    with open('/etc/fstab', 'r') as f:
+                        fstab = f.read()
+                    if '/swapfile' not in fstab:
+                        with open('/etc/fstab', 'a') as f:
+                            f.write('\n/swapfile swap swap defaults 0 0\n')
+                    plog("✓ Swap file enabled")
+                else:
+                    subprocess.run(['fallocate', '-l', '4G', '/swapfile'], check=True, timeout=30)
+                    os.chmod('/swapfile', 0o600)
+                    subprocess.run(['mkswap', '/swapfile'], check=True, capture_output=True, timeout=10)
+                    subprocess.run(['swapon', '/swapfile'], check=True, timeout=10)
+                    with open('/etc/fstab', 'r') as f:
+                        fstab = f.read()
+                    if '/swapfile' not in fstab:
+                        with open('/etc/fstab', 'a') as f:
+                            f.write('\n/swapfile swap swap defaults 0 0\n')
+                    plog("✓ 4GB swap configured (memory stability)")
+        except Exception as e:
+            plog(f"⚠ Swap setup skipped: {e}")
+        r = subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            plog(f"✗ daemon-reload failed: {r.stderr}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
+                  'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer', 'takintcaguard.timer']
+        if 'tak-authentik-watch.sh' in script_files:
+            timers.append('takauthentikguard.timer')
+        if 'tak-mediamtx-watch.sh' in script_files:
+            timers.append('takmediamtxguard.timer')
+        if 'tak-nodered-watch.sh' in script_files:
+            timers.append('taknoderedguard.timer')
+        if 'tak-cloudtak-watch.sh' in script_files:
+            timers.append('takcloudtakguard.timer')
+        for t in timers:
+            re = subprocess.run(['systemctl', 'enable', t], capture_output=True, text=True, timeout=5)
+            if re.returncode != 0:
+                plog(f"✗ systemctl enable {t} failed: {re.stderr or re.stdout or 'unknown'}")
+                guarddog_deploy_status.update({'running': False, 'error': True})
+                return
+            rs = subprocess.run(['systemctl', 'start', t], capture_output=True, text=True, timeout=5)
+            if rs.returncode != 0:
+                plog(f"⚠ systemctl start {t} failed (continuing): {rs.stderr or rs.stdout or 'unknown'}")
+        re = subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, text=True, timeout=5)
+        if re.returncode != 0:
+            plog(f"✗ systemctl enable tak-health.service failed: {re.stderr or re.stdout or 'unknown'}")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+        for f in ['process_alert_sent', 'disk_alert_sent', 'db_alert_sent', 'cotdb_alert_sent', 'network_alert_sent', 'cert_alert_sent']:
+            p = os.path.join('/var/lib/takguard', f)
+            if not os.path.exists(p):
+                open(p, 'a').close()
+        if not _guarddog_is_enabled():
+            plog("✗ Timers did not end up enabled; run Enable on the Guard Dog page or retry deploy.")
+            guarddog_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Timers and health endpoint started")
+        plog("✓ Deployment complete")
+        guarddog_deploy_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        plog(f"✗ Error: {str(e)}")
+        guarddog_deploy_status.update({'running': False, 'error': True})
 
 @app.route('/nodered')
 @login_required
@@ -546,7 +1236,8 @@ def cloudtak_page():
         cloudtak_icon=CLOUDTAK_ICON,
         container_info=container_info,
         deploying=cloudtak_deploy_status.get('running', False),
-        deploy_done=cloudtak_deploy_status.get('complete', False))
+        deploy_done=cloudtak_deploy_status.get('complete', False),
+        deploy_error=cloudtak_deploy_status.get('error', False))
 
 @app.route('/cloudtak/page.js')
 @login_required
@@ -802,8 +1493,8 @@ def caddy_save_domains():
 
 SERVICE_DOMAIN_DEFAULTS = {
     'infratak': 'infratak',
-    'takserver': 'tak',
-    'authentik': 'authentik',
+    'takserver': 'takserver',
+    'authentik': 'tak',
     'takportal': 'takportal',
     'nodered': 'nodered',
     'cloudtak_map': 'map',
@@ -828,6 +1519,30 @@ def _get_service_domain(settings, service_key):
 def _get_all_service_domains(settings):
     """Return dict of service_key → current domain for all services."""
     return {k: _get_service_domain(settings, k) for k in SERVICE_DOMAIN_DEFAULTS}
+
+def _get_authentik_host(settings):
+    """Return the hostname for the Authentik service (configurable via Caddy/Domains, default tak.<fqdn> = hub)."""
+    return _get_service_domain(settings, 'authentik')
+
+def _get_takserver_host(settings):
+    """Return the hostname for TAK Server WebGUI (configurable via Caddy/Domains, default takserver.<fqdn>)."""
+    return _get_service_domain(settings, 'takserver')
+
+def _get_takserver_base_url(settings):
+    """Return https://<takserver_host> or https://<server_ip> for TAK Server (no port)."""
+    host = _get_takserver_host(settings)
+    if host:
+        return f'https://{host}'
+    server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
+    return f'https://{server_ip}'
+
+def _get_authentik_base_url(settings):
+    """Return the full base URL for Authentik (for links, AUTHENTIK_PUBLIC_URL, brand, outposts)."""
+    host = _get_authentik_host(settings)
+    if host:
+        return f'https://{host}'
+    server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
+    return f'http://{server_ip}:9090'
 
 def generate_caddyfile(settings=None):
     """Generate Caddyfile based on current settings and deployed services.
@@ -927,6 +1642,14 @@ def generate_caddyfile(settings=None):
         lines.append(f"    reverse_proxy 127.0.0.1:9090")
         lines.append(f"}}")
         lines.append("")
+        # If default is tak.<fqdn>, also serve Authentik on authentik.<fqdn> so redirects to authentik.* don't break (TLS works)
+        fqdn_base = domain.split(':')[0].split('/')[0] if domain else ''
+        if fqdn_base and ak_host == f'tak.{fqdn_base}':
+            lines.append(f"# Authentik (alternate hostname — same backend)")
+            lines.append(f"authentik.{fqdn_base} {{")
+            lines.append(f"    reverse_proxy 127.0.0.1:9090")
+            lines.append(f"}}")
+            lines.append("")
 
     portal = modules.get('takportal', {})
     if portal.get('installed'):
@@ -1029,9 +1752,18 @@ def wait_for_apt_lock(log_fn, log_list):
     """
     Wait for unattended-upgrades / apt locks to release before installing packages.
     Called at the start of every deploy that uses apt/dpkg.
-    Waits indefinitely — no timeout. Checks both process and dpkg lock file.
+    If unattended-upgrades is disabled but a process is still running, we kill it and wait briefly.
+    Otherwise waits until lock clears (no timeout when upgrades are enabled).
     Appends a ⏳ ticker line every 10s — the frontend JS overwrites it in place.
     """
+    uu = _get_unattended_upgrades_status()
+    uu_disabled = not uu.get('enabled', True)
+
+    def _unattended_process_running():
+        r = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
+            shell=True, capture_output=True, text=True)
+        return bool(r.stdout.strip())
+
     def is_locked():
         # Check dpkg lock file
         lock = subprocess.run('lsof /var/lib/dpkg/lock-frontend 2>/dev/null',
@@ -1039,12 +1771,24 @@ def wait_for_apt_lock(log_fn, log_list):
         if lock.stdout.strip():
             return True
         # Check for active upgrade process (exclude the shutdown watcher)
-        proc = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
-            shell=True, capture_output=True, text=True)
-        return bool(proc.stdout.strip())
+        return _unattended_process_running()
 
     if not is_locked():
         return True
+
+    # Unattended-upgrades is disabled but process/lock still present (e.g. user just turned it off)
+    if uu_disabled:
+        log_fn("Unattended-upgrades is disabled; stopping any remaining upgrade process...")
+        subprocess.run('pkill -TERM -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+        # Wait up to 60s for process to exit and lock to release
+        for _ in range(12):
+            time.sleep(5)
+            if not is_locked():
+                log_fn("✓ Clear to proceed.")
+                return True
+        log_fn("⚠ Lock still held after 60s; continuing anyway (dpkg may be in use elsewhere).")
+        return True
+
     log_fn("⏳ Unattended-upgrades is running — waiting for it to finish...")
     log_fn("  This can take 20-45 minutes on a fresh VPS. Do not cancel.")
     waited = 0
@@ -1060,7 +1804,7 @@ def wait_for_apt_lock(log_fn, log_list):
         log_list.append(f"  ⏳ {m:02d}:{s:02d}")
 
 
-def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
+def install_le_cert_on_8446(takserver_host, log_fn, wait_for_cert=True):
     """
     Install the Caddy-managed Let's Encrypt cert on TAK Server's port 8446
     so TAK clients trust the enrollment endpoint without a data package.
@@ -1070,17 +1814,16 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
       - run_takserver_deploy (end)   — wait_for_cert=False (Caddy already running, cert should exist)
 
     Args:
-        domain:        Base FQDN, e.g. "taktical.net"
-        log_fn:        Logging function (plog or log_step)
-        wait_for_cert: If True, poll up to 60s for cert files before giving up
+        takserver_host: TAK Server hostname (e.g. "takserver.example.com"), must match Caddy vhost
+        log_fn:         Logging function (plog or log_step)
+        wait_for_cert:  If True, poll up to 120s for cert files before giving up
     """
     import re, shutil
 
-    tak_domain = f"tak.{domain}"
     cert_dir = (f"/var/lib/caddy/.local/share/caddy/certificates/"
-                f"acme-v02.api.letsencrypt.org-directory/{tak_domain}")
-    cert_crt = f"{cert_dir}/{tak_domain}.crt"
-    cert_key = f"{cert_dir}/{tak_domain}.key"
+                f"acme-v02.api.letsencrypt.org-directory/{takserver_host}")
+    cert_crt = f"{cert_dir}/{takserver_host}.crt"
+    cert_key = f"{cert_dir}/{takserver_host}.key"
     core_config = "/opt/tak/CoreConfig.xml"
 
     # Optionally wait for Caddy to finish obtaining the cert
@@ -1097,12 +1840,12 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
         log_fn("  Re-run Caddy deploy once the cert is available")
         return False
 
-    log_fn(f"  ✓ LE cert files found for {tak_domain}")
+    log_fn(f"  ✓ LE cert files found for {takserver_host}")
 
     # Step A: LE cert → PKCS12
     r = subprocess.run(
         f'openssl pkcs12 -export -in "{cert_crt}" -inkey "{cert_key}" '
-        f'-out /tmp/takserver-le.p12 -name "{tak_domain}" -password pass:atakatak 2>&1',
+        f'-out /tmp/takserver-le.p12 -name "{takserver_host}" -password pass:atakatak 2>&1',
         shell=True, capture_output=True, text=True)
     if r.returncode != 0:
         log_fn(f"  ⚠ PKCS12 conversion failed: {r.stderr.strip()[:200]}")
@@ -1153,7 +1896,7 @@ def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
 # within 40 days of expiry, then restarts TAK Server.
 set -euo pipefail
 
-TAK_DOMAIN="{tak_domain}"
+TAK_DOMAIN="{takserver_host}"
 CERT_DIR="{cert_dir}"
 CERT_CRT="$CERT_DIR/$TAK_DOMAIN.crt"
 CERT_KEY="$CERT_DIR/$TAK_DOMAIN.key"
@@ -1304,18 +2047,20 @@ def run_caddy_deploy(domain):
 
         plog("")
         plog("━━━ Step 3/4: Configuring Firewall ━━━")
-        # Open ports 80 and 443
+        # Open ports 80, 443, and 5001 (backdoor) so console is reachable before/after Caddy
         r = subprocess.run('which ufw', shell=True, capture_output=True)
         if r.returncode == 0:
             subprocess.run('ufw allow 80/tcp 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('ufw allow 443/tcp 2>/dev/null; true', shell=True, capture_output=True)
-            plog("  ✓ UFW: ports 80 and 443 opened")
+            subprocess.run('ufw allow 5001/tcp 2>/dev/null; true', shell=True, capture_output=True)
+            plog("  ✓ UFW: ports 80, 443, 5001 (backdoor) opened")
         r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
         if r.returncode == 0:
             subprocess.run('firewall-cmd --permanent --add-service=http 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('firewall-cmd --permanent --add-service=https 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --permanent --add-port=5001/tcp 2>/dev/null; true', shell=True, capture_output=True)
             subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
-            plog("  ✓ firewalld: ports 80 and 443 opened")
+            plog("  ✓ firewalld: ports 80, 443, 5001 (backdoor) opened")
         plog("✓ Firewall configured")
 
         plog("")
@@ -1730,6 +2475,8 @@ def run_takportal_deploy():
             plog(f"  {r.stdout.strip()}")
             plog("\u2713 Docker available")
 
+        _ensure_docker_log_limits(plog)
+
         # Step 2: Clone repo
         plog("")
         plog("\u2501\u2501\u2501 Step 2/6: Cloning TAK Portal \u2501\u2501\u2501")
@@ -1737,8 +2484,8 @@ def run_takportal_deploy():
             plog("  TAK-Portal directory already exists, pulling latest...")
             subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
         else:
-            plog("  Cloning from GitHub...")
-            r = subprocess.run(f'git clone https://github.com/AdventureSeeker423/TAK-Portal.git {portal_dir}', shell=True, capture_output=True, text=True, timeout=120)
+            plog("  Cloning from GitHub (shallow, latest only)...")
+            r = subprocess.run(f'git clone --depth 1 https://github.com/AdventureSeeker423/TAK-Portal.git {portal_dir}', shell=True, capture_output=True, text=True, timeout=180)
             if r.returncode != 0:
                 plog(f"\u2717 Clone failed: {r.stderr.strip()}")
                 takportal_deploy_status.update({'running': False, 'error': True})
@@ -1906,9 +2653,9 @@ def run_takportal_deploy():
             "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
             "PORTAL_AUTH_ENABLED": "true" if settings.get('fqdn') else "false",
             "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
-            "AUTHENTIK_PUBLIC_URL": f"https://authentik.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:9090",
+            "AUTHENTIK_PUBLIC_URL": _get_authentik_base_url(settings),
             "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
-            "TAK_URL": f"https://tak.{settings['fqdn']}:8443/Marti" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
+            "TAK_URL": f"https://{_get_takserver_host(settings)}:8443/Marti" if _get_takserver_host(settings) else f"https://{server_ip}:8443/Marti",
             "TAK_API_P12_PATH": "data/certs/tak-client.p12",
             "TAK_API_P12_PASSPHRASE": "atakatak",
             "TAK_CA_PATH": "data/certs/tak-ca.pem",
@@ -1970,11 +2717,13 @@ def run_takportal_deploy():
                     brands = json_mod.loads(resp.read().decode())['results']
                     if brands:
                         brand_id = brands[0]['brand_uuid']
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
-                            data=json_mod.dumps({'domain': f'authentik.{fqdn}'}).encode(),
-                            headers=_ak_headers, method='PATCH')
-                        _urlreq.urlopen(req, timeout=10)
-                        plog(f"  \u2713 Brand domain set to authentik.{fqdn}")
+                        ak_host = _get_authentik_host(settings)
+                        if ak_host:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
+                                data=json_mod.dumps({'domain': ak_host}).encode(),
+                                headers=_ak_headers, method='PATCH')
+                            _urlreq.urlopen(req, timeout=10)
+                            plog(f"  \u2713 Brand domain set to {ak_host}")
                 except Exception as e:
                     plog(f"  \u26a0 Brand update: {str(e)[:80]}")
 
@@ -2410,7 +3159,7 @@ WantedBy=multi-user.target
         ak = modules.get('authentik', {})
         ldap_available = bool(ak.get('installed'))
         if ldap_available:
-            plog("  LDAP/Authentik detected — using editor source for LDAP-aware console")
+            plog("  LDAP/Authentik detected — will apply LDAP overlay after install")
         else:
             plog("  No LDAP — using regular MediaMTX editor from repo")
 
@@ -2419,23 +3168,13 @@ WantedBy=multi-user.target
         try:
             subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
             os.makedirs(clone_dir, exist_ok=True)
-            branch = MEDIAMTX_EDITOR_LDAP_BRANCH if (ldap_available and MEDIAMTX_EDITOR_LDAP_BRANCH) else None
-            if branch:
-                r = subprocess.run(f'git clone --depth 1 -b "{branch}" "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
-                    shell=True, capture_output=True, text=True, timeout=60)
-                if r.returncode != 0:
-                    plog(f"  LDAP branch \"{branch}\" not found or clone failed, trying default branch")
-                    subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
-                    r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
-                        shell=True, capture_output=True, text=True, timeout=60)
-            else:
-                r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
-                    shell=True, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(f'git clone --depth 1 "{MEDIAMTX_EDITOR_REPO}" {clone_dir}',
+                shell=True, capture_output=True, text=True, timeout=60)
             if r.returncode == 0:
                 candidate = os.path.join(clone_dir, MEDIAMTX_EDITOR_PATH, 'mediamtx_config_editor.py')
                 if os.path.exists(candidate):
                     webeditor_src = candidate
-                    plog(f"  Cloned editor from {MEDIAMTX_EDITOR_REPO}" + (f" (branch {branch})" if branch else ""))
+                    plog(f"  Cloned editor from {MEDIAMTX_EDITOR_REPO}")
         except Exception as e:
             plog(f"  Clone failed: {e}")
         if not webeditor_src:
@@ -2633,7 +3372,9 @@ if changed:
         if ldap_available:
             exec_start_pre = f'ExecStartPre=/usr/bin/python3 {webeditor_dir}/ensure_overlay.py\n'
 
-        webeditor_svc = f"""[Unit]
+        editor_file = f'{webeditor_dir}/mediamtx_config_editor.py'
+        if os.path.exists(editor_file):
+            webeditor_svc = f"""[Unit]
 Description=MediaMTX Web Configuration Editor
 After=network.target mediamtx.service
 
@@ -2650,12 +3391,14 @@ User=root
 [Install]
 WantedBy=multi-user.target
 """
-        with open('/etc/systemd/system/mediamtx-webeditor.service', 'w') as f:
-            f.write(webeditor_svc)
-        plog("✓ mediamtx-webeditor.service created")
+            with open('/etc/systemd/system/mediamtx-webeditor.service', 'w') as f:
+                f.write(webeditor_svc)
+            plog("✓ mediamtx-webeditor.service created")
+        else:
+            plog("  Skipping mediamtx-webeditor.service (editor file not installed)")
 
         # Ensure web editor Python deps (Flask, etc.) so systemd can start it even if Step 1 pip failed
-        if os.path.exists(f'{webeditor_dir}/mediamtx_config_editor.py'):
+        if os.path.exists(editor_file):
             r = subprocess.run(
                 'pip3 install Flask ruamel.yaml requests psutil --break-system-packages 2>&1',
                 shell=True, capture_output=True, text=True, timeout=120)
@@ -2668,9 +3411,11 @@ WantedBy=multi-user.target
                 plog("  ✓ Web editor Python deps installed")
 
         subprocess.run('systemctl daemon-reload', shell=True, capture_output=True)
-        subprocess.run('systemctl enable mediamtx mediamtx-webeditor', shell=True, capture_output=True)
+        subprocess.run('systemctl enable mediamtx', shell=True, capture_output=True)
+        if os.path.exists(editor_file):
+            subprocess.run('systemctl enable mediamtx-webeditor', shell=True, capture_output=True)
         subprocess.run('systemctl start mediamtx', shell=True, capture_output=True)
-        if os.path.exists(f'{webeditor_dir}/mediamtx_config_editor.py'):
+        if os.path.exists(editor_file):
             subprocess.run('systemctl start mediamtx-webeditor', shell=True, capture_output=True)
         plog("✓ Services enabled and started")
 
@@ -2793,15 +3538,17 @@ WantedBy=multi-user.target
 cloudtak_deploy_log = []
 cloudtak_deploy_status = {'running': False, 'complete': False, 'error': False}
 cloudtak_uninstall_status = {'running': False, 'done': False, 'error': None}
+_cloudtak_deploy_lock = threading.Lock()
 
 @app.route('/api/cloudtak/deploy', methods=['POST'])
 @login_required
 def cloudtak_deploy_api():
-    if cloudtak_deploy_status.get('running'):
-        return jsonify({'error': 'Deployment already in progress'}), 409
-    cloudtak_deploy_log.clear()
-    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
+    with _cloudtak_deploy_lock:
+        if cloudtak_deploy_status.get('running'):
+            return jsonify({'error': 'Deployment already in progress'}), 409
+        cloudtak_deploy_log.clear()
+        cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+        threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/cloudtak/deploy/log')
@@ -2816,13 +3563,13 @@ def cloudtak_deploy_log_api():
 @login_required
 def cloudtak_redeploy_api():
     """Update .env and override, restart containers, re-apply nginx patch. Use when CloudTAK is already installed."""
-    if cloudtak_deploy_status.get('running'):
-        return jsonify({'error': 'Another operation is in progress'}), 409
-    cloudtak_deploy_log.clear()
-    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
-    # First line so pollers see activity immediately
-    cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
-    threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
+    with _cloudtak_deploy_lock:
+        if cloudtak_deploy_status.get('running'):
+            return jsonify({'error': 'Another operation is in progress'}), 409
+        cloudtak_deploy_log.clear()
+        cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+        cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
+        threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
     return jsonify({'success': True, 'message': 'Update config & restart started'})
 
 @app.route('/api/cloudtak/control', methods=['POST'])
@@ -2935,6 +3682,8 @@ def run_cloudtak_deploy():
             plog(f"  {r.stdout.strip()}")
         plog("✓ Docker available")
 
+        _ensure_docker_log_limits(plog)
+
         # Step 2: Clone or update repo
         plog("")
         plog("━━━ Step 2/7: Cloning CloudTAK ━━━")
@@ -2944,10 +3693,28 @@ def run_cloudtak_deploy():
             if r.returncode != 0:
                 plog(f"  ⚠ git pull warning: {r.stderr.strip()[:100]}")
         else:
-            plog("  Cloning from GitHub...")
-            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
-            if r.returncode != 0:
-                plog(f"✗ Clone failed: {r.stderr.strip()[:200]}")
+            plog("  Cloning from GitHub (shallow, latest only)...")
+            clone_timeout = 600  # 10 min — VPS→GitHub can be slow
+            clone_cmd = f'git clone --depth 1 https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}'
+            for attempt in range(2):
+                try:
+                    r = subprocess.run(clone_cmd, shell=True, capture_output=True, text=True, timeout=clone_timeout)
+                    if r.returncode == 0:
+                        break
+                    plog(f"✗ Clone failed: {r.stderr.strip()[:200]}")
+                    if attempt == 0:
+                        plog("  Retrying once...")
+                        subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    plog(f"✗ Clone timed out after {clone_timeout}s")
+                    if attempt == 0:
+                        plog("  Retrying once (slow network to GitHub is common)...")
+                        subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True, timeout=30)
+                    else:
+                        cloudtak_deploy_status.update({'running': False, 'error': True})
+                        return
+            if not os.path.exists(os.path.join(cloudtak_dir, '.git')):
+                plog("✗ Clone failed after retry")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
                 return
         plog("✓ Repository ready")
@@ -2958,7 +3725,7 @@ def run_cloudtak_deploy():
         if not os.path.exists(compose_yml) and not os.path.exists(compose_yaml):
             plog("  docker-compose.yml missing — re-cloning...")
             subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True, timeout=30)
-            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
+            r = subprocess.run(f'git clone --depth 1 https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 plog(f"✗ Re-clone failed: {r.stderr.strip()[:200]}")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
@@ -3046,16 +3813,31 @@ services:
         plog(f"  API URL: {api_url}")
         plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
 
-        # Step 4: Build Docker images (use -f so compose file is found regardless of cwd)
+        # Step 4: Build Docker images (stream output, 45 min timeout)
         plog("")
         plog("━━━ Step 4/7: Building Docker Images ━━━")
         plog("  This may take 5-10 minutes on first run...")
-        r = subprocess.run(f'docker compose -f {compose_yml} build 2>&1', shell=True, capture_output=True, text=True, timeout=1800, cwd=cloudtak_dir)
-        if r.returncode != 0:
-            plog(f"✗ Docker build failed")
-            for line in r.stdout.strip().split('\n')[-20:]:
-                if line.strip():
+        proc = subprocess.Popen(
+            f'docker compose -f {compose_yml} build 2>&1',
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cloudtak_dir, bufsize=1
+        )
+        def _read_build():
+            for line in iter(proc.stdout.readline, ''):
+                line = line.rstrip()
+                if line:
                     plog(f"  {line}")
+        reader = threading.Thread(target=_read_build, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=2700)  # 45 min max
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            plog("✗ Docker build timed out after 45 minutes — try again or check server resources (RAM, disk)")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        reader.join(timeout=5)
+        if proc.returncode != 0:
+            plog(f"✗ Docker build failed")
             cloudtak_deploy_status.update({'running': False, 'error': True})
             return
         plog("✓ Images built")
@@ -3067,7 +3849,7 @@ services:
         plog("  Standalone MediaMTX stays on original ports — no conflict")
         r = subprocess.run(
             f'docker compose -f {compose_yml} up -d 2>&1',
-            shell=True, capture_output=True, text=True, timeout=120, cwd=cloudtak_dir
+            shell=True, capture_output=True, text=True, timeout=600, cwd=cloudtak_dir
         )
         if r.returncode != 0:
             plog(f"✗ docker compose up failed")
@@ -3078,24 +3860,101 @@ services:
             return
         plog("✓ Containers started")
 
+        # Open port 5000 (and 5002 for tiles) so http://ip:5000 works when no domain or before Caddy is used
+        for port in ['5000/tcp', '5002/tcp']:
+            subprocess.run(f'ufw allow {port} 2>/dev/null; true', shell=True, capture_output=True)
+        r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
+        if r.returncode == 0:
+            for port in ['5000', '5002']:
+                subprocess.run(f'firewall-cmd --permanent --add-port={port}/tcp 2>/dev/null; true', shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
+        plog("✓ Firewall: ports 5000 (Web UI), 5002 (tiles) opened for direct access")
+
         # CloudTAK nginx proxies /api to 127.0.0.1:5001 (Node app in same container). Do NOT
         # replace that with host:5001 or /api would hit TAKWERX Console and the app would stay on "Loading CloudTAK".
 
-        # Step 6: Wait for API to be ready
+        # Step 6: Wait for API to be ready (Node backend can take 10+ min after containers start on slow VPS)
         plog("")
         plog("━━━ Step 6/7: Waiting for CloudTAK API ━━━")
+        plog("  Waiting for /api/connections (or GET /) — only 200/401/403/404 from /api counts as ready")
         import urllib.request as _urlreq
-        for attempt in range(30):
+        import urllib.error as _urlerr
+        api_ready = False
+        max_wait_sec = 900  # 15 minutes — backend first start is slow after heavy build
+        poll_interval = 2
+        attempts = max_wait_sec // poll_interval
+        _step6_logged_exc = [False]
+        _step6_logged_502 = [False]
+        def _check_url(url, name):
             try:
-                _urlreq.urlopen('http://localhost:5000/', timeout=3)
-                plog("✓ CloudTAK API is responding")
+                r = _urlreq.Request(url, method='GET')
+                resp = _urlreq.urlopen(r, timeout=5)
+                return resp.getcode()
+            except _urlerr.HTTPError as e:
+                return e.code
+            except Exception as e:
+                if not _step6_logged_exc[0]:
+                    _step6_logged_exc[0] = True
+                    plog(f"  (diagnostic: {name} → {type(e).__name__}: {str(e)[:80]})")
+                return None
+        for attempt in range(attempts):
+            code = _check_url('http://127.0.0.1:5000/api/connections', 'api/connections')
+            if code is not None:
+                if code in (200, 401, 403):
+                    plog("✓ CloudTAK API is responding (backend ready)")
+                    api_ready = True
+                    break
+                if code == 404:
+                    plog("✓ CloudTAK backend is up (GET /api/connections returned 404 — path may vary by version)")
+                    api_ready = True
+                    break
+                if code in (502, 503) and not _step6_logged_502[0]:
+                    _step6_logged_502[0] = True
+                    plog(f"  Backend returned {code} (Node app may still be starting — we'll keep trying)")
+            if not api_ready:
+                code_root = _check_url('http://127.0.0.1:5000/', 'root')
+                if code_root == 200 and attempt > 0 and (attempt * poll_interval) % 60 == 0:
+                    plog("  (GET / returns 200 but /api not ready yet — waiting for Node app)")
+                if code_root in (502, 503) and not _step6_logged_502[0]:
+                    _step6_logged_502[0] = True
+                    plog(f"  Backend returned {code_root} (Node app may still be starting — we'll keep trying)")
+            if api_ready:
                 break
-            except Exception:
-                if attempt % 5 == 0:
-                    plog(f"  ⏳ Waiting... ({attempt * 2}s)")
-                time.sleep(2)
-        else:
-            plog("⚠ CloudTAK API did not respond in time — check container logs")
+            elapsed = attempt * poll_interval
+            if elapsed > 0 and elapsed % 30 == 0:
+                plog(f"  ⏳ Waiting for backend... ({elapsed}s)")
+            time.sleep(poll_interval)
+        if not api_ready:
+            plog("✗ CloudTAK API did not respond in time — deploy failed.")
+            plog("  Check: docker logs cloudtak-api-1. If you see 404 for /api/connections, the backend is up — ensure you have pulled latest infra-TAK and restarted the console (sudo systemctl restart takwerx-console), then redeploy.")
+            plog("  Otherwise wait and open the CloudTAK URL manually once it responds.")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+
+        # Settling: require multiple consecutive OK responses so we don't declare done while the app is still warming up.
+        settle_wait = 105  # ~1m45s before first check — backend often needs extra time on second/fresh deploy
+        needed_ok = 3
+        check_interval = 15
+        plog(f"  Waiting {settle_wait}s then checking backend {needed_ok} times ({check_interval}s apart)...")
+        time.sleep(settle_wait)
+        ok_count = 0
+        for round_ in range(5):
+            code_again = _check_url('http://127.0.0.1:5000/api/connections', 'api/connections')
+            if code_again in (200, 401, 403, 404):
+                ok_count += 1
+                plog(f"  Check {ok_count}/{needed_ok} OK")
+                if ok_count >= needed_ok:
+                    plog("✓ Backend settled — ready for traffic")
+                    break
+            else:
+                ok_count = 0
+                if round_ < 4:
+                    plog("  Backend not ready, waiting 20s before retry...")
+                    time.sleep(20)
+            if ok_count < needed_ok and round_ < 4:
+                time.sleep(check_interval)
+        if ok_count < needed_ok:
+            plog("  Backend not fully stable — if the map stays on 'Loading CloudTAK', wait a minute and try a hard refresh (Ctrl+Shift+R / Cmd+Shift+R).")
 
         # Step 7: Update Caddyfile
         plog("")
@@ -3661,8 +4520,7 @@ services:
                 message += ' ' + recovery_msg
                 if recovery_slug:
                     settings = load_settings()
-                    fqdn = settings.get('fqdn', '').strip()
-                    base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
+                    base = _get_authentik_base_url(settings)
                     message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
             else:
                 message += f' Recovery flow issue: {recovery_msg}.'
@@ -3939,6 +4797,41 @@ def emailrelay_configure_authentik():
         return jsonify({'success': True, 'message': message})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ── Docker log limits (prevents Node-RED / Authentik LDAP etc. from filling disk) ──
+def _ensure_docker_log_limits(log_fn=None):
+    """Ensure /etc/docker/daemon.json has log-opts (max-size 50m, max-file 3). If we write or change it, restart Docker.
+    Returns (docker_restarted: bool, error: str or None)."""
+    daemon_json = '/etc/docker/daemon.json'
+    if not os.path.isdir('/etc/docker'):
+        return False, 'Docker not installed'
+    try:
+        data = {}
+        if os.path.isfile(daemon_json) and os.path.getsize(daemon_json) > 0:
+            with open(daemon_json) as f:
+                data = json.load(f)
+        opts = data.get('log-opts') or {}
+        if opts.get('max-size') == '50m' and opts.get('max-file') == '3':
+            if log_fn:
+                log_fn("✓ Docker log limits already set.")
+            return False, None
+        data['log-driver'] = 'json-file'
+        data['log-opts'] = {'max-size': '50m', 'max-file': '3'}
+        os.makedirs('/etc/docker', exist_ok=True)
+        with open(daemon_json, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.write('\n')
+        subprocess.run(['systemctl', 'restart', 'docker'], capture_output=True, timeout=30)
+        time.sleep(5)
+        if log_fn:
+            log_fn("✓ Docker log limits set (50 MB × 3 per container). Docker was restarted; other containers may need starting from their pages.")
+        return True, None
+    except Exception as e:
+        err = str(e)
+        if log_fn:
+            log_fn(f"✗ Failed to set Docker log limits: {err}")
+        return False, err
 
 
 # ── Node-RED ──────────────────────────────────────────────────────────────────
@@ -4308,6 +5201,41 @@ def _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog=None):
         _log(f"  ⚠ Proxy cookie_domain: {str(e)[:80]}")
 
 
+def _sync_authentik_provider_external_hosts(ak_url, ak_headers, fqdn, correct_authentik_base_url, plog=None):
+    """Update any proxy provider whose external_host is authentik.<fqdn> to the correct Authentik URL (e.g. tak.<fqdn>).
+    Fixes redirect-to-authentik subdomain when Caddy/default uses tak.<fqdn> but a provider was set to authentik.<fqdn>."""
+    if not fqdn or not correct_authentik_base_url:
+        return
+    import urllib.request as _req
+    import urllib.error
+    base = fqdn.split(':')[0].split('/')[0]
+    wrong_prefix = f'https://authentik.{base}'
+    wrong_prefix_http = f'http://authentik.{base}'
+    _log = plog or (lambda m: None)
+    try:
+        r = _req.Request(f'{ak_url}/api/v3/providers/proxy/?page_size=100', headers=ak_headers)
+        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
+        updated = 0
+        for prov in data.get('results', []):
+            pk = prov.get('pk')
+            ext = (prov.get('external_host') or '').strip().rstrip('/')
+            if not pk or not ext:
+                continue
+            if ext.startswith(wrong_prefix) or ext.startswith(wrong_prefix_http):
+                try:
+                    patch = _req.Request(f'{ak_url}/api/v3/providers/proxy/{pk}/',
+                        data=json.dumps({'external_host': correct_authentik_base_url}).encode(),
+                        headers=ak_headers, method='PATCH')
+                    _req.urlopen(patch, timeout=10)
+                    updated += 1
+                except urllib.error.HTTPError:
+                    pass
+        if updated:
+            _log(f"  ✓ Updated {updated} provider(s) from authentik.<fqdn> to {correct_authentik_base_url}")
+    except Exception as e:
+        _log(f"  ⚠ Sync Authentik provider URLs: {str(e)[:80]}")
+
+
 def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
     """Restrict infra-TAK, Node-RED (and LDAP) to authentik Admins. TAK Portal and MediaMTX open to all authenticated users.
     Creates a 'Group membership: authentik Admins' policy and binds it only to admin-only apps. No binding on TAK Portal/MediaMTX = everyone sees them.
@@ -4512,9 +5440,14 @@ def run_nodered_deploy():
             nodered_deploy_status.update({'running': False, 'complete': False, 'cancelled': True})
             return
         settings = load_settings()
+        plog("━━━ Ensuring Docker log limits (prevents container logs from filling disk) ━━━")
+        _ensure_docker_log_limits(plog)
+        if nodered_deploy_status.get('cancelled'):
+            return
         domain = (settings.get('fqdn') or '').strip()
         nr_dir = os.path.expanduser('~/node-red')
         os.makedirs(nr_dir, exist_ok=True)
+        plog("")
         plog("━━━ Step 1/3: Creating Docker Compose ━━━")
         compose_yml = os.path.join(nr_dir, 'docker-compose.yml')
         settings_js = os.path.join(nr_dir, 'settings.js')
@@ -4675,7 +5608,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 var logIndex=0,logInterval=null;
 function startDeploy(){var btn=document.getElementById('deploy-btn');btn.disabled=true;document.getElementById('log-card').style.display='block';document.getElementById('deploy-log-dyn').textContent='Starting...';logIndex=0;
 fetch('/api/nodered/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
-if(d.error){document.getElementById('deploy-log-dyn').textContent='Error: '+d.error;btn.disabled=false;return;}pollLog();});}
+if(d.error){var lg=document.getElementById('log-card');var dyn=document.getElementById('deploy-log-dyn');if(dyn)dyn.textContent='Error: '+d.error;if(lg&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';lg.insertBefore(b,lg.querySelector('.log-box')||lg.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Node-RED';btn.style.background='';startDeploy();};return;}pollLog();});}
 function pollLog(){function pickLogEl(){var lc=document.getElementById('log-card');return (lc&&lc.style.display!=='none'?document.getElementById('deploy-log-dyn'):null)||document.getElementById('deploy-log')||document.getElementById('deploy-log-dyn');}
 var logEl=pickLogEl();function showCancel(show){var s=document.getElementById('nodered-cancel-btn-static'),d=document.getElementById('nodered-cancel-btn-dyn');if(s)s.style.display=show?'inline-block':'none';if(d)d.style.display=show?'inline-block':'none';}
 function doPoll(){logEl=pickLogEl();fetch('/api/nodered/deploy/log?index='+logIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
@@ -4683,6 +5616,7 @@ if(d.entries&&d.entries.length){if(logIndex===0&&logEl)logEl.textContent='';if(l
 showCancel(d.running);
 if(!d.running){clearInterval(logInterval);var btn=document.getElementById('deploy-btn');if(btn)btn.disabled=false;
 if(d.cancelled){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Cancelled.';}
+else if(d.error){var lc=document.getElementById('log-card');if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'\u2717 Deployment failed (see log above).';if(lc&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';lc.insertBefore(b,lc.querySelector('.log-box')||lc.firstChild);}if(btn){btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Node-RED';btn.style.background='';startDeploy();};}}
 else if(d.complete){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Deploy complete - page will reload in 15s (or refresh now).';setTimeout(function(){location.reload();},15000);}}});}doPoll();logInterval=setInterval(doPoll,800);}
 function cancelNoderedDeploy(){if(!confirm('Cancel the deployment? You can deploy again after.'))return;fetch('/api/nodered/deploy/cancel',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin'}).then(function(){/* next poll will show cancelled */});}
 if(document.getElementById('deploy-log-card')){logIndex=0;pollLog();}
@@ -4691,6 +5625,235 @@ fetch('/api/nodered/control',{method:'POST',headers:{'Content-Type':'application
 function loadLogs(){document.getElementById('logs-card').style.display='block';fetch('/api/nodered/logs?lines=80').then(function(r){return r.json();}).then(function(d){document.getElementById('container-logs').textContent=(d.entries||[]).join(String.fromCharCode(10))||'(no output)';});}
 function doUninstall(){var pw=document.getElementById('uninstall-password').value,msg=document.getElementById('uninstall-msg');msg.textContent='';fetch('/api/nodered/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){msg.textContent=d.error;return;}msg.textContent='Done. Reloading...';setTimeout(function(){location.reload();},800);}).catch(function(e){msg.textContent=e.message||'Request failed';});}
 </script>
+</body></html>
+'''
+
+GUARDDOG_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Guard Dog — infra-TAK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+<style>
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow:visible;line-height:1.35}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
+.page-header{margin-bottom:28px}.page-header h1{font-size:22px;font-weight:700}.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+.status-banner{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-size:13px}
+.status-banner.running{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:var(--green)}
+.status-banner.stopped{background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);color:var(--yellow)}
+.status-banner.not-installed{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none}
+.btn-primary{background:var(--accent);color:#fff}.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;max-width:400px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
+.log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;white-space:pre-wrap}
+.guard-list{display:flex;flex-direction:column;gap:0}
+.guard-service-row{border-bottom:1px solid var(--border);background:#0a0e1a}
+.guard-service-row:last-child{border-bottom:none}
+.guard-service-header{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text-primary);user-select:none}
+.guard-service-header:hover{background:rgba(255,255,255,.04)}
+.guard-service-health{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.guard-service-health.ok{background:var(--green)}
+.guard-service-health.fail{background:var(--red)}
+.guard-service-health.pending{background:var(--text-dim)}
+.guard-service-expand{margin-left:auto;transition:transform .2s}
+.guard-service-row.open .guard-service-expand{transform:rotate(180deg)}
+.guard-service-body{display:none;padding:0 16px 12px 16px}
+.guard-service-row.open .guard-service-body{display:block}
+.gd-collapse-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;margin:0 0 0 0;font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em}
+.gd-collapse-header:hover{color:var(--text-secondary)}
+.gd-collapse-toggle{font-size:18px;color:var(--text-dim);transition:transform .2s ease;flex-shrink:0;margin-left:8px}
+.gd-collapse-body{display:none;padding-top:16px;border-top:1px solid var(--border);margin-top:16px}
+.gd-collapse-body.open{display:block}
+.guard-item{display:flex;align-items:flex-start;gap:16px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--bg-deep);font-size:13px;border-radius:8px;margin-bottom:4px}
+.guard-item:last-child{border-bottom:none;margin-bottom:0}
+.guard-item-name{font-weight:600;color:var(--cyan);min-width:120px;flex-shrink:0}
+.guard-item-interval{color:var(--text-dim);font-size:11px;min-width:70px;flex-shrink:0}
+.guard-item-desc{color:var(--text-secondary);line-height:1.5;flex:1}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.gd-toggle-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:gd-spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes gd-spin{to{transform:rotate(360deg)}}
+</style></head>
+<body data-gd-deploying="{{ 'true' if deploying else 'false' }}">
+{{ sidebar_html }}
+<div class="main">
+  <div class="page-header"><h1 style="display:flex;align-items:center;gap:10px"><span class="nav-icon" style="font-size:22px;line-height:1">🐕</span><span>Guard Dog</span></h1><p>TAK Server health monitoring and auto-recovery. Runs automatically after TAK Server deploy; configure notifications below.</p></div>
+  {% if gd.running %}<div class="status-banner running" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is running</div><button type="button" class="btn btn-ghost" style="border-color:var(--yellow);color:var(--yellow)" onclick="gdSetEnabled(false, this)">Disable</button></div>
+  {% elif gd.installed %}<div class="status-banner stopped" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px"><div style="display:flex;align-items:center;gap:12px"><div class="dot"></div>Guard Dog is disabled</div><button type="button" class="btn btn-primary" onclick="gdSetEnabled(true, this)">Enable</button></div>
+  {% else %}<div class="status-banner not-installed"><div class="dot"></div>Guard Dog is not installed (it will install automatically when you deploy TAK Server)</div>{% endif %}
+
+  <div class="card">
+    <div class="card-title">Docker container log limits</div>
+    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">Prevents container logs (e.g. Node-RED, Authentik LDAP) from filling the disk. Apply once per server or after updating infra-TAK — no need to redeploy a module.</p>
+    <button type="button" class="btn btn-ghost" id="gd-docker-limits-btn" onclick="gdApplyDockerLogLimits()">Apply limits</button>
+    <span id="gd-docker-limits-msg" style="margin-left:12px;font-size:12px"></span>
+  </div>
+
+  {% if not tak.installed %}
+  <div class="card" style="border-color:var(--yellow)">
+    <div class="card-title">Requirement</div>
+    <p style="color:var(--text-secondary);font-size:13px">TAK Server must be installed first. Deploy TAK Server from the TAK Server module, then return here to deploy Guard Dog.</p>
+  </div>
+  {% endif %}
+
+  {% if gd.installed %}
+  <div class="card"><div class="card-title">Monitors</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Per-service health and checks. Expand a row to see what Guard Dog is monitoring.</p>
+    <div class="guard-list">
+      {% for svc in guarddog_services %}
+      {% if svc.monitored %}
+      <div class="guard-service-row" id="gd-svc-{{ svc.id }}" data-service-id="{{ svc.id }}">
+        <div class="guard-service-header" onclick="gdToggleService('{{ svc.id }}')">
+          <span class="guard-service-health pending" id="gd-health-{{ svc.id }}" title="Health"></span>
+          <span>{{ svc.name }}</span>
+          <span class="guard-service-expand material-symbols-outlined" style="font-size:20px">expand_more</span>
+        </div>
+        <div class="guard-service-body">
+          {% for m in svc.monitors %}
+          <div class="guard-item">
+            <span class="guard-item-name">{{ m.name }}</span>
+            <span class="guard-item-interval">{{ m.interval }}</span>
+            <span class="guard-item-desc">{{ m.desc }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+    <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint (for Uptime Robot): <code style="color:var(--cyan);word-break:break-all">{{ health_url }}</code></p>
+    <p style="margin-top:10px;font-size:12px;color:var(--text-dim)"><a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p>
+    <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Notifications</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
+    {% if notifications_configured %}
+    <div id="gd-notify-banner" class="status-banner running" style="margin-bottom:12px"><div class="dot"></div>Notifications configured</div>
+    {% endif %}
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts.</p>
+    <div class="gd-section" style="margin-bottom:20px">
+      <div class="form-label">Email</div>
+      {% if email_relay_configured %}<p style="font-size:12px;color:var(--green);margin-bottom:8px">Using Email Relay (e.g. Brevo SMTP). Alerts are sent through your configured relay.</p>{% endif %}
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <input class="form-input" type="email" id="gd-notify-email" placeholder="Alert email" value="{{ guarddog_alert_email | e }}" style="max-width:280px">
+        <button class="btn btn-ghost" id="gd-test-email-btn" onclick="gdTestEmail()">Send test email</button>
+      </div>
+      <div id="gd-test-email-msg" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div class="gd-section" style="margin-bottom:20px">
+      <div class="form-label">Uptime Robot (outside-in monitoring)</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Create a free account at <a href="https://uptimerobot.com" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">uptimerobot.com</a>, add your email for alerts, then add an HTTP(S) monitor with this URL:</p>
+      <p style="font-size:13px;margin-bottom:4px"><code style="word-break:break-all;background:var(--bg-deep);padding:8px 12px;border-radius:6px;display:inline-block">{{ health_url }}</code></p>
+      <p style="font-size:11px;color:var(--text-dim)">Copy and paste this into Uptime Robot when creating a new monitor.</p>
+    </div>
+    <div class="gd-section">
+      <div class="form-label">SMS (optional)</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">Use Twilio or Brevo to send SMS for critical alerts. No SMS? Alerts still go to the email address above; set up push notifications in your email app on your phone to get alerts on the go.</p>
+      <select class="form-input" id="gd-sms-provider" style="max-width:120px;margin-bottom:10px" onchange="gdSmsProviderChange()">
+        <option value="">Off</option>
+        <option value="twilio" {{ 'selected' if guarddog_sms.get('provider')=='twilio' else '' }}>Twilio</option>
+        <option value="brevo" {{ 'selected' if guarddog_sms.get('provider')=='brevo' else '' }}>Brevo</option>
+      </select>
+      <div id="gd-sms-twilio" style="display:{{ 'block' if guarddog_sms.get('provider')=='twilio' else 'none' }};margin-bottom:10px">
+        <input class="form-input" type="text" id="gd-sms-tw-account" placeholder="Account SID" value="{{ guarddog_sms.get('account_sid','') | e }}" style="margin-bottom:6px">
+        <input class="form-input" type="password" id="gd-sms-tw-auth" placeholder="Auth Token" value="{{ guarddog_sms.get('auth_token','') | e }}" style="margin-bottom:6px" autocomplete="off">
+        <input class="form-input" type="text" id="gd-sms-tw-from" placeholder="From number (e.g. +15551234567)" value="{{ guarddog_sms.get('from_number','') | e }}" style="margin-bottom:6px">
+        <input class="form-input" type="text" id="gd-sms-tw-to" placeholder="To number(s), comma-separated" value="{{ guarddog_sms.get('to_numbers','') | e }}" style="margin-bottom:6px">
+      </div>
+      <div id="gd-sms-brevo" style="display:{{ 'block' if guarddog_sms.get('provider')=='brevo' else 'none' }};margin-bottom:10px">
+        <input class="form-input" type="password" id="gd-sms-br-api" placeholder="Brevo API key" value="{{ guarddog_sms.get('api_key','') | e }}" style="margin-bottom:6px" autocomplete="off">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <input class="form-input" type="text" id="gd-sms-br-sender" placeholder="Sender (max 11 chars)" value="{{ guarddog_sms.get('sender','') | e }}" style="flex:1;margin-bottom:0" maxlength="11" oninput="gdSenderCheck()">
+          <span id="gd-sms-sender-check" style="font-size:18px;color:var(--green);display:none" title="11 characters or less">&#10003;</span>
+          <span id="gd-sms-sender-warn" style="font-size:12px;color:var(--text-dim);display:none"></span>
+        </div>
+        <input class="form-input" type="text" id="gd-sms-br-to" placeholder="To: digits + country code, e.g. 15551234567" value="{{ guarddog_sms.get('to_numbers','') | e }}" style="margin-bottom:6px">
+        <p style="font-size:11px;color:var(--text-dim);margin-top:0">To: digits + country code (e.g. 15551234567). Sender: up to 11 letters/numbers (Brevo has no separate SMS sender page — we send it in the API). If test fails, Brevo’s error appears below. If test says sent but you get no text, check Brevo → Campaigns → SMS or Statistics for delivery status.</p>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <button class="btn btn-ghost" onclick="gdSmsSave()">Save SMS settings</button>
+        <button class="btn btn-ghost" id="gd-test-sms-btn" onclick="gdTestSms()">Send test SMS</button>
+        <button class="btn btn-ghost" id="gd-brevo-events-btn" onclick="gdBrevoSmsEvents()" style="display:none">Check delivery status</button>
+      </div>
+      <div id="gd-sms-msg" style="margin-top:8px;font-size:12px"></div>
+      <div id="gd-sms-events" style="display:none;margin-top:10px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-size:12px;max-height:180px;overflow-y:auto"></div>
+    </div>
+    </div>
+  </div>
+
+  {% if tak.installed %}
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Database maintenance (CoT)</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
+    <p style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">The CoT database can grow large. Data retention deletes rows but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE to reclaim space (safe while TAK Server is running).</p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px">CoT database size: <span id="gd-cot-db-size" style="font-weight:600">—</span> <button type="button" onclick="gdRefreshCotSize()" class="btn btn-ghost" style="margin-left:8px;padding:4px 12px;font-size:12px">Refresh</button> <span style="font-size:10px;color:var(--text-dim);margin-left:6px">(green &lt; 25 GB · yellow 25–40 GB · red &gt; 40 GB)</span></p>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+        <button type="button" id="gd-vacuum-analyze-btn" onclick="gdRunVacuum(false)" class="btn" style="background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;flex-shrink:0">Run VACUUM ANALYZE</button>
+        <span style="font-size:12px;color:var(--text-secondary)">Reclaims space from deleted rows. Safe while TAK Server is running.</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+        <button type="button" id="gd-vacuum-full-btn" onclick="gdRunVacuum(true)" class="btn btn-ghost" style="color:var(--yellow);border-color:var(--yellow);flex-shrink:0" title="Caution: run when TAK Server is not running">Run VACUUM FULL</button>
+        <span style="font-size:12px;color:var(--text-secondary)">Rewrites tables to reclaim more space; locks tables. Run when <strong>TAK Server is not running</strong>. <span style="color:var(--yellow)">(yellow = caution)</span></span>
+      </div>
+    </div>
+    <div id="gd-vacuum-output" style="display:none;margin-top:14px;padding:12px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
+    <div id="gd-vacuum-msg" style="margin-top:8px;font-size:13px"></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if gd.installed %}
+  <div class="card">
+    <div class="gd-collapse-header" onclick="gdSectionToggle(this)"><span style="margin:0">Activity log</span><span class="gd-collapse-toggle">&#9662;</span></div>
+    <div class="gd-collapse-body">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Restarts, alerts, and monitor events from Guard Dog. Filter by date or leave blank for all.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px">
+      <label style="font-size:12px;color:var(--text-secondary)">From <input type="date" id="gd-log-from" class="form-input" style="width:140px;display:inline-block;margin-left:6px"></label>
+      <label style="font-size:12px;color:var(--text-secondary)">To <input type="date" id="gd-log-to" class="form-input" style="width:140px;display:inline-block;margin-left:6px"></label>
+      <button type="button" class="btn btn-ghost" onclick="gdLoadActivityLog()">Refresh</button>
+      <button type="button" class="btn btn-ghost" style="color:var(--text-dim)" onclick="document.getElementById('gd-log-from').value='';document.getElementById('gd-log-to').value='';gdLoadActivityLog()">Clear filter</button>
+    </div>
+    <div class="log-box" id="gd-activity-log" style="max-height:320px">Loading…</div>
+    <p style="font-size:11px;color:var(--text-dim);margin-top:8px">Log file: <code>/var/log/takguard/restarts.log</code></p>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if gd.installed %}
+  <div class="modal-overlay" id="gd-uninstall-modal"><div class="modal" style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw">
+    <h3 style="font-size:16px;margin-bottom:8px;color:var(--red)">Uninstall Guard Dog?</h3>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">This will stop all timers and the health endpoint, and remove scripts and systemd units. Alert history in /var/lib/takguard and /var/log/takguard is left in place.</p>
+    <div style="margin-bottom:16px"><label class="form-label">Admin password</label><input class="form-input" type="password" id="gd-uninstall-password" placeholder="Confirm password"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn btn-ghost" onclick="document.getElementById('gd-uninstall-modal').classList.remove('open')">Cancel</button><button class="btn" style="background:var(--red);color:#fff" onclick="gdUninstall()">Uninstall</button></div>
+    <div id="gd-uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+  </div></div>
+  {% else %}
+  <div class="card"><div class="card-title">Deploy Guard Dog</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Guard Dog usually installs automatically when you deploy TAK Server. If you skipped that or need to reinstall, use this. Installs monitors (port 8089, processes, PostgreSQL, CoT DB size, OOM, disk, network, certificate expiry) and a health endpoint. Alert email is optional — set it in Notifications above to receive alerts (or add it later).</p>
+    <button class="btn btn-primary" id="gd-deploy-btn" onclick="startGuarddogDeploy()" {% if not tak.installed %}disabled{% endif %}>🐕 Deploy Guard Dog</button>
+  </div>
+  {% endif %}
+
+  <div class="card" id="gd-log-card" style="display:none"><div class="card-title">Deploy log</div><div class="log-box" id="gd-deploy-log">Initializing...</div></div>
+</div>
+<script src="/guarddog.js"></script>
 </body></html>
 '''
 
@@ -4857,8 +6020,18 @@ function startDeploy() {
   fetch('/api/mediamtx/deploy', {method:'POST', headers:{'Content-Type':'application/json'}})
     .then(r => r.json()).then(d => {
       if (d.error) {
-        document.getElementById('deploy-log').textContent = 'Error: ' + d.error;
-        document.getElementById('deploy-btn').disabled = false;
+        var lg = document.getElementById('log-card');
+        var dyn = document.getElementById('deploy-log');
+        if (dyn) dyn.textContent = 'Error: ' + d.error;
+        if (lg && !document.getElementById('deploy-fail-banner')) {
+          var banner = document.createElement('div');
+          banner.id = 'deploy-fail-banner';
+          banner.style.cssText = 'background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';
+          banner.innerHTML = '<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';
+          lg.insertBefore(banner, lg.querySelector('.log-box') || lg.firstChild);
+        }
+        var btn = document.getElementById('deploy-btn');
+        if (btn) { btn.disabled = false; btn.textContent = '\u2717 Deployment failed \u2014 Retry'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.onclick = function() { btn.textContent = '\u1f680 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
       } else {
         pollLog();
       }
@@ -4889,8 +6062,16 @@ function pollLog() {
             box.appendChild(refreshBtn);
             box.scrollTop = box.scrollHeight;
           } else if (d.error) {
+            var logCard = document.getElementById('log-card');
+            if (logCard && !document.getElementById('deploy-fail-banner')) {
+              var banner = document.createElement('div');
+              banner.id = 'deploy-fail-banner';
+              banner.style.cssText = 'background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';
+              banner.innerHTML = '<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';
+              logCard.insertBefore(banner, logCard.querySelector('.log-box') || logCard.firstChild);
+            }
             var btn = document.getElementById('deploy-btn');
-            if (btn) { btn.textContent = '✗ Deployment Failed'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '🚀 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
+            if (btn) { btn.textContent = '\u2717 Deployment failed \u2014 Retry'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '\u1f680 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
           }
         }
       });
@@ -5023,15 +6204,17 @@ window.startDeploy = function() {
 
 window.pollLog = function(redeployBtn) {
   if (window.logInterval) clearInterval(window.logInterval);
+  window.cloudtakPollFails = 0;
   function doPoll() {
     fetch("/api/cloudtak/deploy/log?index=" + window.logIndex, { credentials: "same-origin" })
       .then(function(r) { return r.json(); })
       .then(function(d) {
+        window.cloudtakPollFails = 0;
         if (!d) return;
+        var dyn = document.getElementById("deploy-log-dyn");
+        var stat = document.getElementById("deploy-log");
         if (d.entries && d.entries.length) {
           var text = d.entries.join("\n") + "\n";
-          var dyn = document.getElementById("deploy-log-dyn");
-          var stat = document.getElementById("deploy-log");
           if (window.logIndex === 0) {
             if (dyn) dyn.textContent = text;
             if (stat) stat.textContent = text;
@@ -5047,16 +6230,45 @@ window.pollLog = function(redeployBtn) {
           clearInterval(window.logInterval);
           window.logInterval = null;
           if (redeployBtn) redeployBtn.disabled = false;
-          if (d.error && dyn) dyn.textContent = (dyn.textContent || "") + "\nError (see log above)";
+          if (d.error) {
+            if (dyn) dyn.textContent = (dyn.textContent || "") + "\n\n\u2717 Deployment failed (see log above).";
+            var logCard = document.getElementById("log-card");
+            if (logCard && !document.getElementById("deploy-fail-banner")) {
+              var banner = document.createElement("div");
+              banner.id = "deploy-fail-banner";
+              banner.style.cssText = "background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)";
+              banner.innerHTML = "<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.";
+              logCard.insertBefore(banner, logCard.querySelector(".log-box") || logCard.firstChild);
+            }
+            var btn = document.getElementById("deploy-btn");
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = "\u2717 Deployment failed \u2014 Retry";
+              btn.style.background = "var(--red)";
+              btn.style.opacity = "1";
+              btn.onclick = function() { btn.textContent = "\u1f680 Deploy CloudTAK"; btn.style.background = ""; startDeploy(); };
+            }
+          }
           if (d.complete) setTimeout(function() { location.reload(); }, 1500);
         }
       })
       .catch(function(err) {
-        clearInterval(window.logInterval);
-        window.logInterval = null;
-        if (redeployBtn) redeployBtn.disabled = false;
+        window.cloudtakPollFails = (window.cloudtakPollFails || 0) + 1;
         var dyn = document.getElementById("deploy-log-dyn");
-        if (dyn) dyn.textContent = (dyn.textContent || "") + "\nRequest failed: " + (err && err.message ? err.message : String(err));
+        var stat = document.getElementById("deploy-log");
+        if (window.cloudtakPollFails === 1) {
+          var msg = "\n[Connection interrupted \u2014 reconnecting...]";
+          if (dyn) dyn.textContent = (dyn.textContent || "") + msg;
+          if (stat) stat.textContent = (stat.textContent || "") + msg;
+        }
+        if (window.cloudtakPollFails >= 10) {
+          clearInterval(window.logInterval);
+          window.logInterval = null;
+          if (redeployBtn) redeployBtn.disabled = false;
+          var failMsg = "\n\nRequest failed: " + (err && err.message ? err.message : String(err)) + " Deploy may still be running on the server \u2014 refresh the page to check.";
+          if (dyn) dyn.textContent = (dyn.textContent || "") + failMsg;
+          if (stat) stat.textContent = (stat.textContent || "") + failMsg;
+        }
       });
   }
   doPoll();
@@ -5283,6 +6495,9 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       It connects to your TAK Server and provides a full map interface in any web browser.
       Video streams from your standalone MediaMTX install will be used automatically.
     </p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:20px">
+      First deploy builds Docker images and can take 10–15 minutes. Keep the tab open; if the log stops updating, refresh the page to reconnect.
+    </p>
 
     {% if not settings.fqdn %}
     <div style="background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:var(--yellow)">
@@ -5300,18 +6515,17 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div>
   {% endif %}
 
-  <!-- Deploy log -->
-  {% if deploying %}
-  <div class="card" id="deploy-log-card">
+  <!-- Deploy log (single card: shown when deploying or after error) -->
+  <div id="log-card" class="card" style="display:{% if deploying or deploy_error %}block{% else %}none{% endif %}">
     <div class="card-title">Deploy Log</div>
-    <div class="log-box" id="deploy-log">Initializing...</div>
+    {% if deploy_error %}
+    <div id="deploy-fail-banner" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)"><strong>&#x2717; Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.</div>
+    {% endif %}
+    <div class="log-box" id="deploy-log-dyn">{% if deploy_error %}Deployment failed. See log above.{% else %}Waiting...{% endif %}</div>
   </div>
+  {% if deploy_error %}
+  <script>(function(){ var btn = document.getElementById("deploy-btn"); if(btn){ btn.disabled = false; btn.textContent = "\u2717 Deployment failed \u2014 Retry"; btn.style.background = "var(--red)"; btn.style.opacity = "1"; btn.onclick = function(){ btn.textContent = "\u1f680 Deploy CloudTAK"; btn.style.background = ""; startDeploy(); }; } })();</script>
   {% endif %}
-
-  <div id="log-card" class="card" style="display:none">
-    <div class="card-title">Deploy Log</div>
-    <div class="log-box" id="deploy-log-dyn">Waiting...</div>
-  </div>
 </div>
 
 <!-- Uninstall modal -->
@@ -5342,7 +6556,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 </body></html>'''
 
 EMAIL_RELAY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Email Relay</title>
+<title>Email Relay — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
@@ -5441,7 +6655,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
     var iv=setInterval(async()=>{
         var r=await fetch('/api/emailrelay/log');var d=await r.json();
         if(d.entries&&d.entries.length>last){el.textContent=d.entries.join('\\n');el.scrollTop=el.scrollHeight;last=d.entries.length}
-        if(!d.running){clearInterval(iv);setTimeout(()=>location.reload(),1500)}
+        if(!d.running){clearInterval(iv);
+        if(d.error){var card=el.parentElement;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,el);}var rbtn=document.createElement('button');rbtn.textContent='\u2717 Deployment failed \u2014 Retry';rbtn.style.cssText='margin-top:12px;padding:12px 24px;background:var(--red);color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer';rbtn.onclick=function(){location.reload();};card.appendChild(rbtn);}
+        else if(d.complete){setTimeout(()=>location.reload(),1500)}}
     },1500);
 })();
 </script>
@@ -5529,6 +6745,9 @@ Switching providers later requires only updating Postfix credentials — no chan
 
 <div class="section-title">Deploy Email Relay</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+{% if deploy_error %}
+<div id="deploy-fail-banner" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)"><strong>&#x2717; Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.</div>
+{% endif %}
 <div class="form-grid">
 <div class="form-group full">
 <label class="input-label">Email Provider</label>
@@ -5550,9 +6769,12 @@ Switching providers later requires only updating Postfix credentials — no chan
 <div><label class="input-label">Port</label><input type="text" id="deploy-custom_port" class="input-field" placeholder="587" value="587"></div>
 </div></div>
 <div style="margin-top:20px;text-align:center">
-<button onclick="deployRelay()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">📧 Deploy Email Relay</button>
+<button onclick="deployRelay()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">{% if deploy_error %}&#x2717; Deployment failed — Retry{% else %}📧 Deploy Email Relay{% endif %}</button>
 </div>
 </div>
+{% if deploy_error %}
+<script>(function(){ var btn=document.getElementById('deploy-btn'); if(btn){ btn.style.background='var(--red)'; btn.onclick=function(){ btn.textContent='📧 Deploy Email Relay'; btn.style.background=''; deployRelay(); }; } })();</script>
+{% endif %}
 {% endif %}
 
 </div>
@@ -5592,7 +6814,9 @@ async function deployRelay(){
     var r=await fetch('/api/emailrelay/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     var d=await r.json();
     if(d.success){location.reload()}
-    else{alert('Error: '+d.error);btn.disabled=false;btn.textContent='📧 Deploy Email Relay';btn.style.opacity='1'}
+    else{var card=btn.closest('div[style*="background:var(--bg-card)"]')||btn.parentElement;
+    if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+    btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f4e7 Deploy Email Relay';btn.style.background='';deployRelay();};}
 }
 
 async function swapProvider(){
@@ -5656,7 +6880,7 @@ async function emailUninstall(){
 
 
 CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Caddy SSL</title>
+<title>Caddy SSL — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
@@ -5806,7 +7030,7 @@ async function deployCaddy(){
         var r=await fetch('/api/caddy/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain:domain})});
         var d=await r.json();
         if(d.success){pollCaddyLog()}
-        else{alert('Error: '+d.error);btn.disabled=false;btn.textContent='🚀 Deploy Caddy';btn.style.opacity='1'}
+        else{var el=document.getElementById('deploy-log');var card=el?(el.closest('.card')||el.parentElement):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,el||card.firstChild);}if(el)el.textContent='Error: '+d.error;btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Caddy';btn.style.background='';deployCaddy();};}
     }catch(e){alert('Error: '+e.message);btn.disabled=false;btn.textContent='🚀 Deploy Caddy';btn.style.opacity='1'}
 }
 function pollCaddyLog(){
@@ -5833,7 +7057,9 @@ function pollCaddyLog(){
                 });
                 lastCount=d.entries.length;el.scrollTop=el.scrollHeight;
             }
-            if(!d.running){clearInterval(iv);if(d.complete||d.error){setTimeout(()=>location.reload(),3000)}}
+            if(!d.running){clearInterval(iv);
+            if(d.complete){setTimeout(()=>location.reload(),3000)}
+            else if(d.error){var card=el.closest('.card');if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}var btn=document.getElementById('deploy-btn');if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.onclick=function(){btn.textContent='\u1f680 Deploy Caddy';btn.style.background='';deployCaddy();};}}}
         }catch(e){}
     },1000);
 }
@@ -5916,7 +7142,7 @@ loadServiceDomains();
 </body></html>'''
 
 CERTS_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Certificates · infra-TAK</title>
+<title>Certificates — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
@@ -5981,7 +7207,7 @@ function filterCerts(ext){
 </body></html>'''
 
 TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>TAK Portal</title>
+<title>TAK Portal — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
@@ -6081,17 +7307,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(portal_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :{{ portal_port }}{% endif %}</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ authentik_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
 <div class="section-title">Configuration</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;line-height:2">
-<div><span style="color:var(--text-dim)">TAK Server:</span> <span style="color:var(--cyan)">{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip','') + ':8443' }}</span></div>
-<div><span style="color:var(--text-dim)">Authentik URL:</span> <span style="color:var(--cyan)">{{ 'https://authentik.' + settings.get('fqdn') if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':9090' }}</span></div>
+<div><span style="color:var(--text-dim)">TAK Server:</span> <span style="color:var(--cyan)">{{ takserver_base_url }}:8443</span></div>
+<div><span style="color:var(--text-dim)">Authentik URL:</span> <span style="color:var(--cyan)">{{ authentik_base_url }}</span></div>
 <div><span style="color:var(--text-dim)">Forward Auth:</span> <span style="color:var(--green)">{{ 'Enabled via Caddy' if settings.get('fqdn') else 'Disabled (no FQDN)' }}</span></div>
 <div><span style="color:var(--text-dim)">Self-Service Enrollment:</span> <span style="color:var(--cyan)">{{ 'https://takportal.' + settings.get('fqdn') + '/request-access' if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':3000/request-access' }}</span></div>
 <div style="margin-top:8px;font-size:11px;color:var(--text-dim)">Users created in TAK Portal flow through Authentik → LDAP → TAK Server automatically</div>
@@ -6208,7 +7434,7 @@ async function deployPortal(){
         var r=await fetch('/api/takportal/deploy',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
         if(d.success)pollDeployLog();
-        else{document.getElementById('deploy-log').textContent='\\u2717 '+d.error;btn.disabled=false;btn.textContent='\\ud83d\\ude80 Deploy TAK Portal';btn.style.opacity='1';btn.style.cursor='pointer'}
+        else{var lg=document.getElementById('deploy-log');if(lg)lg.textContent='\u2717 '+d.error;var card=lg?lg.closest('.card'):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='\u1f680 Deploy TAK Portal';btn.style.background='';deployPortal();};}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
 }
 
@@ -6244,6 +7470,13 @@ function pollDeployLog(){
             refreshBtn.onclick=function(){window.location.href='/takportal';};
             el.appendChild(refreshBtn);
             el.scrollTop=el.scrollHeight;
+        }
+        else if(d.error){
+            var el=document.getElementById('deploy-log');
+            var card=el?el.closest('.card'):null;
+            if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+            var btn=document.getElementById('deploy-btn');
+            if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='\u1f680 Deploy TAK Portal';btn.style.background='';deployPortal();};}
         }
     });
 }
@@ -6349,7 +7582,9 @@ def authentik_page():
     ) and len(container_info.get('containers', [])) > 0
     return render_template_string(AUTHENTIK_TEMPLATE,
         settings=settings, ak=ak, container_info=container_info,
-        ak_port=ak_port, version=VERSION,
+        ak_port=ak_port, authentik_base_url=_get_authentik_base_url(settings),
+        takserver_base_url=_get_takserver_base_url(settings), version=VERSION,
+        ak_version_info=_get_authentik_version_info(),
         deploying=authentik_deploy_status.get('running', False),
         deploy_done=authentik_deploy_status.get('complete', False),
         deploy_error=authentik_deploy_status.get('error', False),
@@ -6530,6 +7765,63 @@ def run_authentik_deploy(reconfigure=False):
                         _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog)
                         plog("  Configuring application access policies...")
                         _ensure_app_access_policies(ak_url, ak_headers, plog)
+                        # Sync Authentik home URL from Caddy/Domains (so changing domain in Caddy then reconfiguring updates Authentik)
+                        ak_host = _get_authentik_host(settings)
+                        ak_base = _get_authentik_base_url(settings)
+                        if ak_host and ak_base:
+                            plog("  Syncing Authentik domain from Caddy/Domains...")
+                            try:
+                                with open(env_path) as f:
+                                    env_lines = f.readlines()
+                                new_env = []
+                                seen = False
+                                for line in env_lines:
+                                    if line.strip().startswith('AUTHENTIK_HOST='):
+                                        new_env.append(f'AUTHENTIK_HOST={ak_base}\n')
+                                        seen = True
+                                    else:
+                                        new_env.append(line)
+                                if not seen:
+                                    new_env.append(f'AUTHENTIK_HOST={ak_base}\n')
+                                with open(env_path, 'w') as f:
+                                    f.writelines(new_env)
+                                with open(compose_path) as f:
+                                    comp_lines = f.readlines()
+                                comp_new = []
+                                for line in comp_lines:
+                                    if 'AUTHENTIK_HOST:' in line:
+                                        line = re.sub(r'AUTHENTIK_HOST:\s*\S+', f'AUTHENTIK_HOST: {ak_base}', line)
+                                    if ':host-gateway"' in line and '"' in line:
+                                        line = re.sub(r'(")([^"]+)(":host-gateway")', r'\1' + ak_host + r'\3', line)
+                                    comp_new.append(line)
+                                with open(compose_path, 'w') as f:
+                                    f.writelines(comp_new)
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                brands = json.loads(resp.read().decode())['results']
+                                if brands:
+                                    bid = brands[0]['brand_uuid']
+                                    urllib.request.urlopen(urllib.request.Request(f'{ak_url}/api/v3/core/brands/{bid}/',
+                                        data=json.dumps({'domain': ak_host}).encode(), headers=ak_headers, method='PATCH'), timeout=10)
+                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=embedded', headers=ak_headers)
+                                resp = urllib.request.urlopen(req, timeout=10)
+                                outposts = json.loads(resp.read().decode())['results']
+                                for op in outposts:
+                                    if 'embed' in op.get('name', '').lower() or op.get('type') == 'proxy':
+                                        cfg = dict(op.get('config', {}))
+                                        cfg['authentik_host'] = ak_base
+                                        cfg['authentik_host_insecure'] = False
+                                        put_payload = {'name': op.get('name', 'authentik Embedded Outpost'), 'type': op.get('type', 'proxy'), 'providers': list(op.get('providers', [])), 'config': cfg}
+                                        urllib.request.urlopen(urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{op["pk"]}/',
+                                            data=json.dumps(put_payload).encode(), headers=ak_headers, method='PUT'), timeout=10)
+                                        break
+                                plog("  \u2713 Authentik domain synced (env, compose, brand, outpost)")
+                                _sync_authentik_provider_external_hosts(ak_url, ak_headers, fqdn, ak_base, plog)
+                                subprocess.run(f'cd {ak_dir} && docker compose up -d --force-recreate ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                                subprocess.run(f'cd {ak_dir} && docker compose restart server worker 2>&1', shell=True, capture_output=True, text=True, timeout=90)
+                                plog("  \u2713 Restarted Authentik (LDAP + server/worker to pick up new domain)")
+                            except Exception as e:
+                                plog(f"  \u26a0 Domain sync: {str(e)[:80]}")
                     else:
                         plog("  \u26a0 API not ready in time — run Update config & reconnect again to apply app access policies")
                 else:
@@ -6553,6 +7845,9 @@ def run_authentik_deploy(reconfigure=False):
             else:
                 plog(f"  {r.stdout.strip()}")
             plog("\u2713 Docker available")
+
+            # Ensure container log limits so Node-RED / LDAP etc. cannot fill the disk
+            _ensure_docker_log_limits(plog)
 
             # Step 2: Create directory
             plog("")
@@ -6588,7 +7883,7 @@ AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD={ldap_svc_pass}
 AUTHENTIK_BOOTSTRAP_LDAP_BASEDN=DC=takldap
 AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST=http://authentik-server-1:9000/
 # Embedded outpost host — prevents 0.0.0.0:9000 redirect issue
-AUTHENTIK_HOST=https://authentik.{settings.get("fqdn") or server_ip}
+AUTHENTIK_HOST={_get_authentik_base_url(settings)}
 """ + (f"\n# Cookie domain so session is shared across subdomains (stream., infratak., etc.) — avoids redirect loop\nAUTHENTIK_COOKIE_DOMAIN=.{settings.get('fqdn').split(':')[0]}" if settings.get("fqdn") else "") + """
 # Email Configuration (uncomment and configure)
 # AUTHENTIK_EMAIL__HOST=smtp.example.com
@@ -6808,7 +8103,7 @@ entries:
       managed: goauthentik.io/outposts/embedded
     attrs:
       config:
-        authentik_host: https://authentik.{settings.get('fqdn') or server_ip}
+        authentik_host: {_get_authentik_base_url(settings)}
         authentik_host_insecure: false
 """
             with open(bp_embedded_path, 'w') as f:
@@ -6858,7 +8153,7 @@ entries:
                 needs_write = True
                 plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
 
-            # Add LDAP outpost container (version must match server)
+            # Add LDAP outpost container (use same AUTHENTIK_TAG as server so Update pulls both)
             ak_tag = '2026.2.0'
             for l in lines:
                 m = re.search(r'goauthentik/server[:\s]+\$\{AUTHENTIK_TAG:-([^}]+)\}', l)
@@ -6869,12 +8164,14 @@ entries:
                 if m and m.group(1).strip() not in ('${AUTHENTIK_TAG}', ''):
                     ak_tag = m.group(1).strip()
                     break
+            ldap_image = f"ghcr.io/goauthentik/ldap:${{AUTHENTIK_TAG:-{ak_tag}}}"
             if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
-                _fqdn = (settings.get('fqdn') or '').split(':')[0]
-                if _fqdn:
-                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    extra_hosts:\n      - \"authentik.{_fqdn}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: https://authentik.{_fqdn}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                _ak_host = _get_authentik_host(settings)
+                if _ak_host:
+                    _ak_base = _get_authentik_base_url(settings)
+                    ldap_svc = f"  ldap:\n    image: {ldap_image}\n    extra_hosts:\n      - \"{_ak_host}:host-gateway\"\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: {_ak_base}\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 else:
-                    ldap_svc = f"  ldap:\n    image: ghcr.io/goauthentik/ldap:{ak_tag}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
+                    ldap_svc = f"  ldap:\n    image: {ldap_image}\n    ports:\n    - 389:3389\n    - 636:6636\n    environment:\n      AUTHENTIK_HOST: http://authentik-server-1:9000\n      AUTHENTIK_INSECURE: \"true\"\n      AUTHENTIK_TOKEN: placeholder\n    restart: unless-stopped\n"
                 new_lines = []
                 for line in lines:
                     if line.startswith('volumes:'):
@@ -6884,12 +8181,16 @@ entries:
                 needs_write = True
                 plog("  Added LDAP outpost container")
             else:
+                # Ensure existing LDAP block uses AUTHENTIK_TAG so Update pulls same version as server
                 for i, line in enumerate(lines):
-                    m = re.search(r'ghcr\.io/goauthentik/ldap:([^\s\n]+)', line)
-                    if m and m.group(1) != ak_tag:
-                        lines[i] = line.replace(f'ghcr.io/goauthentik/ldap:{m.group(1)}', f'ghcr.io/goauthentik/ldap:{ak_tag}')
-                        needs_write = True
-                        plog(f"  Updated LDAP outpost image {m.group(1)} -> {ak_tag}")
+                    m = re.search(r'image:\s*ghcr\.io/goauthentik/ldap:([^\s\n]+)', line)
+                    if m:
+                        current = m.group(1)
+                        if not current.startswith('${AUTHENTIK_TAG'):
+                            lines[i] = line.replace(f'ghcr.io/goauthentik/ldap:{current}', ldap_image, 1)
+                            needs_write = True
+                            plog(f"  Updated LDAP image to use AUTHENTIK_TAG (default {ak_tag})")
+                        break
             if needs_write:
                 with open(compose_path, 'w') as f:
                     f.writelines(lines)
@@ -6900,14 +8201,53 @@ entries:
             # Step 7: Pull and start core services (no verbose docker output in log)
             plog("")
             plog("\u2501\u2501\u2501 Step 7/10: Pulling Images & Starting Containers \u2501\u2501\u2501")
+            # Ensure 4GB swap before stressing the box (reduces OOM/unhealthy on small VPS)
+            try:
+                r_sw = subprocess.run(['swapon', '--show'], capture_output=True, text=True, timeout=5)
+                if r_sw.returncode == 0 and '/swapfile' in (r_sw.stdout or ''):
+                    plog("  Swap already configured")
+                else:
+                    if os.path.exists('/swapfile'):
+                        subprocess.run(['swapon', '/swapfile'], capture_output=True, timeout=5)
+                        with open('/etc/fstab', 'r') as f:
+                            fstab = f.read()
+                        if '/swapfile' not in fstab:
+                            with open('/etc/fstab', 'a') as f:
+                                f.write('\n/swapfile swap swap defaults 0 0\n')
+                        plog("  Swap file enabled")
+                    else:
+                        subprocess.run(['fallocate', '-l', '4G', '/swapfile'], check=True, timeout=30)
+                        os.chmod('/swapfile', 0o600)
+                        subprocess.run(['mkswap', '/swapfile'], check=True, capture_output=True, timeout=10)
+                        subprocess.run(['swapon', '/swapfile'], check=True, timeout=10)
+                        with open('/etc/fstab', 'r') as f:
+                            fstab = f.read()
+                        if '/swapfile' not in fstab:
+                            with open('/etc/fstab', 'a') as f:
+                                f.write('\n/swapfile swap swap defaults 0 0\n')
+                        plog("  4GB swap configured (reduces Authentik OOM on small VPS)")
+            except Exception as e:
+                plog(f"  \u26a0 Swap setup skipped: {e}")
             plog("  Pulling images (this may take a few minutes)...")
             r = subprocess.run(f'cd {ak_dir} && docker compose pull 2>&1', shell=True, capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 plog(f"  \u26a0 Pull had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
             else:
                 plog("  \u2713 Images pulled")
-            plog("  Starting core services...")
-            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+            plog("  Starting PostgreSQL...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d postgresql 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                plog(f"  \u26a0 Postgres start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
+            for attempt in range(24):
+                rp = subprocess.run(f'cd {ak_dir} && docker compose exec -T postgresql pg_isready 2>/dev/null', shell=True, capture_output=True, text=True, timeout=10)
+                if rp.returncode == 0:
+                    plog("  \u2713 PostgreSQL ready")
+                    break
+                time.sleep(2)
+            else:
+                plog("  \u26a0 PostgreSQL not ready in time, starting server anyway")
+            plog("  Starting server and worker...")
+            r = subprocess.run(f'cd {ak_dir} && docker compose up -d server worker 2>&1', shell=True, capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 plog(f"  \u26a0 Start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
             else:
@@ -6977,7 +8317,7 @@ entries:
                 # Build the new auth block — matches TAK Portal reference exactly
                 auth_block = (
                     '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
-                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
+                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="30" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
                     + ldap_pass
                     + '" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
                     '        <File location="UserAuthenticationFile.xml"/>\n'
@@ -7064,7 +8404,8 @@ entries:
                         plog(f"  ⚠ Token check error: {str(e)[:80]} — giving up")
                         break
 
-                # Create tak_ROLE_ADMIN group
+                # Create tak_ROLE_ADMIN group (for webadmin only; all other group membership is controlled in TAK Portal)
+                group_pk = None
                 try:
                     req = urllib.request.Request(f'{ak_url}/api/v3/core/groups/',
                         data=json.dumps({'name': 'tak_ROLE_ADMIN', 'is_superuser': False}).encode(),
@@ -7076,7 +8417,6 @@ entries:
                 except urllib.error.HTTPError as e:
                     if e.code == 400:
                         plog("  ✓ tak_ROLE_ADMIN group already exists")
-                        # Get existing group PK
                         req = urllib.request.Request(f'{ak_url}/api/v3/core/groups/?search=tak_ROLE_ADMIN',
                             headers=ak_headers)
                         resp = urllib.request.urlopen(req, timeout=10)
@@ -7459,16 +8799,18 @@ entries:
                     # 12a: Update Brand domain
                     plog("  Updating Authentik brand domain...")
                     try:
-                        req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
-                        resp = urllib.request.urlopen(req, timeout=15)
-                        brands = json.loads(resp.read().decode())['results']
-                        if brands:
-                            brand_id = brands[0]['brand_uuid']
-                            req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/{brand_id}/',
-                                data=json.dumps({'domain': f'authentik.{fqdn}'}).encode(),
-                                headers=ak_headers, method='PATCH')
-                            urllib.request.urlopen(req, timeout=10)
-                            plog(f"  ✓ Brand domain set to authentik.{fqdn}")
+                        ak_host = _get_authentik_host(settings)
+                        if ak_host:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/', headers=ak_headers)
+                            resp = urllib.request.urlopen(req, timeout=15)
+                            brands = json.loads(resp.read().decode())['results']
+                            if brands:
+                                brand_id = brands[0]['brand_uuid']
+                                req = urllib.request.Request(f'{ak_url}/api/v3/core/brands/{brand_id}/',
+                                    data=json.dumps({'domain': ak_host}).encode(),
+                                    headers=ak_headers, method='PATCH')
+                                urllib.request.urlopen(req, timeout=10)
+                                plog(f"  ✓ Brand domain set to {ak_host}")
                     except Exception as e:
                         plog(f"  ⚠ Brand update: {str(e)[:100]}")
 
@@ -7588,7 +8930,7 @@ entries:
                                 if provider_pk not in current_providers:
                                     current_providers.append(provider_pk)
                                 existing_config = dict(embedded.get('config', {}))
-                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
+                                existing_config['authentik_host'] = _get_authentik_base_url(settings)
                                 existing_config['authentik_host_insecure'] = False
                                 # Single PUT: providers + config (PATCH with only config can 400)
                                 put_payload = {
@@ -7602,7 +8944,7 @@ entries:
                                     headers=ak_headers, method='PUT')
                                 urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ TAK Portal added to embedded outpost")
-                                plog(f"  ✓ Embedded outpost authentik_host set to https://authentik.{fqdn}")
+                                plog(f"  ✓ Embedded outpost authentik_host set to {_get_authentik_base_url(settings)}")
                             else:
                                 plog("  ⚠ No embedded outpost found — create one in Authentik admin")
                         except Exception as e:
@@ -7642,10 +8984,7 @@ entries:
         plog("")
         plog("=" * 50)
         plog("\u2713 Authentik deployed successfully!")
-        if fqdn:
-            plog(f"  Admin UI: https://authentik.{fqdn}")
-        else:
-            plog(f"  Admin UI: http://{server_ip}:9090")
+        plog(f"  Admin UI: {_get_authentik_base_url(settings)}")
         plog(f"  Admin user: akadmin")
         if bootstrap_pass_display:
             plog(f"  Admin password: {bootstrap_pass_display}")
@@ -7656,9 +8995,22 @@ entries:
             plog(f"  - Service password: {ldap_svc_pass}")
         plog(f"  - Base DN: DC=takldap")
         plog(f"  - LDAP port: 389")
-        # Regenerate Caddyfile if Caddy is configured
+        # Regenerate Caddyfile if Caddy is configured — wait for HTTP 9090 first so Caddy doesn't get 502s
         if settings.get('fqdn'):
             plog("")
+            plog("  Waiting for Authentik HTTP (9090) before updating Caddy...")
+            for _ in range(12):
+                try:
+                    req = urllib.request.Request('http://127.0.0.1:9090/', method='GET')
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    if resp.status in (200, 302, 301):
+                        plog("  ✓ Authentik HTTP ready")
+                        break
+                except Exception:
+                    pass
+                time.sleep(5)
+            else:
+                plog("  ⚠ Authentik HTTP not ready in time — Caddy may 502 briefly; retry in a minute.")
             plog("  Updating Caddy config...")
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=30)
@@ -7701,7 +9053,7 @@ entries:
             pass
 
 AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Authentik</title>
+<title>Authentik — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
@@ -7772,14 +9124,14 @@ body{display:flex;min-height:100vh}
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">Authentik installation in progress</div></div></div>
 {% elif ak.installed and ak.running %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% if ak_version_info.update_available %} <span style="color:var(--cyan);font-size:11px" title="New image available">update</span>{% endif %}{% endif %}</div></div></div>
 <div class="controls">
 <button class="control-btn btn-stop" onclick="akControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="akControl('restart')">🔄 Restart</button>
 <button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
 </div>
 {% elif ak.installed %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% endif %}</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="akControl('start')">▶ Start</button>
 <button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
@@ -7804,10 +9156,10 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<a href="{{ authentik_base_url }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
@@ -7872,7 +9224,7 @@ It provides centralized user authentication and management for all your services
   <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
 </div>
 {% endif %}
-<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}">Waiting for deployment to start...</div>
+<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ authentik_base_url }}">Waiting for deployment to start...</div>
 {% endif %}
 
 {% if deploy_done %}
@@ -7885,7 +9237,7 @@ It provides centralized user authentication and management for all your services
 3. <strong>Deploy TAK Portal</strong> — go to <a href="/takportal" style="color:var(--cyan)">TAK Portal</a> and deploy when ready.<br>
 You can also open the Authentik admin UI below to make additional Admin users (Admin → Groups → authentik Admins → Users).
 </div>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
+<a href="{{ authentik_base_url }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
 <a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay</a>
 <a href="/takserver" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Server</a>
 <a href="/takportal" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">TAK Portal</a>
@@ -7940,7 +9292,7 @@ async function deployAk(){
         var r=await fetch('/api/authentik/deploy',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
         if(d.success)pollDeployLog();
-        else{document.getElementById('deploy-log').textContent='Error: '+d.error;btn.disabled=false;btn.textContent='Deploy Authentik';btn.style.opacity='1';btn.style.cursor='pointer'}
+        else{var lg=document.getElementById('deploy-log');if(lg)lg.textContent='Error: '+d.error;var card=lg?lg.closest('.card'):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='Deploy Authentik';btn.style.background='';deployAk();};}
     }catch(e){document.getElementById('deploy-log').textContent='Error: '+e.message}
 }
 async function reconfigureAk(){
@@ -7992,6 +9344,13 @@ function pollDeployLog(){
             refreshBtn.onclick=function(){window.location.href='/authentik';};
             el.appendChild(refreshBtn);
             el.scrollTop=el.scrollHeight;
+        }
+        else if(d.error){
+            var el=document.getElementById('deploy-log');
+            var card=el?el.closest('.card'):null;
+            if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}
+            var btn=document.getElementById('deploy-btn');
+            if(btn){btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='Deploy Authentik';btn.style.background='';deployAk();};}
         }
     });
 }
@@ -8432,17 +9791,34 @@ def _apply_ldap_to_coreconfig():
     with open(coreconfig_path, 'r') as f:
         original = f.read()
     if _coreconfig_has_ldap():
-        # LDAP already configured — check if password needs updating
+        # LDAP already configured — ensure adminGroup="ROLE_ADMIN" (required for admin UI; without it everyone gets WebTAK)
         import re as _re
+        def _ensure_admin_group(text):
+            if 'adminGroup="ROLE_ADMIN"' in text:
+                return text
+            # Add adminGroup to the <ldap ... /> element so 8446 shows admin UI for ROLE_ADMIN users
+            return _re.sub(r'(<ldap\s[^>]*?)(\s*/>)', r'\1 adminGroup="ROLE_ADMIN"\2', text, count=1, flags=_re.DOTALL)
+        # Check if password needs updating
         m = _re.search(r'serviceAccountCredential="([^"]*)"', original)
         existing_pass = m.group(1) if m else ''
         if existing_pass == ldap_pass:
+            if 'adminGroup="ROLE_ADMIN"' not in original:
+                patched = _ensure_admin_group(original)
+                patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
+                with open(patch_path, 'w') as f:
+                    f.write(patched)
+                r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path],
+                    capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    subprocess.run('sudo systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                return True, 'CoreConfig already has LDAP (adminGroup restored — restart TAK Server if 8446 still shows WebTAK)'
             return True, 'CoreConfig already has LDAP (password matches .env)'
-        # Password mismatch — update it in place
+        # Password mismatch — update it in place and ensure adminGroup
         updated = original.replace(
             f'serviceAccountCredential="{existing_pass}"',
             f'serviceAccountCredential="{ldap_pass}"')
-        if updated != original:
+        updated = _ensure_admin_group(updated)
+        if updated != original or 'adminGroup="ROLE_ADMIN"' not in original:
             patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
             with open(patch_path, 'w') as f:
                 f.write(updated)
@@ -8450,6 +9826,9 @@ def _apply_ldap_to_coreconfig():
                 capture_output=True, text=True, timeout=10)
             if r.returncode != 0:
                 return False, f'Password resync: sudo cp failed: {r.stderr.strip()[:200]}'
+            ag = subprocess.run(['grep', '-c', 'adminGroup="ROLE_ADMIN"', coreconfig_path], capture_output=True, text=True, timeout=5)
+            if ag.returncode != 0 or (ag.stdout or '').strip() == '0':
+                return False, 'CoreConfig updated but adminGroup="ROLE_ADMIN" missing — run Connect LDAP again.'
             r = subprocess.run('sudo systemctl restart takserver 2>&1',
                 shell=True, capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
@@ -8464,7 +9843,7 @@ def _apply_ldap_to_coreconfig():
     ldap_line = '        <ldap'
     ldap_line += ' url="ldap://127.0.0.1:389"'
     ldap_line += ' userstring="cn={username},ou=users,dc=takldap"'
-    ldap_line += ' updateinterval="60"'
+    ldap_line += ' updateinterval="30"'
     ldap_line += ' groupprefix="cn=tak_"'
     ldap_line += ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
     ldap_line += ' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
@@ -8505,10 +9884,13 @@ def _apply_ldap_to_coreconfig():
     r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path], capture_output=True, text=True, timeout=10)
     if r.returncode != 0:
         return False, f'sudo cp failed: {r.stderr.strip()[:200]}. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
-    # Verify the destination file
+    # Verify the destination file has LDAP and adminGroup (required for 8446 admin UI and channel resolution)
     check = subprocess.run(['grep', '-c', 'adm_ldapservice', coreconfig_path], capture_output=True, text=True, timeout=5)
     if check.returncode != 0 or check.stdout.strip() == '0':
         return False, f'File not updated. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    ag = subprocess.run(['grep', '-c', 'adminGroup="ROLE_ADMIN"', coreconfig_path], capture_output=True, text=True, timeout=5)
+    if ag.returncode != 0 or (ag.stdout or '').strip() == '0':
+        return False, 'CoreConfig was written but adminGroup="ROLE_ADMIN" is missing — 8446 would show WebTAK for everyone. Run Connect LDAP again.'
     # Restart TAK Server
     r = subprocess.run('sudo systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -8539,10 +9921,10 @@ def _ensure_authentik_webadmin():
     url = 'http://127.0.0.1:9090'
     headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
     try:
+        # Ensure tak_ROLE_ADMIN exists (for webadmin only; all other group membership is controlled in TAK Portal)
         group_pk = None
         req = _req.Request(f'{url}/api/v3/core/groups/?search=tak_ROLE_ADMIN', headers=headers)
-        resp = _req.urlopen(req, timeout=10)
-        results = json.loads(resp.read().decode())['results']
+        results = json.loads(_req.urlopen(req, timeout=10).read().decode())['results']
         group_pk = results[0]['pk'] if results else None
         if not group_pk:
             gr = _req.Request(f'{url}/api/v3/core/groups/', data=json.dumps({'name': 'tak_ROLE_ADMIN', 'is_superuser': False}).encode(), headers=headers, method='POST')
@@ -8704,6 +10086,771 @@ def takserver_connect_ldap():
     except Exception as e:
         diag.append(f'Diagnostic error: {str(e)[:100]}')
     return jsonify({'success': ok, 'message': ' | '.join(diag)})
+
+@app.route('/api/takserver/vacuum', methods=['POST'])
+@login_required
+def takserver_vacuum():
+    """Run VACUUM on the CoT database. Default: VACUUM ANALYZE (safe, reclaims space). Optional: VACUUM FULL (locks tables, reclaims more)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'success': False, 'error': 'TAK Server not installed'}), 400
+    data = request.get_json() or {}
+    use_full = data.get('full') is True
+    if use_full:
+        cmd = "sudo -u postgres psql -d cot -c 'VACUUM FULL;' 2>&1"
+        timeout_sec = 3600
+    else:
+        cmd = "sudo -u postgres psql -d cot -c 'VACUUM ANALYZE;' 2>&1"
+        timeout_sec = 600
+    try:
+        # Run from / so postgres user does not hit "Permission denied" on app dir (e.g. /root/infra-TAK)
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_sec, cwd='/')
+        out = (r.stdout or '') + (r.stderr or '')
+        if r.returncode != 0:
+            return jsonify({'success': False, 'error': out.strip() or f'Exit code {r.returncode}'}), 400
+        return jsonify({'success': True, 'output': out.strip(), 'full': use_full})
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False, 'error': 'VACUUM timed out (database may be very large)'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/takserver/cot-db-size')
+@login_required
+def takserver_cot_db_size():
+    """Return CoT database size in bytes and human-readable (for UI)."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': 'TAK Server not installed'})
+    try:
+        r = subprocess.run(
+            "sudo -u postgres psql -t -A -c \"SELECT COALESCE(pg_database_size('cot'), 0);\" 2>/dev/null",
+            shell=True, capture_output=True, text=True, timeout=10
+        )
+        size = int((r.stdout or '0').strip() or 0)
+        if size >= 1024 ** 3:
+            human = f'{size // (1024**3)} GB'
+        elif size >= 1024 ** 2:
+            human = f'{size // (1024**2)} MB'
+        elif size >= 1024:
+            human = f'{size // 1024} KB'
+        else:
+            human = f'{size} B'
+        return jsonify({'size_bytes': size, 'size_human': human})
+    except Exception as e:
+        return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': str(e)})
+
+
+@app.route('/api/takserver/cert-expiry')
+@login_required
+def takserver_cert_expiry():
+    """Return Root CA and Intermediate CA expiry dates and days remaining."""
+    cert_dir = '/opt/tak/certs/files'
+    results = {}
+    for label, filename in [('root_ca', 'root-ca.pem'), ('intermediate_ca', 'ca.pem')]:
+        path = os.path.join(cert_dir, filename)
+        if not os.path.exists(path):
+            results[label] = {'error': 'Not found', 'file': filename}
+            continue
+        try:
+            r = subprocess.run(
+                ['openssl', 'x509', '-enddate', '-noout', '-in', path],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode != 0:
+                results[label] = {'error': 'Failed to read cert'}
+                continue
+            raw = r.stdout.strip().split('=', 1)[-1]
+            from datetime import datetime
+            expiry = datetime.strptime(raw, '%b %d %H:%M:%S %Y %Z')
+            now = datetime.utcnow()
+            days_left = (expiry - now).days
+            results[label] = {
+                'file': filename,
+                'expires': expiry.strftime('%Y-%m-%d'),
+                'days_left': days_left
+            }
+        except Exception as e:
+            results[label] = {'error': str(e)}
+    return jsonify(results)
+
+
+@app.route('/api/takserver/groups')
+@login_required
+def takserver_groups():
+    """List groups from TAK Server via the Marti API using admin cert."""
+    cert_dir = '/opt/tak/certs/files'
+    admin_p12 = os.path.join(cert_dir, 'admin.p12')
+    if not os.path.exists(admin_p12):
+        return jsonify({'error': 'admin.p12 not found in /opt/tak/certs/files/', 'groups': []})
+    try:
+        # TAK Server generates legacy PKCS12 (RC2-40-CBC) that modern curl/OpenSSL 3.x
+        # rejects (exit 58). Extract PEM cert+key with -legacy flag for curl.
+        admin_pem = '/tmp/tak-admin-curl.pem'
+        admin_key = '/tmp/tak-admin-curl.key'
+        subprocess.run(
+            f'openssl pkcs12 -in {admin_p12} -passin pass:atakatak -clcerts -nokeys -legacy 2>/dev/null > {admin_pem}',
+            shell=True, capture_output=True, text=True, timeout=10)
+        subprocess.run(
+            f'openssl pkcs12 -in {admin_p12} -passin pass:atakatak -nocerts -nodes -legacy 2>/dev/null > {admin_key}',
+            shell=True, capture_output=True, text=True, timeout=10)
+        if not os.path.exists(admin_pem) or os.path.getsize(admin_pem) == 0:
+            return jsonify({'error': 'Failed to extract PEM from admin.p12 (legacy conversion)', 'groups': []})
+        cmd = ['curl', '-sk', '--max-time', '8',
+               '--cert', admin_pem, '--key', admin_key,
+               'https://127.0.0.1:8443/Marti/api/groups/all']
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+        body = (r.stdout or '').strip()
+        if r.returncode != 0 or not body:
+            return jsonify({'error': f'TAK Server did not respond (exit {r.returncode})', 'groups': []})
+        import json as _json
+        try:
+            data = _json.loads(body)
+        except _json.JSONDecodeError:
+            return jsonify({'error': 'TAK Server returned invalid response', 'groups': [], 'raw': body[:200]})
+        groups = []
+        items = data.get('data', data) if isinstance(data, dict) else data
+        if isinstance(items, list):
+            for g in items:
+                if not isinstance(g, dict):
+                    continue
+                name = g.get('name', '')
+                if name and name != '__ANON__':
+                    groups.append({
+                        'name': name,
+                        'direction': g.get('direction', ''),
+                        'active': g.get('active', True)
+                    })
+        groups.sort(key=lambda x: x['name'])
+        return jsonify({'groups': groups})
+    except Exception as e:
+        return jsonify({'error': str(e), 'groups': []})
+    finally:
+        for f in ['/tmp/tak-admin-curl.pem', '/tmp/tak-admin-curl.key']:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+
+@app.route('/api/takserver/ca-info')
+@login_required
+def takserver_ca_info():
+    """Return current Root CA and Intermediate CA names, expiry, and truststore contents."""
+    cert_dir = '/opt/tak/certs/files'
+    info = {'root_ca': None, 'intermediate_ca': None, 'old_cas_in_truststore': [], 'suggested_new_name': ''}
+    for label, filename in [('root_ca', 'root-ca.pem'), ('intermediate_ca', 'ca.pem')]:
+        path = os.path.join(cert_dir, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            r = subprocess.run(['openssl', 'x509', '-subject', '-enddate', '-noout', '-in', path],
+                               capture_output=True, text=True, timeout=5)
+            cn = ''
+            expiry_raw = ''
+            for line in r.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('subject=') or line.startswith('subject ='):
+                    subj = line.split('=', 1)[-1].strip()
+                    for part in subj.split(','):
+                        part = part.strip()
+                        if part.startswith('CN') or part.startswith('CN '):
+                            cn = part.split('=', 1)[-1].strip()
+                elif 'notAfter' in line:
+                    expiry_raw = line.split('=', 1)[-1].strip()
+            days_left = None
+            expires = ''
+            if expiry_raw:
+                from datetime import datetime
+                exp_dt = datetime.strptime(expiry_raw, '%b %d %H:%M:%S %Y %Z')
+                days_left = (exp_dt - datetime.utcnow()).days
+                expires = exp_dt.strftime('%Y-%m-%d')
+            info[label] = {'name': cn, 'file': filename, 'expires': expires, 'days_left': days_left}
+        except Exception:
+            pass
+    import re
+    def _increment_name(name):
+        m = re.search(r'(\d+)$', name)
+        if m:
+            return name[:m.start()] + f'{int(m.group(1)) + 1:02d}'
+        return name + '-02'
+    if info['intermediate_ca'] and info['intermediate_ca']['name']:
+        info['suggested_new_name'] = _increment_name(info['intermediate_ca']['name'])
+    if info['root_ca'] and info['root_ca']['name']:
+        info['suggested_new_root_name'] = _increment_name(info['root_ca']['name'])
+        info['suggested_new_root_int_name'] = _increment_name(info.get('suggested_new_name', 'INT-CA-01'))
+    # List CAs in current truststore (to show old CAs that can be revoked)
+    import glob as _glob
+    ts_files = sorted(_glob.glob(os.path.join(cert_dir, 'truststore-*.jks')))
+    ts_files = [f for f in ts_files if 'root' not in os.path.basename(f)]
+    if ts_files:
+        ts_path = ts_files[-1]
+        info['truststore_file'] = os.path.basename(ts_path)
+        try:
+            r = subprocess.run(
+                ['keytool', '-list', '-keystore', ts_path, '-storepass', 'atakatak'],
+                capture_output=True, text=True, timeout=10)
+            aliases = []
+            trusted_aliases = []
+            for line in r.stdout.split('\n'):
+                if ',' not in line:
+                    continue
+                alias = line.split(',')[0].strip()
+                if 'trustedCertEntry' in line:
+                    aliases.append(alias)
+                    trusted_aliases.append(alias)
+                elif 'PrivateKeyEntry' in line:
+                    aliases.append(alias)
+            info['truststore_aliases'] = aliases
+            current_cn = (info['intermediate_ca'] or {}).get('name', '').lower()
+            root_cn = (info['root_ca'] or {}).get('name', '').lower()
+            old_cas = []
+            for a in trusted_aliases:
+                if a.lower() != current_cn.lower() and a.lower() != 'root-ca' and a.lower() != root_cn.lower():
+                    old_cas.append(a)
+            info['old_cas_in_truststore'] = old_cas
+        except Exception:
+            pass
+    return jsonify(info)
+
+
+rotate_intca_log = []
+rotate_intca_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/rotate-intca', methods=['POST'])
+@login_required
+def takserver_rotate_intca():
+    """Rotate the intermediate CA: create new CA, server cert, admin cert, import old CA into truststore."""
+    if rotate_intca_status.get('running'):
+        return jsonify({'error': 'Rotation already in progress'}), 409
+    data = request.json or {}
+    new_ca_name = (data.get('new_ca_name') or '').strip()
+    if not new_ca_name:
+        return jsonify({'error': 'New CA name is required'}), 400
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', new_ca_name):
+        return jsonify({'error': 'CA name can only contain letters, numbers, dots, hyphens, underscores'}), 400
+
+    cert_dir = '/opt/tak/certs/files'
+    if not os.path.exists(os.path.join(cert_dir, 'root-ca.pem')):
+        return jsonify({'error': 'root-ca.pem not found — cannot rotate without a Root CA'}), 400
+    if not os.path.exists(os.path.join(cert_dir, 'ca.pem')):
+        return jsonify({'error': 'ca.pem not found — no current intermediate CA detected'}), 400
+
+    # Detect current intermediate CA name
+    try:
+        r = subprocess.run(['openssl', 'x509', '-subject', '-noout', '-in', os.path.join(cert_dir, 'ca.pem')],
+                           capture_output=True, text=True, timeout=5)
+        old_ca_name = ''
+        for part in r.stdout.replace('subject=', '').split(','):
+            part = part.strip()
+            if part.startswith('CN') or part.startswith('CN '):
+                old_ca_name = part.split('=', 1)[-1].strip()
+    except Exception:
+        old_ca_name = ''
+    if not old_ca_name:
+        return jsonify({'error': 'Could not detect current intermediate CA name from ca.pem'}), 500
+    if new_ca_name == old_ca_name:
+        return jsonify({'error': f'New CA name must be different from current ({old_ca_name})'}), 400
+
+    rotate_intca_log.clear()
+    rotate_intca_status.update({'running': True, 'complete': False, 'error': False})
+
+    def do_rotate():
+        def log(msg):
+            rotate_intca_log.append(msg)
+
+        def run(cmd, desc=None, check=True):
+            if desc:
+                log(desc)
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+                if check and r.returncode != 0:
+                    err = (r.stderr or r.stdout or '').strip()[:200]
+                    log(f"  ✗ Failed (exit {r.returncode}): {err}")
+                    return False
+                return True
+            except Exception as e:
+                log(f"  ✗ Exception: {e}")
+                return False
+
+        try:
+            log(f"━━━ Rotating Intermediate CA ━━━")
+            log(f"  Old CA: {old_ca_name}")
+            log(f"  New CA: {new_ca_name}")
+            log("")
+
+            log("Step 1/7: Restoring Root CA as working CA...")
+            run(f'cp {cert_dir}/root-ca.pem {cert_dir}/ca.pem')
+            run(f'cp {cert_dir}/root-ca-do-not-share.key {cert_dir}/ca-do-not-share.key')
+            run(f'cp {cert_dir}/root-ca-trusted.pem {cert_dir}/ca-trusted.pem')
+            log("✓ Root CA files restored")
+
+            log("")
+            log(f"Step 2/7: Creating new Intermediate CA: {new_ca_name}...")
+            run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null')
+            if not run(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh ca "{new_ca_name}" 2>&1'):
+                raise Exception('Failed to create new intermediate CA')
+            log(f"✓ Intermediate CA {new_ca_name} created")
+
+            log("")
+            log("Step 3/7: Creating new server certificate...")
+            if not run('cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh server takserver 2>&1'):
+                raise Exception('Failed to create server certificate')
+            log("✓ Server certificate created (signed by new CA)")
+
+            log("")
+            log("Step 4/7: Regenerating all client certificates...")
+            run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null')
+            skip = {'takserver', 'root-ca', 'ca', old_ca_name.lower(), new_ca_name.lower()}
+            regen_count = 0
+            for f in sorted(os.listdir(cert_dir)):
+                if not f.endswith('.p12'):
+                    continue
+                name = f[:-4]
+                if name.lower() in skip or name.startswith('truststore-'):
+                    continue
+                log(f"  Regenerating: {name}")
+                run(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh client {name} 2>&1')
+                regen_count += 1
+            log(f"✓ {regen_count} client certificate(s) regenerated (signed by new CA)")
+
+            log("")
+            log("Step 5/7: Updating truststore...")
+            ts_jks = os.path.join(cert_dir, f'truststore-{new_ca_name}.jks')
+            run(f'keytool -import -alias root-ca -file {cert_dir}/root-ca.pem '
+                f'-keystore {ts_jks} -storepass atakatak -noprompt 2>&1', check=False)
+            log("  Root CA imported into new truststore")
+            old_pem = os.path.join(cert_dir, f'{old_ca_name}.pem')
+            if os.path.exists(old_pem):
+                run(f'keytool -import -trustcacerts -file {old_pem} '
+                    f'-keystore {ts_jks} -alias "{old_ca_name}" -deststorepass atakatak -noprompt 2>&1',
+                    check=False)
+                log(f"  Old CA ({old_ca_name}) imported into new truststore (transition period)")
+            else:
+                log(f"  ⚠ {old_ca_name}.pem not found — old CA NOT added to truststore")
+            log("✓ Truststore updated")
+
+            log("")
+            log("Step 6/7: Updating CoreConfig.xml...")
+            run(f'sed -i "s/{old_ca_name}/{new_ca_name}/g" /opt/tak/CoreConfig.xml')
+            run(f'sed -i "s/{old_ca_name}/{new_ca_name}/g" /opt/tak/CoreConfig.example.xml 2>/dev/null', check=False)
+            log("✓ CoreConfig.xml updated")
+
+            log("")
+            log("Step 7/8: Updating TAK Portal certificates...")
+            portal_running = subprocess.run('docker ps --format "{{.Names}}" 2>/dev/null | grep -q tak-portal',
+                                            shell=True, capture_output=True).returncode == 0
+            if portal_running:
+                run('docker exec tak-portal mkdir -p /usr/src/app/data/certs', check=False)
+                admin_p12 = os.path.join(cert_dir, 'admin.p12')
+                modern_p12 = '/tmp/tak-portal-admin-modern.p12'
+                subprocess.run(
+                    f'openssl pkcs12 -in {admin_p12} -passin pass:atakatak -nodes -legacy 2>/dev/null | '
+                    f'openssl pkcs12 -export -passout pass:atakatak -out {modern_p12}',
+                    shell=True, capture_output=True, text=True, timeout=30)
+                if os.path.exists(modern_p12) and os.path.getsize(modern_p12) > 0:
+                    run(f'docker cp {modern_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', check=False)
+                    os.remove(modern_p12)
+                    log("  ✓ admin.p12 copied to TAK Portal (re-encoded)")
+                else:
+                    run(f'docker cp {admin_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', check=False)
+                    log("  ✓ admin.p12 copied to TAK Portal")
+                takserver_pem = os.path.join(cert_dir, 'takserver.pem')
+                if os.path.exists(takserver_pem):
+                    run(f'docker cp {takserver_pem} tak-portal:/usr/src/app/data/certs/tak-ca.pem', check=False)
+                    log("  ✓ CA chain copied to TAK Portal")
+                else:
+                    int_pem = os.path.join(cert_dir, 'ca.pem')
+                    root_pem = os.path.join(cert_dir, 'root-ca.pem')
+                    bundle = '/tmp/tak-ca-bundle.pem'
+                    run(f'cat {int_pem} {root_pem} > {bundle} 2>/dev/null', check=False)
+                    if os.path.exists(bundle) and os.path.getsize(bundle) > 0:
+                        run(f'docker cp {bundle} tak-portal:/usr/src/app/data/certs/tak-ca.pem', check=False)
+                        os.remove(bundle)
+                        log("  ✓ CA bundle copied to TAK Portal")
+                run('docker restart tak-portal 2>/dev/null', check=False)
+                log("  ✓ TAK Portal restarted with new certificates")
+            else:
+                log("  TAK Portal not running — will update on next deploy")
+
+            log("")
+            log("Step 8/8: Restarting TAK Server...")
+            run('systemctl restart takserver 2>&1')
+            log("  Waiting for TAK Server to come back up...")
+            time.sleep(45)
+            log("✓ TAK Server restarted")
+
+            log("")
+            log("━━━ ROTATION COMPLETE ━━━")
+            log(f"  New signing CA: {new_ca_name}")
+            log(f"  Old CA ({old_ca_name}) is still trusted for existing clients")
+            log(f"  New admin.p12 and user.p12 have been regenerated")
+            log(f"  ⚠ Re-import admin.p12 in your browser for CloudTAK/8443 access")
+            log(f"  When ready, use 'Revoke Old CA' to remove {old_ca_name} from the truststore")
+            rotate_intca_status.update({'running': False, 'complete': True, 'error': False})
+        except Exception as e:
+            log(f"")
+            log(f"✗ ROTATION FAILED: {e}")
+            rotate_intca_status.update({'running': False, 'complete': True, 'error': True})
+
+    import threading
+    threading.Thread(target=do_rotate, daemon=True).start()
+    return jsonify({'started': True, 'old_ca': old_ca_name, 'new_ca': new_ca_name})
+
+
+@app.route('/api/takserver/rotate-intca/status')
+@login_required
+def takserver_rotate_intca_status():
+    return jsonify({'log': rotate_intca_log, **rotate_intca_status})
+
+
+@app.route('/api/takserver/revoke-old-ca', methods=['POST'])
+@login_required
+def takserver_revoke_old_ca():
+    """Remove an old intermediate CA from the truststore, cutting off clients with old certs."""
+    data = request.json or {}
+    old_ca_alias = (data.get('old_ca_alias') or '').strip()
+    if not old_ca_alias:
+        return jsonify({'error': 'Old CA alias is required'}), 400
+
+    cert_dir = '/opt/tak/certs/files'
+    import glob as _glob
+    ts_files = sorted(_glob.glob(os.path.join(cert_dir, 'truststore-*.jks')))
+    ts_files = [f for f in ts_files if 'root' not in os.path.basename(f)]
+    if not ts_files:
+        return jsonify({'error': 'No truststore found'}), 500
+    ts_path = ts_files[-1]
+
+    try:
+        r = subprocess.run(
+            ['keytool', '-delete', '-alias', old_ca_alias,
+             '-keystore', ts_path, '-storepass', 'atakatak'],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return jsonify({'error': f'keytool failed: {r.stderr or r.stdout}'}), 500
+
+        # Also regenerate the .p12 truststore from the .jks
+        ts_p12 = ts_path.replace('.jks', '.p12')
+        subprocess.run(
+            f'keytool -importkeystore -srckeystore {ts_path} -destkeystore {ts_p12} '
+            f'-srcstoretype JKS -deststoretype PKCS12 -srcstorepass atakatak -deststorepass atakatak -noprompt 2>&1',
+            shell=True, capture_output=True, text=True, timeout=15)
+
+        subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        return jsonify({
+            'success': True,
+            'message': f'Removed {old_ca_alias} from truststore and restarted TAK Server. '
+                       f'Clients with certificates signed by {old_ca_alias} will no longer be able to connect.'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+rotate_rootca_log = []
+rotate_rootca_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/rotate-rootca', methods=['POST'])
+@login_required
+def takserver_rotate_rootca():
+    """Full Root CA rotation: new root, new intermediate, new server cert, all client certs, update TAK Portal, restart."""
+    if rotate_rootca_status.get('running'):
+        return jsonify({'error': 'Root CA rotation already in progress'}), 409
+    data = request.json or {}
+    new_root_name = (data.get('new_root_name') or '').strip()
+    new_int_name = (data.get('new_int_name') or '').strip()
+    if not new_root_name or not new_int_name:
+        return jsonify({'error': 'Both new Root CA and Intermediate CA names are required'}), 400
+    import re
+    for name in [new_root_name, new_int_name]:
+        if not re.match(r'^[a-zA-Z0-9._-]+$', name):
+            return jsonify({'error': f'CA name "{name}" can only contain letters, numbers, dots, hyphens, underscores'}), 400
+
+    cert_dir = '/opt/tak/certs/files'
+    if not os.path.exists(os.path.join(cert_dir, 'root-ca.pem')):
+        return jsonify({'error': 'root-ca.pem not found — no current Root CA detected'}), 400
+
+    # Detect current names
+    old_root_name = ''
+    old_int_name = ''
+    for label, filename in [('root', 'root-ca.pem'), ('int', 'ca.pem')]:
+        path = os.path.join(cert_dir, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            r = subprocess.run(['openssl', 'x509', '-subject', '-noout', '-in', path],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().split('\n'):
+                if line.startswith('subject=') or line.startswith('subject ='):
+                    subj = line.split('=', 1)[-1].strip()
+                    for part in subj.split(','):
+                        part = part.strip()
+                        if part.startswith('CN') or part.startswith('CN '):
+                            cn = part.split('=', 1)[-1].strip()
+                            if label == 'root':
+                                old_root_name = cn
+                            else:
+                                old_int_name = cn
+        except Exception:
+            pass
+    if not old_root_name:
+        return jsonify({'error': 'Could not detect current Root CA name'}), 500
+
+    rotate_rootca_log.clear()
+    rotate_rootca_status.update({'running': True, 'complete': False, 'error': False})
+
+    def do_rotate_root():
+        def log(msg):
+            rotate_rootca_log.append(msg)
+
+        def run(cmd, desc=None, check=True):
+            if desc:
+                log(desc)
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+                if check and r.returncode != 0:
+                    err = (r.stderr or r.stdout or '').strip()[:200]
+                    log(f"  ✗ Failed (exit {r.returncode}): {err}")
+                    return False
+                return True
+            except Exception as e:
+                log(f"  ✗ Exception: {e}")
+                return False
+
+        try:
+            log("━━━ Rotating Root CA ━━━")
+            log(f"  Old Root CA: {old_root_name}")
+            log(f"  Old Intermediate CA: {old_int_name}")
+            log(f"  New Root CA: {new_root_name}")
+            log(f"  New Intermediate CA: {new_int_name}")
+            log("")
+
+            log("Step 1/8: Removing old certificate files...")
+            run('rm -rf /opt/tak/certs/files')
+            run('mkdir -p /opt/tak/certs/files')
+            run('chown -R tak:tak /opt/tak/certs/')
+            log("✓ Old cert files cleared")
+
+            log("")
+            log(f"Step 2/8: Creating new Root CA: {new_root_name}...")
+            run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null')
+            if not run(f'cd /opt/tak/certs && echo "{new_root_name}" | sudo -u tak ./makeRootCa.sh 2>&1'):
+                raise Exception('Failed to create new Root CA')
+            log(f"✓ Root CA {new_root_name} created")
+
+            log("")
+            log(f"Step 3/8: Creating new Intermediate CA: {new_int_name}...")
+            if not run(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh ca "{new_int_name}" 2>&1'):
+                raise Exception('Failed to create new Intermediate CA')
+            log(f"✓ Intermediate CA {new_int_name} created")
+
+            log("")
+            log("Step 4/8: Creating new server certificate...")
+            if not run('cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh server takserver 2>&1'):
+                raise Exception('Failed to create server certificate')
+            log("✓ Server certificate created")
+
+            log("")
+            log("Step 5/8: Regenerating all client certificates...")
+            skip = {'takserver', 'root-ca', 'ca', new_root_name.lower(), new_int_name.lower(),
+                    old_root_name.lower(), old_int_name.lower()}
+            # We need to create admin and user first since old files were cleared
+            run('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client admin 2>&1')
+            log("  Regenerated: admin")
+            run('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1')
+            log("  Regenerated: user")
+            # Check settings or old backup for any other client cert names to recreate
+            regen_count = 2
+            log(f"✓ {regen_count} client certificate(s) created")
+            log("  Note: Additional client certs (Node-RED, etc.) must be recreated manually")
+
+            log("")
+            log("Step 6/8: Updating truststore...")
+            ts_jks = os.path.join(cert_dir, f'truststore-{new_int_name}.jks')
+            run(f'keytool -import -alias root-ca -file {cert_dir}/root-ca.pem '
+                f'-keystore {ts_jks} -storepass atakatak -noprompt 2>&1', check=False)
+            log("  Root CA imported into truststore")
+            log("✓ Truststore updated")
+
+            log("")
+            log("Step 7/8: Updating CoreConfig.xml...")
+            if old_int_name:
+                run(f'sed -i "s/{old_int_name}/{new_int_name}/g" /opt/tak/CoreConfig.xml')
+                run(f'sed -i "s/{old_int_name}/{new_int_name}/g" /opt/tak/CoreConfig.example.xml 2>/dev/null', check=False)
+            if old_root_name and old_root_name != new_root_name:
+                run(f'sed -i "s/{old_root_name}/{new_root_name}/g" /opt/tak/CoreConfig.xml', check=False)
+                run(f'sed -i "s/{old_root_name}/{new_root_name}/g" /opt/tak/CoreConfig.example.xml 2>/dev/null', check=False)
+            log("✓ CoreConfig.xml updated")
+
+            log("")
+            log("Step 8/8: Restarting TAK Server and updating TAK Portal...")
+            run('systemctl restart takserver 2>&1')
+            log("  TAK Server restarting...")
+
+            # Copy new certs to TAK Portal if it's running
+            portal_running = subprocess.run('docker ps --format "{{.Names}}" 2>/dev/null | grep -q tak-portal',
+                                            shell=True, capture_output=True).returncode == 0
+            if portal_running:
+                log("  Updating TAK Portal certificates...")
+                run('docker exec tak-portal mkdir -p /usr/src/app/data/certs', check=False)
+                admin_p12 = os.path.join(cert_dir, 'admin.p12')
+                modern_p12 = '/tmp/tak-portal-admin-modern.p12'
+                r_enc = subprocess.run(
+                    f'openssl pkcs12 -in {admin_p12} -passin pass:atakatak -nodes -legacy 2>/dev/null | '
+                    f'openssl pkcs12 -export -passout pass:atakatak -out {modern_p12}',
+                    shell=True, capture_output=True, text=True, timeout=30)
+                if os.path.exists(modern_p12) and os.path.getsize(modern_p12) > 0:
+                    run(f'docker cp {modern_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', check=False)
+                    os.remove(modern_p12)
+                    log("  ✓ admin.p12 copied to TAK Portal (re-encoded)")
+                else:
+                    run(f'docker cp {admin_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', check=False)
+                    log("  ✓ admin.p12 copied to TAK Portal")
+                takserver_pem = os.path.join(cert_dir, 'takserver.pem')
+                if os.path.exists(takserver_pem):
+                    run(f'docker cp {takserver_pem} tak-portal:/usr/src/app/data/certs/tak-ca.pem', check=False)
+                    log("  ✓ CA chain copied to TAK Portal")
+                else:
+                    int_pem = os.path.join(cert_dir, 'ca.pem')
+                    root_pem = os.path.join(cert_dir, 'root-ca.pem')
+                    bundle = '/tmp/tak-ca-bundle.pem'
+                    run(f'cat {int_pem} {root_pem} > {bundle} 2>/dev/null', check=False)
+                    if os.path.exists(bundle) and os.path.getsize(bundle) > 0:
+                        run(f'docker cp {bundle} tak-portal:/usr/src/app/data/certs/tak-ca.pem', check=False)
+                        os.remove(bundle)
+                        log("  ✓ CA bundle copied to TAK Portal")
+                run('docker restart tak-portal 2>/dev/null', check=False)
+                log("  ✓ TAK Portal restarted with new certificates")
+            else:
+                log("  TAK Portal not running — skip cert copy (will update on next TAK Portal deploy)")
+
+            log("  Waiting for TAK Server to come back up...")
+            time.sleep(45)
+            log("✓ TAK Server restarted")
+
+            log("")
+            log("━━━ ROOT CA ROTATION COMPLETE ━━━")
+            log(f"  New Root CA: {new_root_name}")
+            log(f"  New Intermediate CA: {new_int_name}")
+            log(f"  All certificates have been regenerated")
+            if portal_running:
+                log(f"  TAK Portal updated — users can scan new QR codes to re-enroll")
+            log(f"  All existing client connections are disconnected")
+            log(f"  Clients must re-enroll via TAK Portal QR code")
+            rotate_rootca_status.update({'running': False, 'complete': True, 'error': False})
+        except Exception as e:
+            log(f"")
+            log(f"✗ ROOT CA ROTATION FAILED: {e}")
+            rotate_rootca_status.update({'running': False, 'complete': True, 'error': True})
+
+    import threading
+    threading.Thread(target=do_rotate_root, daemon=True).start()
+    return jsonify({'started': True, 'old_root': old_root_name, 'new_root': new_root_name})
+
+
+@app.route('/api/takserver/rotate-rootca/status')
+@login_required
+def takserver_rotate_rootca_status():
+    return jsonify({'log': rotate_rootca_log, **rotate_rootca_status})
+
+
+@app.route('/api/takserver/create-client-cert', methods=['POST'])
+@login_required
+def takserver_create_client_cert():
+    """Create a client certificate with optional group assignment."""
+    data = request.json or {}
+    cert_name = (data.get('name') or '').strip()
+    if not cert_name:
+        return jsonify({'error': 'Certificate name is required'}), 400
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', cert_name):
+        return jsonify({'error': 'Name can only contain letters, numbers, dots, hyphens, underscores'}), 400
+    if len(cert_name) > 64:
+        return jsonify({'error': 'Name too long (max 64 chars)'}), 400
+
+    cert_dir = '/opt/tak/certs/files'
+    if os.path.exists(os.path.join(cert_dir, f'{cert_name}.p12')):
+        return jsonify({'error': f'Certificate "{cert_name}" already exists'}), 400
+
+    groups_in = data.get('groups_in', [])
+    groups_out = data.get('groups_out', [])
+
+    try:
+        subprocess.run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null', shell=True, capture_output=True)
+        r = subprocess.run(
+            f'sudo -u tak bash -c "cd /opt/tak/certs && ./makeCert.sh client {cert_name}" 2>&1',
+            shell=True, capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            return jsonify({'error': f'makeCert.sh failed: {r.stdout or r.stderr}'}), 500
+
+        p12_path = os.path.join(cert_dir, f'{cert_name}.p12')
+        if not os.path.exists(p12_path):
+            return jsonify({'error': 'Certificate file was not created'}), 500
+
+        if groups_in or groups_out:
+            pem_path = os.path.join(cert_dir, f'{cert_name}.pem')
+            cmd = f'java -jar /opt/tak/utils/UserManager.jar certmod'
+            for g in groups_in:
+                cmd += f' -ig {g}'
+            for g in groups_out:
+                cmd += f' -og {g}'
+            cmd += f' {pem_path} 2>&1'
+            gr = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+            if gr.returncode != 0:
+                pass  # cert still created, group assignment is best-effort
+
+        return jsonify({
+            'success': True,
+            'name': cert_name,
+            'p12': f'{cert_name}.p12',
+            'download_url': f'/api/certs/download/{cert_name}.p12',
+            'groups_in': groups_in,
+            'groups_out': groups_out
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def _run_takserver_update_config():
+    """Regenerate Caddyfile, reload Caddy, re-install 8446 LE cert for current TAK Server hostname, restart TAK Server."""
+    settings = load_settings()
+    fqdn = settings.get('fqdn', '').strip()
+    generate_caddyfile(settings)
+    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
+    takserver_host = _get_service_domain(settings, 'takserver')
+    if fqdn and takserver_host:
+        caddy_active = subprocess.run('systemctl is-active caddy', shell=True, capture_output=True, text=True)
+        if caddy_active.stdout.strip() == 'active':
+            def _log(msg):
+                print(msg, flush=True)
+            install_le_cert_on_8446(takserver_host, _log, wait_for_cert=False)
+    subprocess.run(['systemctl', 'restart', 'takserver'], capture_output=True, text=True, timeout=60)
+    takserver_update_config_status.update({'running': False, 'complete': True, 'error': False})
+
+takserver_update_config_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/update-config', methods=['POST'])
+@login_required
+def takserver_update_config():
+    """Sync Caddy + 8446 cert to current TAK Server domain and restart TAK Server. Use after changing TAK Server domain in Caddy/Domains."""
+    if takserver_update_config_status.get('running'):
+        return jsonify({'error': 'Update already in progress'}), 409
+    modules = detect_modules()
+    tak = modules.get('takserver', {})
+    if not tak.get('installed'):
+        return jsonify({'error': 'TAK Server not installed'}), 400
+    takserver_update_config_status.update({'running': True, 'complete': False, 'error': False})
+    def _run():
+        try:
+            _run_takserver_update_config()
+        except Exception as e:
+            takserver_update_config_status.update({'running': False, 'complete': True, 'error': True, 'message': str(e)})
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Update config started. Caddy and 8446 cert (if applicable) will be updated; TAK Server will restart.'})
+
+@app.route('/api/takserver/update-config/status')
+@login_required
+def takserver_update_config_status_api():
+    return jsonify(takserver_update_config_status)
 
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
@@ -8904,6 +11051,68 @@ def check_existing_uploads():
 
 deploy_log = []
 deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
+
+upgrade_log = []
+upgrade_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/update', methods=['POST'])
+@login_required
+def takserver_update():
+    """Run TAK Server upgrade (Ubuntu: apt install ./takserver_*.deb). User uploads new .deb first."""
+    if not os.path.exists('/opt/tak'):
+        return jsonify({'error': 'TAK Server not installed. Deploy TAK Server first.'}), 400
+    settings = load_settings()
+    if settings.get('pkg_mgr', 'apt') != 'apt':
+        return jsonify({'error': 'TAK Server update is supported on Ubuntu only for now. Rocky/RHEL coming later.'}), 400
+    if upgrade_status['running']:
+        return jsonify({'error': 'Update already in progress'}), 409
+    pkg_files = sorted([f for f in os.listdir(UPLOAD_DIR) if f.endswith('.deb')],
+        key=lambda f: os.path.getmtime(os.path.join(UPLOAD_DIR, f)), reverse=True)
+    if not pkg_files:
+        return jsonify({'error': 'No .deb package found. Upload the new TAK Server .deb from tak.gov first.'}), 400
+    upgrade_log.clear()
+    upgrade_status.update({'running': True, 'complete': False, 'error': False})
+    threading.Thread(target=run_takserver_upgrade, args=(os.path.join(UPLOAD_DIR, pkg_files[0]),), daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/takserver/update/log')
+@login_required
+def takserver_update_log():
+    idx = int(request.args.get('index', 0))
+    return jsonify({'entries': upgrade_log[idx:], 'total': len(upgrade_log),
+        'running': upgrade_status['running'], 'complete': upgrade_status['complete'], 'error': upgrade_status['error']})
+
+def run_takserver_upgrade(pkg_path):
+    def ulog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        upgrade_log.append(entry)
+        print(entry, flush=True)
+    try:
+        pkg_name = os.path.basename(pkg_path)
+        ulog("=" * 50)
+        ulog("TAK Server update (upgrade)")
+        ulog("=" * 50)
+        wait_for_apt_lock(ulog, upgrade_log)
+        ulog("")
+        ulog("Installing upgrade package: " + pkg_name)
+        r = subprocess.run(
+            f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y ./{pkg_name} 2>&1',
+            shell=True, cwd=os.path.dirname(pkg_path), capture_output=True, text=True, timeout=600)
+        out = (r.stdout or '') + (r.stderr or '')
+        for line in out.strip().split('\n'):
+            if line.strip() and 'NEEDRESTART' not in line:
+                upgrade_log.append("  " + line)
+        if r.returncode != 0:
+            ulog("Update failed (exit " + str(r.returncode) + ")")
+            upgrade_status.update({'running': False, 'complete': False, 'error': True})
+            return
+        ulog("Restarting TAK Server...")
+        subprocess.run('systemctl restart takserver', shell=True, capture_output=True, text=True, timeout=30)
+        ulog("TAK Server update complete.")
+        upgrade_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        ulog("Error: " + str(e))
+        upgrade_status.update({'running': False, 'complete': False, 'error': True})
 
 @app.route('/api/deploy/cancel', methods=['POST'])
 @login_required
@@ -9204,9 +11413,29 @@ def run_takserver_deploy(config):
             if caddy_active.stdout.strip() == 'active':
                 log_step("")
                 log_step("━━━ Installing LE Cert on Port 8446 ━━━")
-                install_le_cert_on_8446(fqdn, log_step, wait_for_cert=True)
+                install_le_cert_on_8446(_get_service_domain(settings, 'takserver'), log_step, wait_for_cert=True)
 
         deploy_status.update({'complete': True, 'running': False})
+
+        # Auto-deploy Guard Dog so it runs from the start (user can disable or configure notifications later)
+        if not os.path.exists('/opt/tak-guarddog'):
+            log_step("")
+            log_step("━━━ Guard Dog (monitoring) — installing automatically ━━━")
+            alert_email = (load_settings().get('guarddog_alert_email') or '').strip()
+            run_guarddog_deploy(alert_email)
+            if guarddog_deploy_status.get('complete') and not guarddog_deploy_status.get('error'):
+                log_step("✓ Guard Dog installed. Configure notifications on the Guard Dog page.")
+            elif os.path.exists('/opt/tak-guarddog') and not _guarddog_is_enabled():
+                # Partial install (e.g. enable failed): ensure timers are enabled so Guard Dog runs
+                log_step("Enabling Guard Dog timers…")
+                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=10)
+                for t in _guarddog_timer_list():
+                    subprocess.run(['systemctl', 'enable', t], capture_output=True, timeout=5)
+                    subprocess.run(['systemctl', 'start', t], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'enable', 'tak-health.service'], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'start', 'tak-health.service'], capture_output=True, timeout=5)
+                if _guarddog_is_enabled():
+                    log_step("✓ Guard Dog enabled. Configure notifications on the Guard Dog page.")
     except Exception as e:
         log_step(f"✗ FATAL ERROR: {str(e)}")
         deploy_status.update({'error': True, 'running': False})
@@ -9275,6 +11504,9 @@ BASE_CSS = """
 *{margin:0;padding:0;box-sizing:border-box}
 .material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;word-wrap:normal;direction:ltr;-webkit-font-smoothing:antialiased}
 .nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow:visible;line-height:1.35}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.02em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
 :root{--bg-primary:#0a0e17;--bg-card:rgba(15,23,42,0.7);--bg-card-hover:rgba(15,23,42,0.9);--border:rgba(59,130,246,0.1);--border-hover:rgba(59,130,246,0.3);--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--accent-glow:rgba(59,130,246,0.15);--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4}
 body{font-family:'DM Sans',sans-serif;background:var(--bg-primary);color:var(--text-primary);min-height:100vh}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(59,130,246,0.02) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.02) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0}
@@ -9305,16 +11537,17 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 # === Login Template ===
 LOGIN_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>infra-TAK</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'DM Sans',sans-serif;background:#0a0e17;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(59,130,246,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.03) 1px,transparent 1px);background-size:60px 60px;z-index:0}
 body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#3b82f6,#06b6d4,transparent);z-index:10}
-.lc{position:relative;z-index:1;width:100%;max-width:420px;padding:20px}
-.card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 40px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
+.lc{position:relative;z-index:1;width:100%;max-width:560px;padding:24px}
+.card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 44px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
 .logo{text-align:center;margin-bottom:36px}
 .logo-icon{width:56px;height:56px;background:linear-gradient(135deg,#1e40af,#0891b2);border-radius:14px;display:inline-flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:16px;box-shadow:0 8px 24px rgba(59,130,246,0.25)}
-.logo h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f1f5f9}
+.logo .login-logo{width:100%;max-width:100%;height:auto;display:block;margin:0 auto 28px;object-fit:contain}
+.logo h1{font-family:'Orbitron',sans-serif;font-size:26px;font-weight:700;color:#f1f5f9;letter-spacing:0.08em}
 .logo p{color:#64748b;font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase}
 .logo .built-by{font-size:10px;color:#94a3b8;margin-top:8px;text-transform:none;letter-spacing:0}
 .fg{margin-bottom:24px}
@@ -9327,7 +11560,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 .ver{text-align:center;margin-top:20px;color:#64748b;font-family:'JetBrains Mono',monospace;font-size:11px}
 </style></head><body>
 <div class="lc"><div class="card">
-<div class="logo"><div class="logo-icon">⚡</div><h1>infra-TAK</h1><p>TAK Infrastructure Platform</p><p class="built-by">built by TAKWERX</p></div>
+<div class="logo">{% if login_logo_url %}<img src="{{ login_logo_url }}" alt="TAKWERX" class="login-logo">{% else %}<div class="logo-icon">⚡</div>{% endif %}<h1>infra-TAK</h1><p>TAK Infrastructure Platform</p><p class="built-by">built by TAKWERX</p></div>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 <form method="POST"><div class="fg"><label>Password</label><input type="password" name="password" autofocus placeholder="Enter admin password"></div><button type="submit" class="btn">Sign In</button></form>
 </div><div class="ver">v{{ version }}</div></div>
@@ -9349,9 +11582,18 @@ def api_toggle_unattended_upgrades():
         return jsonify({'success': False, 'error': 'action must be enable or disable'}), 400
     try:
         if action == 'disable':
+            # Kill in-flight process first so systemctl stop doesn't hang waiting for it
+            subprocess.run('pkill -TERM -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+            for _ in range(15):
+                time.sleep(1)
+                r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=3)
+                if not (r.stdout or '').strip():
+                    break
+            else:
+                subprocess.run('pkill -9 -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+                time.sleep(3)
             subprocess.run('systemctl stop unattended-upgrades && systemctl disable unattended-upgrades',
-                shell=True, check=True, capture_output=True, text=True, timeout=30)
-            # Ubuntu/Debian also run unattended-upgrade via apt-daily-upgrade.timer; disable that too
+                shell=True, check=True, capture_output=True, text=True, timeout=25)
             subprocess.run('systemctl stop apt-daily-upgrade.timer 2>/dev/null; systemctl disable apt-daily-upgrade.timer 2>/dev/null; true',
                 shell=True, timeout=10)
         else:
@@ -9585,6 +11827,98 @@ def console_password_reset():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return jsonify({'success': True, 'message': 'Password updated. Console will restart in a few seconds.'})
 
+
+def _get_current_ssh_port():
+    """Read SSH port from /etc/ssh/sshd_config. Default 22 if not set or unreadable."""
+    try:
+        with open('/etc/ssh/sshd_config', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    parts = line.split(None, 1)
+                    if len(parts) >= 2 and parts[0].lower() == 'port':
+                        p = int(parts[1].strip())
+                        if 1 <= p <= 65535:
+                            return p
+    except Exception:
+        pass
+    return 22
+
+
+@app.route('/api/hardening/ssh-port', methods=['GET'])
+@login_required
+def api_hardening_ssh_port_get():
+    """Return current SSH port from sshd_config."""
+    return jsonify({'port': _get_current_ssh_port()})
+
+
+@app.route('/api/hardening/ssh-port', methods=['POST'])
+@login_required
+def api_hardening_ssh_port_post():
+    """Change SSH port: update sshd_config, open firewall, restart sshd. Requires root."""
+    data = request.get_json() or {}
+    try:
+        port = int(data.get('port', 0))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'Invalid port'}), 400
+    if port < 1 or port > 65535:
+        return jsonify({'success': False, 'error': 'Port must be between 1 and 65535'}), 400
+    current = _get_current_ssh_port()
+    if port == current:
+        return jsonify({'success': True, 'message': f'SSH is already on port {port}. No change made.'})
+
+    config_path = '/etc/ssh/sshd_config'
+    try:
+        with open(config_path, 'r') as f:
+            lines = f.readlines()
+    except OSError as e:
+        return jsonify({'success': False, 'error': f'Cannot read sshd_config: {e}'}), 500
+
+    # Replace or add Port line; drop any existing Port / #Port
+    new_lines = []
+    port_line_added = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#'):
+            parts = stripped.split(None, 1)
+            if len(parts) >= 1 and parts[0].lower() == 'port':
+                if not port_line_added:
+                    new_lines.append(f'Port {port}\n')
+                    port_line_added = True
+                continue
+        elif stripped.startswith('#Port') or (stripped.startswith('#') and stripped[1:].strip().lower().startswith('port')):
+            if not port_line_added:
+                new_lines.append(f'Port {port}\n')
+                port_line_added = True
+            continue
+        new_lines.append(line)
+    if not port_line_added:
+        new_lines.append(f'\n# infra-TAK hardening\nPort {port}\n')
+
+    try:
+        with open(config_path, 'w') as f:
+            f.writelines(new_lines)
+    except OSError as e:
+        return jsonify({'success': False, 'error': f'Cannot write sshd_config: {e}'}), 500
+
+    # Allow new port in firewall (ufw)
+    r = subprocess.run(['which', 'ufw'], capture_output=True)
+    if r.returncode == 0:
+        subprocess.run(['ufw', 'allow', f'{port}/tcp'], capture_output=True, timeout=10)
+        subprocess.run(['ufw', 'reload'], capture_output=True, timeout=10)
+
+    # Restart SSH (ssh.service on Debian/Ubuntu, sshd on some others)
+    for svc in ('ssh', 'sshd'):
+        r = subprocess.run(['systemctl', 'restart', svc], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            break
+
+    settings = load_settings()
+    settings['ssh_port'] = port
+    save_settings(settings)
+    return jsonify({'success': True, 'message': f'SSH port set to {port}. Connect using port {port} from now on.'})
+
+
 # === Help Template (sidebar: backdoor, password info, reset) ===
 HELP_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Help — infra-TAK</title>
 <style>
@@ -9594,11 +11928,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;border-left:2px solid transparent}
 .nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
 .nav-icon{font-size:15px;width:18px;text-align:center}
-.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:640px;margin:0 auto}
-.help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px}
-.help-card h2{font-size:16px;font-weight:600;margin-bottom:12px;color:var(--text-primary)}
-.help-card p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px}
-.help-card p:last-child{margin-bottom:0}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
+.help-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px}
+.help-card-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:16px 24px;cursor:pointer}
+.help-card-header h2{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin:0}
+.help-card-toggle{font-size:18px;color:var(--text-dim);transition:transform 0.2s ease}
+.help-card-body{display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)}
+.help-card-body p{font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;margin-top:0;padding-top:0}
+.help-card-body p:first-child{padding-top:16px}
+.help-card-body p:last-child{margin-bottom:0}
+.help-card-body .form-field{margin-bottom:14px}
+.help-card-body .form-field:first-child{margin-top:16px}
 .backdoor-url{font-family:'JetBrains Mono',monospace;font-size:13px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--cyan);word-break:break-all;user-select:all}
 .form-field{margin-bottom:14px}.form-field label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
 .form-field input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
@@ -9615,29 +11955,48 @@ body{display:flex;flex-direction:row;min-height:100vh}
 {{ sidebar_html }}
 <main class="main">
 <div class="help-card">
-<h2>Backdoor (IP:5001)</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Deployment order</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
+<p>(1) Caddy — set FQDN and TLS · (2) Authentik · (3) Email Relay · (4) TAK Server — upload .deb/.rpm and deploy · (5) Connect TAK Server to LDAP (button on TAK Server page) · (6) TAK Portal · (7) Node-RED, MediaMTX, CloudTAK, Guard Dog as needed.</p>
+</div></div>
+<div class="help-card">
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Backdoor (IP:5001)</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>If Authentik or the domain is down, you can always reach the console at:</p>
 <p class="backdoor-url">https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</p>
 <p>Accept the self-signed cert and log in with your <strong>console password</strong>. <strong>Full lockout?</strong> If you can't log in at all, you have to get on the CLI: the <strong>README on the GitHub repo</strong> has the exact commands to run on the server to reset the password (e.g. <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">./reset-console-password.sh</code>).</p>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Console password</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Console password</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>This is the password you set when you ran <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">start.sh</code>. The <strong>same password</strong> is used to log in at the backdoor (above) and for <strong>Uninstall all services</strong> on the Console page. We don't store the plaintext, so it can't be shown here. Forgot it? Use the form below if you're logged in; for a full lockout you need the CLI — see the README on the GitHub repo.</p>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Reset console password</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Reset console password</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>Enter your current password and choose a new one. The console will restart and you'll use the new password for 5001 and Uninstall all. <em>Only works when you're already logged in.</em> For a full lockout, use the CLI (README has the commands).</p>
 <div class="form-field"><label>Current password</label><input type="password" id="reset-current" placeholder="Current console password"></div>
 <div class="form-field"><label>New password</label><input type="password" id="reset-new" placeholder="At least 8 characters"></div>
 <div class="form-field"><label>Confirm new password</label><input type="password" id="reset-confirm" placeholder="Same as above"></div>
 <button type="button" class="btn btn-primary" onclick="doResetPassword()">Reset password</button>
 <div id="reset-msg"></div>
-</div>
+</div></div>
 <div class="help-card">
-<h2>Uninstall all services</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Server hardening — SSH port</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
+<p>Changing the SSH port from the default (22) reduces automated scans and is a common hardening step. <strong>Keep another session open</strong> (e.g. a second SSH or the console in the browser) until you confirm you can connect on the new port, or you may lock yourself out.</p>
+<p style="font-size:12px;color:var(--text-dim)">Current port: <code style="color:var(--cyan)">{{ current_ssh_port }}</code>. We update <code style="background:var(--bg-surface);padding:2px 6px;border-radius:4px">/etc/ssh/sshd_config</code>, allow the new port in UFW if present, and restart SSH.</p>
+<div class="form-field"><label>SSH port (1–65535)</label><input type="number" id="ssh-port-input" min="1" max="65535" value="{{ current_ssh_port }}" placeholder="22" style="width:100px"></div>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">Suggestions (commonly unused ports): <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=2222">2222</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=3022">3022</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=4822">4822</button> <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="document.getElementById('ssh-port-input').value=22222">22222</button></p>
+<button type="button" class="btn btn-primary" onclick="doApplySshPort()">Apply SSH port</button>
+<div id="ssh-port-msg" style="margin-top:12px;font-size:13px;min-height:20px"></div>
+</div></div>
+<div class="help-card">
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Uninstall all services</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p>Remove all deployed services (TAK Server, Authentik, Caddy, TAK Portal, MediaMTX, Node-RED, CloudTAK, Email Relay). The console stays so you can redeploy from Marketplace without burning the VPS.</p>
 <button type="button" onclick="document.getElementById('full-uninstall-modal').classList.add('open');setTimeout(function(){fullUninstallCheckFields();var p=document.getElementById('full-uninstall-password');if(p&&p.value.trim())fullUninstallValidatePassword();},50)" style="padding:8px 16px;background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.4);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Uninstall all services</button>
-</div>
+</div></div>
 <div id="full-uninstall-modal" class="modal-overlay" style="z-index:9999;padding:24px">
 <div class="modal" style="max-width:480px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
 <div style="font-weight:600;margin-bottom:16px">Uninstall all deployed services</div>
@@ -9654,15 +12013,13 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 </div>
 <div class="help-card">
-<h2>Deployment order</h2>
-<p>(1) Caddy — set FQDN and TLS · (2) Authentik · (3) Email Relay · (4) TAK Server — upload .deb/.rpm and deploy · (5) TAK Portal · (6) Connect TAK Server to LDAP (button on TAK Server page) · (7) Node-RED, MediaMTX, CloudTAK as needed.</p>
-</div>
-<div class="help-card">
-<h2>Docs</h2>
+<div class="help-card-header" onclick="helpToggle(this)"><h2>Docs</h2><span class="help-card-toggle">&#9662;</span></div>
+<div class="help-card-body">
 <p><a href="https://github.com/takwerx/infra-TAK" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">github.com/takwerx/infra-TAK</a> (README, docs/COMMANDS.md, docs/HANDOFF-LDAP-AUTHENTIK.md)</p>
-</div>
+</div></div>
 </main>
 <script>
+function helpToggle(header){var body=header.nextElementSibling;var icon=header.querySelector('.help-card-toggle');if(!body)return;if(body.style.display==='block'){body.style.display='none';icon.style.transform='rotate(0deg)';}else{body.style.display='block';icon.style.transform='rotate(180deg)';}}
 function closeFullUninstallModal(){document.getElementById('full-uninstall-modal').classList.remove('open');}
 var fullUninstallPwValidateTimer=null;
 function fullUninstallPasswordInput(){var c=document.getElementById('full-uninstall-pw-check');if(c)c.style.display='none';clearTimeout(fullUninstallPwValidateTimer);var p=document.getElementById('full-uninstall-password');if(!p||!p.value.trim())return;fullUninstallPwValidateTimer=setTimeout(fullUninstallValidatePassword,400);}
@@ -9686,6 +12043,20 @@ async function doResetPassword(){
         var r=await fetch('/api/console/password/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:cur,new_password:neu,new_password_confirm:conf})});
         var d=await r.json();
         if(d.success){msg.style.color='var(--green)';msg.textContent=d.message||'Password updated. Reload in a few seconds.';}
+        else{msg.style.color='var(--red)';msg.textContent=d.error||'Failed';}
+    }catch(e){msg.style.color='var(--red)';msg.textContent=e.message||'Request failed';}
+}
+async function doApplySshPort(){
+    var inp=document.getElementById('ssh-port-input');
+    var msg=document.getElementById('ssh-port-msg');
+    var port=parseInt(inp&&inp.value?inp.value:0,10);
+    msg.textContent='';
+    if(!port||port<1||port>65535){msg.style.color='var(--red)';msg.textContent='Enter a port between 1 and 65535';return;}
+    msg.style.color='var(--cyan)';msg.textContent='Applying...';
+    try{
+        var r=await fetch('/api/hardening/ssh-port',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({port:port})});
+        var d=await r.json();
+        if(d.success){msg.style.color='var(--green)';msg.textContent=d.message;}
         else{msg.style.color='var(--red)';msg.textContent=d.error||'Failed';}
     }catch(e){msg.style.color='var(--red)';msg.textContent=e.message||'Request failed';}
 }
@@ -9723,8 +12094,8 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .status-dot{width:5px;height:5px;border-radius:50%;background:currentColor}
 .status-running .status-dot{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.module-action{display:inline-block;margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);opacity:0;transition:opacity 0.2s}
-.module-card:hover .module-action{opacity:1}
+.uu-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uu-spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes uu-spin{to{transform:rotate(360deg)}}
 .meta-line{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:12px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
@@ -9766,16 +12137,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value" id="ram-value">{{ metrics.ram_percent }}%</div><div class="metric-detail">{{ metrics.ram_used_gb }}GB / {{ metrics.ram_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Disk</div><div class="metric-value" id="disk-value">{{ metrics.disk_percent }}%</div><div class="metric-detail">{{ metrics.disk_used_gb }}GB / {{ metrics.disk_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
-<div class="metric-card" style="position:relative">
-<div class="metric-label" style="display:flex;align-items:center;gap:6px">Auto Updates
-{% if metrics.unattended_upgrades.enabled and metrics.unattended_upgrades.running %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 2s infinite" title="Upgrade in progress"></span>{% endif %}
+<div class="metric-card" style="position:relative" title="Automatic OS/apt package upgrades on this server. Does not control infra-TAK or module updates.">
+<div class="metric-label" style="display:flex;align-items:center;gap:6px">Unattended server upgrades
+{% if metrics.unattended_upgrades.enabled and metrics.unattended_upgrades.running %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 2s infinite" title="OS upgrade in progress"></span>{% endif %}
 </div>
+<div class="metric-detail" style="margin-top:2px;font-size:10px;color:var(--text-dim)">OS/apt — not console or modules</div>
 <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
 <label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;margin:0">
 <input type="checkbox" id="uu-toggle" {% if metrics.unattended_upgrades.enabled %}checked{% endif %} onchange="toggleUU(this)" style="opacity:0;width:0;height:0">
 <span style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}rgba(71,85,105,0.5){% endif %};border-radius:20px;transition:.3s" id="uu-slider"></span>
 <span style="position:absolute;content:'';height:16px;width:16px;left:{% if metrics.unattended_upgrades.enabled %}18px{% else %}2px{% endif %};bottom:2px;background:#fff;border-radius:50%;transition:.3s" id="uu-knob"></span>
 </label>
+<span id="uu-spinner" class="uu-spinner" style="display:none"></span>
 <span id="uu-label" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}var(--text-dim){% endif %}">{% if metrics.unattended_upgrades.enabled and metrics.unattended_upgrades.running %}Running...{% elif metrics.unattended_upgrades.enabled %}Enabled{% else %}Disabled{% endif %}</span>
 </div>
 </div>
@@ -9798,7 +12171,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="module-desc">{{ mod.description }}</div>
 {% if module_versions.get(key) %}{% set v = module_versions.get(key) %}{% if v.version or v.update_available %}<div class="meta-line module-version-line" id="module-version-{{ key }}" style="margin-bottom:4px">{% if v.version %}v{{ v.version }}{% endif %}{% if v.update_available %} <span style="color:var(--cyan);font-size:10px" title="Update available">update</span>{% endif %}</div>{% endif %}{% endif %}
 <span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
-{% if mod.installed %}<span class="module-action">Manage</span>{% else %}<span class="module-action">Deploy</span>{% endif %}
+{% if key == 'takserver' and mod.installed %}<div id="takserver-card-cert-expiry" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-top:4px"></div>{% endif %}
 </a>
 {% endfor %}
 {% endif %}
@@ -9816,14 +12189,16 @@ function updateUU(uu){
 }
 async function toggleUU(cb){
     var action=cb.checked?'enable':'disable';
-    var lb=document.getElementById('uu-label');
+    var lb=document.getElementById('uu-label'),sp=document.getElementById('uu-spinner');
+    if(sp)sp.style.display='inline-block';
     lb.textContent=cb.checked?'Enabling...':'Disabling...';lb.style.color='var(--cyan)';
     try{
         var r=await fetch('/api/unattended-upgrades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});
         var d=await r.json();
+        if(sp)sp.style.display='none';
         if(d.success){updateUU(d)}
-        else{cb.checked=!cb.checked;lb.textContent='Error: '+(d.error||'unknown');lb.style.color='var(--red)'}
-    }catch(e){cb.checked=!cb.checked;lb.textContent='Error';lb.style.color='var(--red)'}
+        else{cb.checked=!cb.checked;lb.textContent=(action==='disable'?'Disable failed — try again':('Error: '+(d.error||'unknown')));lb.style.color='var(--red)'}
+    }catch(e){if(sp)sp.style.display='none';cb.checked=!cb.checked;lb.textContent=(action==='disable'?'Disable failed — try again':'Error');lb.style.color='var(--red)'}
 }
 setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime;updateUU(d.unattended_upgrades)}catch(e){}},5000);
 function refreshModuleCards(){
@@ -9855,6 +12230,28 @@ function refreshModuleVersions(){
 }
 setInterval(refreshModuleVersions,30000);
 refreshModuleVersions();
+function loadTakCertExpiry(){
+    var el=document.getElementById('takserver-card-cert-expiry');
+    if(!el)return;
+    fetch('/api/takserver/cert-expiry').then(function(r){return r.json()}).then(function(d){
+        function fmt(days){
+            var y=Math.floor(days/365),r=days%365,m=Math.floor(r/30),dd=r%30;
+            var p=[];if(y>0)p.push(y+'y');if(m>0)p.push(m+'mo');if(dd>0||p.length===0)p.push(dd+'d');
+            return p.join(' ');
+        }
+        var parts=[];
+        var certs=[['root_ca','Root'],['intermediate_ca','Int']];
+        for(var i=0;i<certs.length;i++){
+            var key=certs[i][0],label=certs[i][1],c=d[key];
+            if(!c||c.error)continue;
+            var days=c.days_left,color='#22c55e';
+            if(days<=90)color='#ef4444';else if(days<=365)color='#eab308';
+            parts.push(label+' <span style="color:'+color+';font-weight:600">'+fmt(days)+'</span>');
+        }
+        el.innerHTML=parts.join(' &nbsp;&middot;&nbsp; ');
+    }).catch(function(){});
+}
+loadTakCertExpiry();
 var updateBody='';
 async function checkUpdate(){
     try{
@@ -9980,7 +12377,7 @@ setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.js
 </script></body></html>'''
 
 # === TAK Server Template ===
-TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAK Server</title>
+TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAK Server — infra-TAK</title>
 <style>
 ''' + BASE_CSS + '''
 .upload-area{border:2px dashed var(--border);border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all 0.3s;background:rgba(15,23,42,0.3);margin-bottom:20px}
@@ -10033,7 +12430,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .page-header h1{font-size:22px;font-weight:700}
 .page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px}
-</style></head><body>
+</style></head><body data-tak-deploying="{{ 'true' if deploying or deploy_done or deploy_error else 'false' }}" data-tak-upgrading="{{ 'true' if upgrading else 'false' }}">
 {{ sidebar_html }}
 <div class="main">
   <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server</h1><p>Team Awareness Kit Server</p></div>
@@ -10042,11 +12439,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
 <div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
-<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
-<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active{% if tak_version %} · {{ tak_version }}{% endif %}</div><div id="cert-expiry-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
+<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn" onclick="takUpdateConfig()" id="tak-update-config-btn">🔄 Update config</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
-<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running{% if tak_version %} · {{ tak_version }}{% endif %}</div></div></div>
-<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running{% if tak_version %} · {{ tak_version }}{% endif %}</div><div id="cert-expiry-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
+<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn" onclick="takUpdateConfig()" id="tak-update-config-btn">🔄 Update config</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
 <div class="status-info"><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
 {% endif %}
@@ -10086,10 +12483,10 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
+<a href="{{ takserver_base_url }}:8443" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
+<a href="{{ takserver_base_url }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI (password)</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
+<a href="{{ authentik_base_url }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :9090{% endif %}</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">8446 login: <span style="color:var(--cyan)">webadmin</span> · <button type="button" onclick="showWebadminPassword()" id="webadmin-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="webadmin-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
 </div>
@@ -10097,15 +12494,148 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div id="services-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading services...</div>
 </div>
-<div class="section-title">Certificates</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;align-items:center;justify-content:space-between">
+{% if tak.installed and 'ubuntu' in settings.get('os_type', '') %}
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:16px 24px;cursor:pointer" onclick="takToggleUpdate()" id="tak-update-header">
+<span class="section-title" style="margin-bottom:0">Update TAK Server</span>
+<span id="tak-update-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease{% if upgrading or upgrade_done or upgrade_error %};transform:rotate(180deg){% endif %}">&#9662;</span>
+</div>
+<div id="tak-update-body" style="display:{{ 'block' if upgrading or upgrade_done or upgrade_error else 'none' }};padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">To upgrade to a newer release, download the new <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver_X.X_all.deb</span> from tak.gov, upload it below, then click Update. This runs <span style="font-family:'JetBrains Mono',monospace;font-size:12px">apt install ./package.deb</span> and restarts TAK Server.</p>
+<div class="upload-area" id="upgrade-upload-area" style="padding:24px;margin-bottom:16px" onclick="document.getElementById('upgrade-file-input').click()" ondrop="handleUpgradeDrop(event)" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="event.preventDefault();this.classList.remove('dragover')">
+<input type="file" id="upgrade-file-input" style="display:none" accept=".deb" onchange="handleUpgradeFile(event)">
+<div id="upgrade-upload-text" style="color:var(--text-dim);font-size:13px">Click or drop to select upgrade package (.deb)</div>
+<div id="upgrade-filename" style="display:none;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--cyan);margin-top:8px"></div>
+</div>
+<div id="upgrade-progress-area" style="margin-bottom:16px"></div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="tak-update-btn" onclick="startTakUpdate()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Update TAK Server</button>
+<span id="tak-update-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div id="upgrade-log-wrap" style="display:{{ 'block' if upgrading or upgrade_done or upgrade_error else 'none' }};margin-top:20px">
+<div class="section-title">Update log</div>
+<div id="upgrade-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);max-height:400px;overflow-y:auto;line-height:1.7;white-space:pre-wrap;margin-top:8px">{% if upgrading %}Connecting...{% else %}{% if upgrade_done %}Done.{% elif upgrade_error %}Update failed.{% endif %}{% endif %}</div>
+</div>
+</div>
+</div>
+{% endif %}
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('cot-db')">
+<span class="section-title" style="margin-bottom:0">Database Maintenance (CoT)</span>
+<span id="cot-db-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="cot-db-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px;padding-top:16px">The CoT (Cursor on Target) database can grow large. Data retention deletes old rows, but <strong>PostgreSQL does not free disk until you run VACUUM</strong>. Run VACUUM ANALYZE periodically to reclaim space (safe while TAK Server is running).</p>
+<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">CoT database size: <span id="cot-db-size" style="font-weight:600">-</span> <button type="button" onclick="refreshCotSize()" style="margin-left:8px;padding:2px 10px;background:transparent;color:var(--cyan);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Refresh</button> <span style="font-size:10px;color:var(--text-dim);margin-left:6px">(green &lt; 25 GB · yellow 25-40 GB · red &gt; 40 GB)</span></p>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+<button type="button" id="vacuum-analyze-btn" onclick="runVacuum(false)" style="padding:10px 20px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0">Run VACUUM ANALYZE</button>
+<span style="font-size:12px;color:var(--text-secondary)">Reclaims space from deleted rows and updates statistics. Safe while TAK Server is running.</span>
+</div>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+<button type="button" id="vacuum-full-btn" onclick="runVacuum(true)" style="padding:10px 20px;background:rgba(234,179,8,0.2);color:var(--yellow);border:1px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0" title="Caution: run when TAK Server is not running">Run VACUUM FULL</button>
+<span style="font-size:12px;color:var(--text-secondary)">Rewrites tables to reclaim more space; locks tables. Run when <strong>TAK Server is not running</strong>. <span style="color:var(--yellow)">(yellow = caution)</span></span>
+</div>
+</div>
+<div id="vacuum-output" style="display:none;margin-top:14px;padding:12px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
+<div id="vacuum-msg" style="margin-top:8px;font-size:13px"></div>
+</div>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('certs')">
+<span class="section-title" style="margin-bottom:0">Certificates</span>
+<span id="certs-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="certs-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-top:16px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;&middot;&nbsp; /opt/tak/certs/files/</div>
 <a href="/certs" class="cert-btn cert-btn-secondary" style="text-decoration:none">📁 Browse Certificates</a>
 </div>
+<div id="cert-expiry-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Loading certificate expiry...</div>
 </div>
-<div class="section-title">Server Log <span style="font-size:11px;color:var(--text-dim);font-weight:400">takserver-messaging.log</span></div>
-<div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('rotate-ca')">
+<span class="section-title" style="margin-bottom:0">Rotate Intermediate CA</span>
+<span id="rotate-ca-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="rotate-ca-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">Create a new Intermediate CA signed by your Root CA. The old CA stays in the truststore so existing clients remain connected during transition. Once all clients have re-enrolled, revoke the old CA.</p>
+<div id="rotate-ca-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:16px">Loading CA info...</div>
+<div id="rotate-ca-controls" style="display:none">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+<div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">New Intermediate CA Name</label><input type="text" id="rotate-ca-name" placeholder="e.g. INTERMEDIATE-CA-02" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
+<div></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+<button type="button" id="rotate-ca-btn" onclick="rotateIntCA()" style="padding:12px 24px;background:linear-gradient(135deg,#b45309,#92400e);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Rotate Intermediate CA</button>
+<span id="rotate-ca-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+</div>
+<div id="rotate-ca-log" style="display:none;background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;margin-bottom:16px"></div>
+<div id="revoke-ca-section" style="display:none;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.2);border-radius:10px;padding:16px">
+<div style="font-size:13px;font-weight:600;color:var(--red);margin-bottom:8px">Revoke Old CA</div>
+<p style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">Remove the old CA from the truststore. Clients with certificates signed by the old CA will be disconnected and must re-enroll.</p>
+<div id="revoke-ca-list" style="margin-bottom:12px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)"></div>
+<div id="revoke-ca-msg" style="font-size:12px;margin-top:8px"></div>
+</div>
+</div>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('rotate-root')">
+<span class="section-title" style="margin-bottom:0">Rotate Root CA</span>
+<span id="rotate-root-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="rotate-root-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">Full PKI rebuild. Creates a new Root CA, new Intermediate CA, new server cert, and regenerates all client certificates. <strong style="color:var(--red)">All existing connections will be disconnected.</strong> Users must re-enroll via TAK Portal QR code. Schedule a maintenance window before proceeding.</p>
+<div id="rotate-root-info" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:16px">Loading Root CA info...</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+<div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">New Root CA Name</label><input type="text" id="rotate-root-name" placeholder="e.g. ROOT-CA-02" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
+<div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">New Intermediate CA Name</label><input type="text" id="rotate-root-int-name" placeholder="e.g. INT-CA-01" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="rotate-root-btn" onclick="rotateRootCA()" style="padding:12px 24px;background:linear-gradient(135deg,#991b1b,#7f1d1d);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Rotate Root CA</button>
+<span id="rotate-root-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div id="rotate-root-log" style="display:none;margin-top:16px;background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap"></div>
+</div>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('client-cert')">
+<span class="section-title" style="margin-bottom:0">Create Client Certificate</span>
+<span id="client-cert-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="client-cert-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">Generate a signed client certificate and assign it to groups with read/write permissions. The .p12 file can be imported into ATAK, iTAK, or WinTAK.</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+<div class="form-field"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">Client Name</label><input type="text" id="cc-name" placeholder="e.g. operator1" maxlength="64" style="width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:13px;box-sizing:border-box"></div>
+<div></div>
+</div>
+<div style="margin-bottom:16px">
+<label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Groups <span style="font-weight:400;color:var(--text-dim)">(select groups and permissions)</span></label>
+<div id="cc-groups-list" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)"><button type="button" id="cc-load-groups-btn" onclick="loadGroups()" style="padding:8px 16px;background:rgba(59,130,246,0.1);color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">Load Groups from TAK Server</button></div>
+</div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+<button type="button" id="cc-create-btn" onclick="createClientCert()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Create Certificate</button>
+<span id="cc-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div id="cc-result" style="display:none;margin-top:16px;background:rgba(6,182,212,0.06);border:1px solid var(--border);border-radius:10px;padding:16px">
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+<div><span style="color:var(--green);font-weight:600" id="cc-result-name"></span><span style="color:var(--text-dim);font-size:12px;margin-left:8px">Password: atakatak</span></div>
+<a id="cc-download-link" href="#" class="cert-btn cert-btn-secondary" style="text-decoration:none;font-size:12px;padding:8px 16px">⬇ Download .p12</a>
+</div>
+</div>
+</div>
+</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;cursor:pointer" onclick="takToggleSection('server-log')">
+<span class="section-title" style="margin-bottom:0">Server Log <span style="font-size:11px;color:var(--text-dim);font-weight:400">takserver-messaging.log</span></span>
+<span id="server-log-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+</div>
+<div id="server-log-body" style="display:none;padding:0 24px 24px 24px;border-top:1px solid var(--border)">
+<div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;margin-top:16px">Loading log...</div>
+</div>
+</div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
 <div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
@@ -10155,383 +12685,7 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 </div>
 </div>
 <footer class="footer"></footer>
-<script>
-async function resyncLdap(){
-    if(!confirm('Resync will restart the Authentik worker and re-apply the LDAP blueprint. The TAK Portal user list may take a short moment to repopulate.\\n\\nContinue?')){return;}
-    var btn=document.getElementById('resync-ldap-btn');
-    var msg=document.getElementById('resync-ldap-msg');
-    if(btn){btn.disabled=true;btn.style.opacity='0.7';btn.textContent='Resyncing...';}
-    if(msg){msg.textContent='';msg.style.color='var(--text-dim)';}
-    try{
-        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){
-            if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';}
-            var notice=document.getElementById('resync-notice');
-            if(notice){notice.style.display='block';window.setTimeout(function(){notice.style.display='none';},10000);}
-            if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}
-        }
-        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';btn.textContent='Resync LDAP to TAK Server';}}
-}
-async function showWebadminPassword(){
-    var btn=document.getElementById('webadmin-pw-btn');
-    var display=document.getElementById('webadmin-pw-display');
-    if(!btn||!display)return;
-    if(display.style.display==='inline'){display.style.display='none';display.textContent='';btn.textContent='🔑 Show Password';return;}
-    try{
-        var r=await fetch('/api/takserver/webadmin-password');
-        var d=await r.json();
-        if(d.password){display.textContent=d.password;display.style.display='inline';btn.textContent='🔑 Hide';}
-        else{display.textContent='Not set (set at deploy or sync webadmin)';display.style.display='inline';}
-    }catch(e){display.textContent='Error';display.style.display='inline';}
-}
-async function syncWebadmin(){
-    var btn=document.getElementById('sync-webadmin-btn');
-    var msg=document.getElementById('sync-webadmin-msg');
-    if(btn){btn.disabled=true;btn.style.opacity='0.7';}
-    if(msg){msg.textContent='Syncing...';msg.style.color='var(--text-dim)';}
-    try{
-        var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
-        else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
-}
-async function loadServices(){
-    var el=document.getElementById('services-list');
-    if(!el)return;
-    try{
-        var r=await fetch('/api/takserver/services');
-        var d=await r.json();
-        if(!d.services||d.services.length===0){el.textContent='No services detected';return}
-        var h='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
-        d.services.forEach(function(s){
-            var color=s.status==='running'?'var(--green)':'var(--red)';
-            var dot=s.status==='running'?'●':'○';
-            h+='<div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:14px;display:flex;align-items:center;gap:12px">';
-            h+='<span style="font-size:20px">'+s.icon+'</span>';
-            h+='<div style="flex:1"><div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text-secondary);font-weight:600">'+s.name+'</span>';
-            h+='<span style="color:'+color+';font-size:11px">'+dot+' '+s.status+'</span></div>';
-            if(s.mem_mb||s.cpu){h+='<div style="color:var(--text-dim);font-size:11px;margin-top:4px">';
-            if(s.mem_mb)h+=s.mem_mb;
-            if(s.mem_mb&&s.cpu)h+=' · ';
-            if(s.cpu)h+='CPU '+s.cpu;
-            if(s.pid)h+=' · PID '+s.pid;
-            h+='</div>'}
-            h+='</div></div>';
-        });
-        h+='</div>';
-        el.innerHTML=h;
-    }catch(e){el.textContent='Failed to load services'}
-}
-if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
-
-var serverLogOffset=0;
-async function pollServerLog(){
-    var el=document.getElementById('server-log');
-    if(!el)return;
-    try{
-        var r=await fetch('/api/takserver/log?offset='+serverLogOffset+'&lines=80');
-        var d=await r.json();
-        if(d.entries&&d.entries.length>0){
-            if(serverLogOffset===0)el.textContent='';
-            d.entries.forEach(function(e){
-                var l=document.createElement('div');
-                if(e.indexOf('ERROR')>=0||e.indexOf('SEVERE')>=0)l.style.color='var(--red)';
-                else if(e.indexOf('WARN')>=0)l.style.color='var(--yellow)';
-                else if(e.indexOf('INFO')>=0)l.style.color='var(--text-secondary)';
-                l.textContent=e;
-                el.appendChild(l);
-            });
-            el.scrollTop=el.scrollHeight;
-        }else if(serverLogOffset===0){
-            el.textContent='No log entries yet. TAK Server may still be starting...';
-        }
-        serverLogOffset=d.offset||serverLogOffset;
-    }catch(e){}
-}
-if(document.getElementById('server-log')){pollServerLog();setInterval(pollServerLog,5000)}
-
-async function takControl(action){
-    const btns=document.querySelectorAll('.control-btn');
-    btns.forEach(b=>{b.disabled=true;b.style.opacity='0.5'});
-    try{
-        await fetch('/api/takserver/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
-        if(action==='start'||action==='restart'){
-            sessionStorage.setItem('tak_just_started','1');
-        }
-        window.location.reload();
-    }
-    catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
-}
-
-async function connectLdap(){
-    var btn=document.getElementById('connect-ldap-btn');
-    var msg=document.getElementById('connect-ldap-msg');
-    if(btn){btn.disabled=true;btn.textContent='Connecting...';btn.style.opacity='0.7';}
-    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
-    try{
-        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} alert(d.message||'LDAP connected. TAK Server restarted.');setTimeout(function(){window.location.reload();},500);}
-        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
-}
-
-(function(){
-    if(sessionStorage.getItem('tak_just_started')==='1'){
-        sessionStorage.removeItem('tak_just_started');
-        var notice=document.createElement('div');
-        notice.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:20px;text-align:center;font-family:JetBrains Mono,monospace;font-size:13px;color:#06b6d4;transition:opacity 1s';
-        notice.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before WebGUI login will work.';
-        var main=document.querySelector('main');
-        var banner=document.getElementById('status-banner');
-        if(banner&&banner.nextSibling)main.insertBefore(notice,banner.nextSibling);
-        else if(main)main.appendChild(notice);
-        setTimeout(function(){notice.style.opacity='0';setTimeout(function(){notice.remove()},1000)},30000);
-    }
-})();
-
-(function(){
-    if(document.getElementById('upload-area')){
-        fetch('/api/upload/takserver/existing').then(r=>r.json()).then(d=>{
-            if(d.package||d.gpg_key||d.policy){
-                if(d.package)uploadedFiles.package=d.package;
-                if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;
-                if(d.policy)uploadedFiles.policy=d.policy;
-                var pa=document.getElementById('progress-area');
-                if(d.package){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.package.filename+' ('+d.package.size_mb+' MB)</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
-                if(d.gpg_key){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.gpg_key.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
-                if(d.policy){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.policy.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
-                var a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';var ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
-                updateUploadSummary();
-            }
-        }).catch(function(){});
-    }
-})();
-
-async function takUninstall(){
-    document.getElementById('tak-uninstall-modal').classList.add('open');
-}
-async function doUninstallTak(){
-    var pw=document.getElementById('tak-uninstall-password').value;
-    if(!pw){document.getElementById('tak-uninstall-msg').textContent='Please enter your password';return;}
-    var msgEl=document.getElementById('tak-uninstall-msg');
-    var progressEl=document.getElementById('tak-uninstall-progress');
-    var cancelBtn=document.getElementById('tak-uninstall-cancel');
-    var confirmBtn=document.getElementById('tak-uninstall-confirm');
-    msgEl.textContent='';
-    progressEl.style.display='flex';
-    progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Uninstalling…</span>';
-    confirmBtn.disabled=true;
-    cancelBtn.disabled=true;
-    try{
-        var r=await fetch('/api/takserver/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
-        var d=await r.json();
-        if(d.success){
-            progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Done. Reloading…</span>';
-            setTimeout(function(){window.location.href='/takserver';},800);
-        }else{
-            msgEl.textContent=d.error||'Uninstall failed';
-            progressEl.style.display='none';
-            progressEl.innerHTML='';
-            confirmBtn.disabled=false;
-            cancelBtn.disabled=false;
-        }
-    }catch(e){
-        msgEl.textContent='Request failed: '+e.message;
-        progressEl.style.display='none';
-        progressEl.innerHTML='';
-        confirmBtn.disabled=false;
-        cancelBtn.disabled=false;
-    }
-}
-
-async function cancelDeploy(){
-    if(!confirm('Cancel the deployment? You can redeploy after.'))return;
-    try{const r=await fetch('/api/deploy/cancel',{method:'POST',headers:{'Content-Type':'application/json'}});const d=await r.json();if(d.success){window.location.href='/takserver'}else{alert('Error: '+(d.error||'Unknown'))}}
-    catch(e){alert('Failed: '+e.message)}
-}
-
-let uploadedFiles={package:null,gpg_key:null,policy:null};
-let uploadsInProgress=0;
-
-function handleDragOver(e){e.preventDefault();document.getElementById('upload-area').classList.add('dragover')}
-function handleDragLeave(e){document.getElementById('upload-area').classList.remove('dragover')}
-function handleDrop(e){e.preventDefault();document.getElementById('upload-area').classList.remove('dragover');queueFiles(e.dataTransfer.files)}
-function handleFileSelect(e){queueFiles(e.target.files);e.target.value=''}
-function handleAddMore(e){queueFiles(e.target.files);e.target.value=''}
-
-function formatSize(b){if(b<1024)return b+' B';if(b<1024*1024)return(b/1024).toFixed(1)+' KB';if(b<1024*1024*1024)return(b/(1024*1024)).toFixed(1)+' MB';return(b/(1024*1024*1024)).toFixed(2)+' GB'}
-
-async function removeFile(fn,elId){
-    try{await fetch('/api/upload/takserver/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:fn})})}catch(e){}
-    var el=document.getElementById(elId);if(el)el.remove();
-    if(uploadedFiles.package&&uploadedFiles.package.filename===fn)uploadedFiles.package=null;
-    if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===fn)uploadedFiles.gpg_key=null;
-    if(uploadedFiles.policy&&uploadedFiles.policy.filename===fn)uploadedFiles.policy=null;
-    updateUploadSummary();
-}
-
-function queueFiles(fl){
-    const a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';const ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
-    for(const f of fl){
-        var isDupe=false;
-        if(uploadedFiles.package&&uploadedFiles.package.filename===f.name)isDupe=true;
-        if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===f.name)isDupe=true;
-        if(uploadedFiles.policy&&uploadedFiles.policy.filename===f.name)isDupe=true;
-        if(isDupe){var pa=document.getElementById('progress-area');pa.insertAdjacentHTML('beforeend','<div class="progress-item" style="opacity:0.6"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--yellow)">⚠ '+f.name+' already uploaded — skipped</span></div>');continue}
-        uploadFile(f);
-    }
-}
-
-function uploadFile(file){
-    uploadsInProgress++;
-    const pa=document.getElementById('progress-area');
-    const id='u-'+Date.now()+'-'+Math.random().toString(36).substr(2,5);
-    var row=document.createElement('div');row.className='progress-item';row.id=id;
-    var top=document.createElement('div');top.style.cssText='display:flex;justify-content:space-between;align-items:center';
-    var lbl=document.createElement('span');lbl.style.cssText='font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)';lbl.textContent=file.name+' ('+formatSize(file.size)+')';
-    var right=document.createElement('span');right.style.cssText='display:flex;align-items:center;gap:8px';
-    var pct=document.createElement('span');pct.id=id+'-pct';pct.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan)';pct.textContent='0%';
-    var cancelBtn=document.createElement('span');cancelBtn.id=id+'-cancel';cancelBtn.textContent='\u2717';cancelBtn.style.cssText='color:var(--red);cursor:pointer;font-size:14px';cancelBtn.title='Cancel upload';
-    right.appendChild(pct);right.appendChild(cancelBtn);top.appendChild(lbl);top.appendChild(right);
-    var barOuter=document.createElement('div');barOuter.className='progress-bar-outer';
-    var barInner=document.createElement('div');barInner.className='progress-bar-inner';barInner.id=id+'-bar';barInner.style.width='0%';
-    barOuter.appendChild(barInner);row.appendChild(top);row.appendChild(barOuter);pa.appendChild(row);
-    const fd=new FormData();fd.append('files',file);
-    const xhr=new XMLHttpRequest();
-    window['xhr_'+id]=xhr;
-    cancelBtn.onclick=function(){cancelUpload(id)};
-    xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round((e.loaded/e.total)*100);document.getElementById(id+'-bar').style.width=p+'%';document.getElementById(id+'-pct').textContent=p+'%'}};
-    xhr.onload=()=>{
-        delete window['xhr_'+id];
-        const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
-        var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn);updateUploadSummary()}
-        else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
-        uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
-    };
-    xhr.onerror=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
-    xhr.onabort=()=>{delete window['xhr_'+id];uploadsInProgress--};
-    xhr.ontimeout=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='Timeout';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
-    xhr.timeout=1800000;
-    xhr.open('POST','/api/upload/takserver');xhr.send(fd);
-}
-
-function cancelUpload(id){
-    var xhr=window['xhr_'+id];
-    if(xhr){xhr.abort();delete window['xhr_'+id]}
-    var el=document.getElementById(id);if(el)el.remove();
-}
-
-function updateUploadSummary(){
-    const r=document.getElementById('upload-results');const fl=document.getElementById('upload-files-list');r.style.display='block';
-    let h='';
-    if(uploadedFiles.package)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.package.filename+'</span> <span style="color:var(--text-dim)">('+uploadedFiles.package.size_mb+' MB)</span></div>';
-    if(uploadedFiles.gpg_key)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.gpg_key.filename+'</span> <span style="color:var(--text-dim)">(GPG key)</span></div>';
-    if(uploadedFiles.policy)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.policy.filename+'</span> <span style="color:var(--text-dim)">(policy)</span></div>';
-    if(uploadedFiles.gpg_key&&uploadedFiles.policy)h+='<div style="margin-top:12px;color:var(--green)">🔐 GPG verification enabled</div>';
-    else if(!uploadedFiles.gpg_key&&!uploadedFiles.policy)h+='<div style="margin-top:12px;color:var(--text-dim)">ℹ️ No GPG key/policy — verification will be skipped</div>';
-    else h+='<div style="margin-top:12px;color:var(--yellow)">⚠️ Need both GPG key + policy for verification</div>';
-    fl.innerHTML=h;
-    if(uploadedFiles.package)document.getElementById('deploy-btn-area').style.display='block';
-}
-
-function showDeployConfig(){
-    const ua=document.getElementById('upload-area');const pa=document.getElementById('progress-area');const ur=document.getElementById('upload-results');
-    if(ua)ua.style.display='none';if(pa)pa.style.display='none';if(ur)ur.style.display='none';
-    const main=document.querySelector('.main');
-    main.querySelectorAll('.section-title').forEach(t=>{if(t.textContent.includes('Deploy'))t.remove()});
-    const cd=document.createElement('div');
-    cd.innerHTML=`
-<div class="section-title">Configure Deployment</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:28px;margin-bottom:20px">
-<div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim);margin-bottom:20px;text-transform:uppercase;letter-spacing:1px;font-weight:600">Certificate Information <span style="color:var(--red);font-size:10px;margin-left:8px">ALL FIELDS REQUIRED</span></div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<div class="form-field"><label>Country (2 letters)</label><input type="text" id="cert_country" placeholder="US" maxlength="2" style="text-transform:uppercase"></div>
-<div class="form-field"><label>State/Province</label><input type="text" id="cert_state" placeholder="CA" style="text-transform:uppercase"></div>
-<div class="form-field"><label>City</label><input type="text" id="cert_city" placeholder="SACRAMENTO" style="text-transform:uppercase"></div>
-<div class="form-field"><label>Organization</label><input type="text" id="cert_org" placeholder="MYAGENCY" style="text-transform:uppercase"></div>
-<div class="form-field"><label>Organizational Unit</label><input type="text" id="cert_ou" placeholder="IT" style="text-transform:uppercase"></div>
-</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim);margin:24px 0 20px;text-transform:uppercase;letter-spacing:1px;font-weight:600">Certificate Authority Names</div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<div class="form-field"><label>Root CA Name</label><input type="text" id="root_ca_name" placeholder="ROOT-CA-01" style="text-transform:uppercase"></div>
-<div class="form-field"><label>Intermediate CA Name</label><input type="text" id="intermediate_ca_name" placeholder="INTERMEDIATE-CA-01" style="text-transform:uppercase"></div>
-</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-dim);margin:24px 0 20px;text-transform:uppercase;letter-spacing:1px;font-weight:600">WebTAK Options (Port 8446)</div>
-<div style="display:flex;flex-direction:column;gap:14px">
-<label style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);cursor:pointer;font-size:14px"><input type="checkbox" id="enable_admin_ui" onchange="toggleWebadminPassword()" style="width:18px;height:18px;accent-color:var(--accent)"> Enable Admin UI <span style="color:var(--text-dim);font-size:12px">— Browser admin (no cert needed)</span></label>
-<label style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);cursor:pointer;font-size:14px"><input type="checkbox" id="enable_webtak" style="width:18px;height:18px;accent-color:var(--accent)"> Enable WebTAK <span style="color:var(--text-dim);font-size:12px">— Browser-based TAK client</span></label>
-<label style="display:flex;align-items:center;gap:10px;color:var(--text-secondary);cursor:pointer;font-size:14px"><input type="checkbox" id="enable_nonadmin_ui" style="width:18px;height:18px;accent-color:var(--accent)"> Enable Non-Admin UI <span style="color:var(--text-dim);font-size:12px">— Non-admin management</span></label>
-</div>
-<div id="webadmin-password-area" style="display:none;margin-top:20px;background:rgba(59,130,246,0.05);border:1px solid var(--border);border-radius:10px;padding:18px">
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:12px">Set a password for <span style="color:var(--cyan)">webadmin</span> user on port 8446</div>
-<div class="form-field" style="margin-bottom:12px"><label>WebAdmin Password</label><div style="position:relative"><input type="password" id="webadmin_password" placeholder="Min 15 chars: upper, lower, number, special"><button type="button" onclick="toggleShowPassword()" id="pw-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:13px;font-family:JetBrains Mono,monospace">show</button></div></div>
-<div class="form-field" style="margin-bottom:12px"><label>Confirm Password</label><input type="password" id="webadmin_password_confirm" placeholder="Re-enter password"></div>
-<div id="password-match" style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-bottom:8px"></div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">15+ characters, 1 uppercase, 1 lowercase, 1 number, 1 special character</div>
-<div id="password-validation" style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-top:8px"></div>
-</div>
-<div style="margin-top:28px;text-align:center"><button onclick="startDeploy()" id="deploy-btn" style="padding:14px 48px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">🚀 Deploy TAK Server</button></div>
-</div>
-<div id="deploy-log-area" style="display:none"><div class="section-title">Deployment Log</div><div id="deploy-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);max-height:500px;overflow-y:auto;line-height:1.7;white-space:pre-wrap"></div></div>
-<div id="cert-download-area" style="display:none;margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-secondary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>`;
-    main.appendChild(cd);
-    const pi=document.getElementById('webadmin_password');if(pi){pi.addEventListener('input',validatePassword);pi.addEventListener('input',checkPasswordMatch)}const pc=document.getElementById('webadmin_password_confirm');if(pc)pc.addEventListener('input',checkPasswordMatch);
-}
-
-function toggleWebadminPassword(){const a=document.getElementById('webadmin-password-area');if(a)a.style.display=document.getElementById('enable_admin_ui').checked?'block':'none'}
-
-function toggleShowPassword(){const p=document.getElementById('webadmin_password');const c=document.getElementById('webadmin_password_confirm');const b=document.getElementById('pw-toggle');if(p.type==='password'){p.type='text';c.type='text';b.textContent='hide'}else{p.type='password';c.type='password';b.textContent='show'}}
-
-function checkPasswordMatch(){const p=document.getElementById('webadmin_password').value;const c=document.getElementById('webadmin_password_confirm').value;const el=document.getElementById('password-match');if(!c){el.innerHTML='';return}if(p===c)el.innerHTML='<span style="color:var(--green)">\u2713 Passwords match</span>';else el.innerHTML='<span style="color:var(--red)">\u2717 Passwords do not match</span>'}
-
-function validatePassword(){
-    const p=document.getElementById('webadmin_password').value;const el=document.getElementById('password-validation');
-    if(!p){el.innerHTML='';return false}
-    const c=[{t:p.length>=15,l:'15+ chars'},{t:/[A-Z]/.test(p),l:'1 upper'},{t:/[a-z]/.test(p),l:'1 lower'},{t:/[0-9]/.test(p),l:'1 number'},{t:/[-_!@#$%^&*(){}+=~|:;<>,./\\?]/.test(p),l:'1 special'}];
-    var h='';c.forEach(function(x){h+='<span style="color:'+(x.t?'var(--green)':'var(--red)')+';">'+(x.t?'\u2713':'\u2717')+' '+x.l+'</span> &nbsp; '});
-    el.innerHTML=h;
-    return c.every(function(x){return x.t});
-}
-
-async function startDeploy(){
-    const rf=[{id:'cert_country',l:'Country'},{id:'cert_state',l:'State'},{id:'cert_city',l:'City'},{id:'cert_org',l:'Organization'},{id:'cert_ou',l:'Org Unit'},{id:'root_ca_name',l:'Root CA'},{id:'intermediate_ca_name',l:'Intermediate CA'}];
-    const empty=rf.filter(f=>!document.getElementById(f.id).value.trim());
-    if(empty.length>0){alert('Please fill in: '+empty.map(f=>f.l).join(', '));empty.forEach(f=>{const el=document.getElementById(f.id);el.style.borderColor='var(--red)';el.addEventListener('input',()=>el.style.borderColor='',{once:true})});return}
-    const aui=document.getElementById('enable_admin_ui').checked;
-    if(aui){const p=document.getElementById('webadmin_password').value;const pc=document.getElementById('webadmin_password_confirm').value;if(!p){alert('Please set a webadmin password.');return}if(p!==pc){alert('Passwords do not match.');return}if(!validatePassword()){alert('Password does not meet requirements.');return}}
-    const btn=document.getElementById('deploy-btn');btn.disabled=true;btn.textContent='Deploying...';btn.style.opacity='0.6';btn.style.cursor='not-allowed';
-    document.querySelectorAll('.form-field input,input[type="checkbox"]').forEach(el=>el.disabled=true);
-    const cfg={cert_country:document.getElementById('cert_country').value.toUpperCase(),cert_state:document.getElementById('cert_state').value.toUpperCase(),cert_city:document.getElementById('cert_city').value.toUpperCase(),cert_org:document.getElementById('cert_org').value.toUpperCase(),cert_ou:document.getElementById('cert_ou').value.toUpperCase(),root_ca_name:document.getElementById('root_ca_name').value.toUpperCase(),intermediate_ca_name:document.getElementById('intermediate_ca_name').value.toUpperCase(),enable_admin_ui:document.getElementById('enable_admin_ui').checked,enable_webtak:document.getElementById('enable_webtak').checked,enable_nonadmin_ui:document.getElementById('enable_nonadmin_ui').checked,webadmin_password:aui?document.getElementById('webadmin_password').value:''};
-    document.getElementById('deploy-log-area').style.display='block';
-    try{const r=await fetch('/api/deploy/takserver',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});const d=await r.json();if(d.success)pollDeployLog();else{document.getElementById('deploy-log').textContent='✗ '+d.error;btn.disabled=false;btn.textContent='🚀 Deploy TAK Server';btn.style.opacity='1';btn.style.cursor='pointer'}}
-    catch(e){document.getElementById('deploy-log').textContent='✗ '+e.message}
-}
-
-let logIndex=0,pollFails=0,logCleared=false;
-function pollDeployLog(){
-    const el=document.getElementById('deploy-log');
-    const poll=async()=>{
-        try{const r=await fetch('/api/deploy/log?after='+logIndex);const d=await r.json();pollFails=0;
-            if(!logCleared&&d.entries.length>0){el.textContent='';logCleared=true}
-            if(d.entries.length>0){d.entries.forEach(e=>{var isTimer=e.trim().charAt(0)=='\u23f3'&&e.indexOf(':')>0;if(isTimer){var prev=el.querySelector('[data-timer]');if(prev){prev.textContent=e;logIndex=d.total;return}};if(!isTimer){var old=el.querySelector('[data-timer]');if(old)old.removeAttribute('data-timer')};var l=document.createElement('div');if(isTimer)l.setAttribute('data-timer','1');if(e.indexOf('\u2713')>=0)l.style.color='var(--green)';else if(e.indexOf('\u2717')>=0||e.indexOf('FATAL')>=0)l.style.color='var(--red)';else if(e.indexOf('\u2501\u2501\u2501')>=0)l.style.color='var(--cyan)';else if(e.indexOf('\u26a0')>=0)l.style.color='var(--yellow)';else if(e.indexOf('===')>=0||e.indexOf('WebGUI')>=0||e.indexOf('Username')>=0)l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
-            if(d.running)setTimeout(poll,1000);
-            else if(d.complete){const b=document.getElementById('deploy-btn');if(b){b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1'};const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';var wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';var wt=document.createElement('div');wt.style.cssText='font-family:JetBrains Mono,monospace;font-size:14px;color:#06b6d4;margin-bottom:12px';wt.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.';var wb=document.createElement('button');wb.textContent='Refresh Page';wb.style.cssText='padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer';wb.onclick=function(){window.location.href='/takserver'};wa.appendChild(wt);wa.appendChild(wb);document.getElementById('deploy-log-area').after(wa)}
-            else if(d.error){const b=document.getElementById('deploy-btn');if(b){b.textContent='\u2717 Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}}
-        }catch(e){pollFails++;if(pollFails<30)setTimeout(poll,2000)}
-    };poll();
-}
-{% if deploying or deploy_done or deploy_error %}
-pollDeployLog();
-{% endif %}
-</script></body></html>'''
+<script src="/takserver.js"></script></body></html>'''
 
 # === Main Entry Point ===
 if __name__ == '__main__':

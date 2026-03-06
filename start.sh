@@ -302,6 +302,15 @@ sleep 1
 # Start the console
 systemctl start takwerx-console
 
+# Ensure backdoor port 5001 is allowed (so when UFW is enabled later, e.g. by TAK Server deploy, we don't lock ourselves out)
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow 5001/tcp >/dev/null 2>&1 || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port=5001/tcp >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+
 # Get access URL
 SERVER_IP=$(hostname -I | awk '{print $1}')
 

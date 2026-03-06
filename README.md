@@ -1,14 +1,16 @@
 # infra-TAK
 
-Team Awarness Kit Infrastructure Management Platform.
+Tea Awarness Kit Infrastructure Management Platform.
 
 One clone. One password. One URL. Manage everything from your browser.
+
+**Goal: universal installer.** Currently supported platform: **Ubuntu 22.04 LTS**.
 
 ## What Is This?
 
 A unified web console for deploying and managing TAK ecosystem infrastructure:
 
-- **TAK Server** — Upload your .deb/.rpm, configure, deploy, manage CoreConfig — all from the browser
+- **TAK Server** — Upload your .deb, configure, deploy, manage CoreConfig — all from the browser
 - **Authentik** — Identity provider with automated LDAP configuration for TAK Server auth
 - **TAK Portal** — User and certificate management portal with auto-configured Authentik + TAK Server integration
 - **Caddy SSL** — Let's Encrypt certificates and reverse proxy management
@@ -16,23 +18,25 @@ A unified web console for deploying and managing TAK ecosystem infrastructure:
 - **MediaMTX** — Video streaming server for real-time feeds
 - **Node-RED** — Flow-based automation engine, protected behind Authentik forward auth
 - **Email Relay** — Outbound email for notifications and alerts
-- **Guard Dog** — Network monitoring and intrusion detection *(in development)*
+- **Guard Dog** — TAK Server health monitoring and auto-recovery (port 8089, processes, OOM, PostgreSQL, CoT DB size, disk, certificates; optional monitors for Authentik, Node-RED, MediaMTX, CloudTAK)
 
-*All modules except Guard Dog are production-ready.*
+*All modules are production-ready.*
 
 No more SSH. No more editing XML by hand. No more running scripts and hoping.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/takwerx/infra-TAK.git
+git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git
 cd infra-TAK
 chmod +x start.sh
 sudo ./start.sh
 ```
 
+For the stable branch use `git clone --depth 1 https://github.com/takwerx/infra-TAK.git` (no `-b dev`).
+
 The script will:
-1. Detect your OS (Ubuntu 22.04, Rocky 9)
+1. Detect your OS (**Ubuntu 22.04 only** for now; goal is a universal installer)
 2. Install Python dependencies
 3. Ask you to set an admin password
 4. Start the web console
@@ -83,7 +87,7 @@ Deploy services in this order — each step auto-configures the next:
 ## What Gets Automated
 
 **Authentik Deploy (~7 minutes):**
-Bootstrap credentials generated, LDAP blueprint installed, Docker Compose patched with standalone LDAP container, API polled for outpost token, CoreConfig.xml patched with LDAP auth block, TAK Server restarted.
+Console ensures 4GB swap and starts PostgreSQL first, then server/worker after the DB is ready (reduces OOM and 502s on small VPS). Bootstrap credentials generated, LDAP blueprint installed, Docker Compose patched with standalone LDAP container, API polled for outpost token, CoreConfig.xml patched with LDAP auth block, TAK Server restarted.
 
 **TAK Portal Deploy (~4 minutes):**
 Repository cloned, container built, TAK Server certs (admin.p12, tak-ca.pem) copied into container, settings.json auto-configured with Authentik URL/token and TAK Server connection, forward auth configured in Caddy, 2-minute sync wait for Authentik outpost.
@@ -92,18 +96,20 @@ After deployment, create users in TAK Portal — they flow through Authentik →
 
 ## Requirements
 
-- Ubuntu 22.04 LTS or Rocky Linux 9 (fresh installation recommended)
-- Root access
-- 8GB+ RAM recommended for TAK Server
-- Internet connection for initial setup
-- TAK Server .deb or .rpm package from [tak.gov](https://tak.gov)
+- **Ubuntu 22.04 LTS** (currently the only supported platform; goal is a universal installer). Fresh installation recommended.
+- **Root access**
+- **RAM:** 8 GB+ recommended for TAK Server; more if you run the full stack (Authentik, TAK Portal, Node-RED, MediaMTX, CloudTAK, Guard Dog).
+- **Disk:** At max deployment (all modules) you can sit around **26 GB** used. Plan for growth: CoT data, logs, and retention. **50 GB+** disk is recommended so you have headroom; TAK Server’s own minimum is 40 GB per the official configuration guide. Apply Docker log limits (Guard Dog → Apply Docker log limits) to avoid containers filling the disk.
+- **CPU:** Enough cores for all processes (TAK Server, PostgreSQL, Authentik, Caddy, Node-RED, etc.). TAK Server’s minimum is 4 cores; more is better for the full stack.
+- **Internet** connection for initial setup.
+- **TAK Server .deb** package from [tak.gov](https://tak.gov).
 
 ## Architecture
 
 ```
 start.sh                    ← One CLI command to launch everything
 ├── app.py                  ← Flask web application (HTTPS on :5001)
-├── uploads/                ← Uploaded .deb/.rpm packages
+├── uploads/                ← Uploaded .deb packages
 └── .config/                ← Auth + settings (gitignored)
 ```
 
@@ -142,11 +148,38 @@ start.sh                    ← One CLI command to launch everything
 
 ## Design notes
 
+- **[References](docs/REFERENCES.md)** — Canonical links (e.g. [TAK Server API](https://docs.tak.gov/api/takserver)) for development and integration.
+- **[Guard Dog](docs/GUARDDOG.md)** — How Guard Dog works: monitors, 15‑minute boot delay and cooldowns, TAK Server soft start (after PostgreSQL and network), 4GB swap on deploy for memory stability, and restart-loop protection. Apply Docker container log limits from the Guard Dog page without redeploying a module.
 - **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal’s open request-access page and Email Relay.
 
 ---
 
 ## Changelog
+
+### v0.1.9-alpha — 2026-03-04
+
+**Guard Dog**
+- Guard Dog appears in the sidebar **directly under Console** when installed (high-priority placement).
+- **Apply Docker log limits** button on the Guard Dog page — set 50 MB × 3 files per container without redeploying Authentik, Node-RED, or another Docker module. Reduces risk of a single container log filling the disk (e.g. Node-RED).
+- **Collapsible sections** on the Guard Dog page: Notifications, Database maintenance (CoT), and Activity log are now collapsible (click header to expand/collapse), matching the TAK Server and Help page style.
+- **4GB swap on deploy** — When Guard Dog is deployed (or auto-deployed with TAK Server), the console ensures a 4GB swap file at `/swapfile` exists and is enabled. Matches the reference TAK Server Hardening script for memory stability under load.
+
+**Connect LDAP / CoreConfig**
+- When writing CoreConfig (full replace or password resync), the console ensures `adminGroup="ROLE_ADMIN"` is present in the LDAP block (adds if missing, verifies after write). Prevents wrong admin console access and "no channels" issues.
+
+**CloudTAK**
+- Step 6 waits for the CloudTAK API (`/api/connections` returns 200/401/403) before declaring backend ready, not just port 5000 — avoids 502 when Caddy proxies before the backend is up. Step 4 build output streamed; Step 5 timeout 600s.
+
+**MediaMTX**
+- Web editor systemd unit is created and enabled only when `mediamtx_config_editor.py` is present (clone or local fallback). If the editor file is missing, MediaMTX streaming still works; no restart loop. Clone uses default branch of `takwerx/mediamtx-installer`; LDAP overlay applied from repo.
+
+**Unattended upgrades**
+- Spinner on the toggle so "Disabling…" is visible while the request runs.
+
+**Docs**
+- [GUARDDOG.md](docs/GUARDDOG.md) documents the 4GB swap step and Docker log limits. [COMMANDS.md](docs/COMMANDS.md) has pull-then-restart (two steps), server impact and memory (`free -h`, `docker stats`, `top`), disk-full recovery, CloudTAK 502/backend readiness, and TAK client "no channels" / new-groups sync delay.
+
+---
 
 ### v0.1.8-alpha — 2026-03-02
 
