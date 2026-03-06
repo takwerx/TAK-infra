@@ -412,6 +412,56 @@ async function takControl(action){
     catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
 }
 
+async function takUpdateConfig(){
+    var btn=document.getElementById('tak-update-config-btn');
+    if(!btn)return;
+    if(btn.disabled)return;
+    btn.disabled=true;
+    btn.style.opacity='0.6';
+    var origText=btn.textContent;
+    btn.textContent='Updating...';
+    try{
+        var r=await fetch('/api/takserver/update-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+        var d=await r.json();
+        if(d.error){
+            alert(d.error);
+            btn.disabled=false;
+            btn.style.opacity='1';
+            btn.textContent=origText;
+            return;
+        }
+        btn.textContent='Update started...';
+        function poll(){
+            fetch('/api/takserver/update-config/status').then(function(res){return res.json();}).then(function(st){
+                if(!st.running){
+                    if(st.error){
+                        alert('Update config failed: '+(st.message||'Unknown error'));
+                    }else{
+                        btn.textContent='Done — reloading';
+                        setTimeout(function(){window.location.reload();},1500);
+                        return;
+                    }
+                    btn.disabled=false;
+                    btn.style.opacity='1';
+                    btn.textContent=origText;
+                }else{
+                    setTimeout(poll,1500);
+                }
+            }).catch(function(){
+                btn.disabled=false;
+                btn.style.opacity='1';
+                btn.textContent=origText;
+            });
+        }
+        setTimeout(poll,2000);
+    }catch(e){
+        alert('Failed: '+e.message);
+        btn.disabled=false;
+        btn.style.opacity='1';
+        btn.textContent=origText;
+    }
+}
+
 async function connectLdap(){
     var btn=document.getElementById('connect-ldap-btn');
     var msg=document.getElementById('connect-ldap-msg');

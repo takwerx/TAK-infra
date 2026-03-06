@@ -10766,6 +10766,48 @@ def takserver_create_client_cert():
         return jsonify({'error': str(e)}), 500
 
 
+def _run_takserver_update_config():
+    """Regenerate Caddyfile, reload Caddy, re-install 8446 LE cert for current TAK Server hostname, restart TAK Server."""
+    settings = load_settings()
+    fqdn = settings.get('fqdn', '').strip()
+    generate_caddyfile(settings)
+    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
+    takserver_host = _get_service_domain(settings, 'takserver')
+    if fqdn and takserver_host:
+        caddy_active = subprocess.run('systemctl is-active caddy', shell=True, capture_output=True, text=True)
+        if caddy_active.stdout.strip() == 'active':
+            def _log(msg):
+                print(msg, flush=True)
+            install_le_cert_on_8446(takserver_host, _log, wait_for_cert=False)
+    subprocess.run(['systemctl', 'restart', 'takserver'], capture_output=True, text=True, timeout=60)
+    takserver_update_config_status.update({'running': False, 'complete': True, 'error': False})
+
+takserver_update_config_status = {'running': False, 'complete': False, 'error': False}
+
+@app.route('/api/takserver/update-config', methods=['POST'])
+@login_required
+def takserver_update_config():
+    """Sync Caddy + 8446 cert to current TAK Server domain and restart TAK Server. Use after changing TAK Server domain in Caddy/Domains."""
+    if takserver_update_config_status.get('running'):
+        return jsonify({'error': 'Update already in progress'}), 409
+    modules = detect_modules()
+    tak = modules.get('takserver', {})
+    if not tak.get('installed'):
+        return jsonify({'error': 'TAK Server not installed'}), 400
+    takserver_update_config_status.update({'running': True, 'complete': False, 'error': False})
+    def _run():
+        try:
+            _run_takserver_update_config()
+        except Exception as e:
+            takserver_update_config_status.update({'running': False, 'complete': True, 'error': True, 'message': str(e)})
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Update config started. Caddy and 8446 cert (if applicable) will be updated; TAK Server will restart.'})
+
+@app.route('/api/takserver/update-config/status')
+@login_required
+def takserver_update_config_status_api():
+    return jsonify(takserver_update_config_status)
+
 @app.route('/api/takserver/control', methods=['POST'])
 @login_required
 def takserver_control():
@@ -12354,10 +12396,10 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
 <div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active{% if tak_version %} · {{ tak_version }}{% endif %}</div><div id="cert-expiry-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
-<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
+<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn" onclick="takUpdateConfig()" id="tak-update-config-btn">🔄 Update config</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
 <div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running{% if tak_version %} · {{ tak_version }}{% endif %}</div><div id="cert-expiry-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
-<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
+<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn" onclick="takUpdateConfig()" id="tak-update-config-btn">🔄 Update config</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
 <div class="status-info"><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
 {% endif %}
