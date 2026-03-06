@@ -20,6 +20,17 @@ Release Date: 2026-03-04
 
 ---
 
+## TAK Server — PKI and lifecycle management (major)
+
+- **Client certificate creation in UI:** New TAK Server section to create and download client `.p12` certs from the console, with group assignment and read/write permission mapping.
+- **Intermediate CA rotation workflow:** Phased rotation that keeps old CA trust during transition, regenerates server/admin/user certs, updates TAK Portal certs, and provides **Revoke Old CA** when ready.
+- **Root CA rotation workflow:** Full PKI rebuild path (new Root + Intermediate + server + client certs), truststore/CoreConfig updates, TAK Server restart, and clear re-enrollment expectations.
+- **Certificate expiry visibility:** Root/Intermediate expiry is shown in the console dashboard card and TAK Server page with time remaining and health colors.
+- **TAK Server update UX:** `.deb` upload + progress + cancel + clear status messaging; update blocked until a package is present.
+- **Domain/cert sync tooling:** TAK Server config update path regenerates Caddy mapping and refreshes 8446 cert wiring so host/domain changes can be applied without manual file edits.
+
+---
+
 ## Connect LDAP / CoreConfig
 
 - When writing CoreConfig (full replace or password resync), the console ensures **`adminGroup="ROLE_ADMIN"`** is present in the LDAP block. It adds the attribute if missing and verifies with grep after write; deploy fails with a clear message if it cannot be set. Prevents "no channels" and wrong admin console access (webadmin getting WebTAK instead of admin UI).
