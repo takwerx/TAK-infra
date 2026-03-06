@@ -97,10 +97,12 @@ After deployment, create users in TAK Portal — they flow through Authentik →
 ## Requirements
 
 - **Ubuntu 22.04 LTS** (currently the only supported platform; goal is a universal installer). Fresh installation recommended.
-- Root access
-- 8GB+ RAM recommended for TAK Server
-- Internet connection for initial setup
-- TAK Server .deb package from [tak.gov](https://tak.gov)
+- **Root access**
+- **RAM:** 8 GB+ recommended for TAK Server; more if you run the full stack (Authentik, TAK Portal, Node-RED, MediaMTX, CloudTAK, Guard Dog).
+- **Disk:** At max deployment (all modules) you can sit around **26 GB** used. Plan for growth: CoT data, logs, and retention. **50 GB+** disk is recommended so you have headroom; TAK Server’s own minimum is 40 GB per the official configuration guide. Apply Docker log limits (Guard Dog → Apply Docker log limits) to avoid containers filling the disk.
+- **CPU:** Enough cores for all processes (TAK Server, PostgreSQL, Authentik, Caddy, Node-RED, etc.). TAK Server’s minimum is 4 cores; more is better for the full stack.
+- **Internet** connection for initial setup.
+- **TAK Server .deb** package from [tak.gov](https://tak.gov).
 
 ## Architecture
 
