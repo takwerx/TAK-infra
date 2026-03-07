@@ -115,14 +115,14 @@ install_dependencies() {
             export DEBIAN_FRONTEND=noninteractive
             export NEEDRESTART_MODE=a
             apt-get update -qq > /dev/null 2>&1
-            apt-get install -y python3 python3-pip python3-venv openssl > /dev/null 2>&1
+            apt-get install -y python3 python3-pip python3-venv openssl sshpass > /dev/null 2>&1
             ;;
         dnf)
-            dnf install -y python3 python3-pip openssl > /dev/null 2>&1
+            dnf install -y python3 python3-pip openssl sshpass > /dev/null 2>&1
             ;;
         *)
             echo -e "${RED}  Cannot auto-install dependencies for $PKG_MGR${NC}"
-            echo "  Please install: python3, python3-pip, python3-venv, openssl"
+            echo "  Please install: python3, python3-pip, python3-venv, openssl, sshpass"
             exit 1
             ;;
     esac
