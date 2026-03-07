@@ -739,7 +739,12 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
 
     # Step 1: SCP and install the database .deb if provided
     if db_pkg_path and db_pkg_name:
-        # Try to start PostgreSQL if installed but stopped, then check if already healthy
+        # Fix any corrupted pg_hba.conf before trying to start PG
+        _ssh_probe(s1, (
+            'PG_MAIN=$(find /etc/postgresql -type d -name main 2>/dev/null | head -1); '
+            '[ -n "$PG_MAIN" ] && [ -f "$PG_MAIN/pg_hba.conf" ] && '
+            'sudo sed -i "s/md5host/md5\\nhost/g" "$PG_MAIN/pg_hba.conf" 2>/dev/null; true'
+        ), timeout=10)
         _ssh_probe(s1, 'sudo pg_ctlcluster 15 main start 2>/dev/null; true', timeout=20)
         already_ok = False
         verify_cmd = 'sudo -u postgres psql -lqt 2>/dev/null | grep -q cot && systemctl is-active postgresql >/dev/null 2>&1 && echo PG_OK'
@@ -1145,13 +1150,23 @@ def guarddog_page():
         {'name': 'Root CA / Intermediate CA', 'interval': 'Escalating', 'desc': 'Monitors Root CA and Intermediate CA certificate expiry. First alert at 90 days, then at 75, 60, 45, 30 days, then daily until expiry.'},
     ]
     # Per-service list for expandable UI. "monitored" = Guard Dog monitors this (installed when Guard Dog was deployed).
+    tak_cfg = _get_tak_deployment_config(settings)
+    is_two_server = tak_cfg.get('mode') == 'two_server'
+    s1_host = (tak_cfg.get('server_one', {}).get('host') or '').strip() if is_two_server else ''
     guarddog_services = [
         {'id': 'takserver', 'name': 'TAK Server', 'monitored': gd.get('installed'), 'monitors': guarddog_monitors_tak},
+    ]
+    if is_two_server and s1_host:
+        guarddog_services.append({'id': 'remotedb', 'name': f'Remote Database ({s1_host})', 'monitored': gd.get('installed'), 'monitors': [
+            {'name': 'TCP + SSH', 'interval': '2 min', 'desc': f'Checks port 5432 on {s1_host} is reachable and PostgreSQL cluster is up. Auto-restarts PG via SSH after 3 consecutive failures. Alerts on persistent failure.'},
+            {'name': 'Health Agent', 'interval': 'Always', 'desc': f'Lightweight health endpoint on {s1_host}:8080/health — checks PG ready, cot database, disk usage. Deployed automatically by Guard Dog.'},
+        ]})
+    guarddog_services.extend([
         {'id': 'authentik', 'name': 'Authentik', 'monitored': modules.get('authentik', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '1 min', 'desc': 'Checks Authentik HTTP (9090). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
         {'id': 'mediamtx', 'name': 'MediaMTX', 'monitored': modules.get('mediamtx', {}).get('installed'), 'monitors': [{'name': 'Service', 'interval': '1 min', 'desc': 'Checks systemd mediamtx. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
         {'id': 'nodered', 'name': 'Node-RED', 'monitored': modules.get('nodered', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'interval': '1 min', 'desc': 'Checks Node-RED HTTP (1880). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
         {'id': 'cloudtak', 'name': 'CloudTAK', 'monitored': modules.get('cloudtak', {}).get('installed'), 'monitors': [{'name': 'Container', 'interval': '1 min', 'desc': 'Checks CloudTAK container. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
-    ]
+    ])
     guarddog_docs_url = f'https://github.com/{GITHUB_REPO}/blob/main/docs/GUARDDOG.md'
     notifications_configured = bool((settings.get('guarddog_alert_email') or '').strip())
     return render_template_string(GUARDDOG_TEMPLATE,
@@ -1239,6 +1254,20 @@ def _guarddog_health_check(service_id):
         if service_id == 'cloudtak':
             r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}"', shell=True, capture_output=True, text=True, timeout=5)
             return bool(r.stdout and 'Up' in r.stdout)
+        if service_id == 'remotedb':
+            import socket
+            conf_path = '/opt/tak-guarddog/guarddog.conf'
+            if not os.path.isfile(conf_path):
+                return None
+            with open(conf_path) as f:
+                conf = json.load(f)
+            db_host = conf.get('db_host', '')
+            db_port = int(conf.get('db_port', 0))
+            if not db_host or not db_port:
+                return None
+            s = socket.create_connection((db_host, db_port), timeout=5)
+            s.close()
+            return True
     except Exception:
         return False
     return False
@@ -1248,8 +1277,10 @@ def _guarddog_health_check(service_id):
 def guarddog_health_api():
     """Return health status per service (for UI). Only includes services that Guard Dog can monitor."""
     result = {}
-    for sid in ('takserver', 'authentik', 'mediamtx', 'nodered', 'cloudtak'):
-        result[sid] = _guarddog_health_check(sid)
+    for sid in ('takserver', 'authentik', 'mediamtx', 'nodered', 'cloudtak', 'remotedb'):
+        val = _guarddog_health_check(sid)
+        if val is not None:
+            result[sid] = val
     return jsonify(result)
 
 @app.route('/api/guarddog/activity-log')
@@ -1619,10 +1650,25 @@ def run_guarddog_deploy(alert_email):
         for d in ['/opt/tak-guarddog', '/var/lib/takguard', '/var/log/takguard']:
             os.makedirs(d, exist_ok=True)
         plog("✓ Directories created")
+        # Detect two-server mode
+        settings = load_settings()
+        tak_cfg = _get_tak_deployment_config(settings)
+        is_two_server = tak_cfg.get('mode') == 'two_server'
+        s1_host = (tak_cfg.get('server_one', {}).get('host') or '').strip() if is_two_server else ''
+        s1_user = (tak_cfg.get('server_one', {}).get('ssh_user') or 'root').strip() if is_two_server else ''
+        db_port = str(int(tak_cfg.get('database', {}).get('port') or 5432)) if is_two_server else '5432'
+        ssh_key_path = os.path.expanduser('~/.ssh/infra-tak-server-one') if is_two_server else ''
+        if is_two_server and s1_host:
+            plog(f"Two-server mode detected — DB on {s1_host}:{db_port}")
         script_files = [
-            'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh', 'tak-db-watch.sh',
-            'tak-cotdb-watch.sh', 'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py'
+            'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh',
+            'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py'
         ]
+        # Two-server: replace local PG monitors with remote DB monitor
+        if is_two_server and s1_host:
+            script_files.append('tak-remotedb-watch.sh')
+        else:
+            script_files.extend(['tak-db-watch.sh', 'tak-cotdb-watch.sh'])
         # Optional: monitors for other services (only install if that service is present)
         ak_dir = os.path.expanduser('~/authentik')
         nr_dir = os.path.expanduser('~/node-red')
@@ -1643,12 +1689,23 @@ def run_guarddog_deploy(alert_email):
                 return
             content = open(src, 'r').read()
             content = content.replace('ALERT_EMAIL_PLACEHOLDER', alert_email).replace('ALERT_SMS_PLACEHOLDER', alert_sms or '')
+            if is_two_server and name == 'tak-remotedb-watch.sh':
+                content = content.replace('DB_HOST_PLACEHOLDER', s1_host)
+                content = content.replace('DB_PORT_PLACEHOLDER', db_port)
+                content = content.replace('SSH_KEY_PLACEHOLDER', ssh_key_path)
+                content = content.replace('SSH_USER_PLACEHOLDER', s1_user)
             dest = os.path.join('/opt/tak-guarddog', name)
             with open(dest, 'w') as f:
                 f.write(content)
             if name.endswith('.sh'):
                 os.chmod(dest, 0o755)
         plog("✓ Scripts installed")
+        # Write config file for health endpoint (two-server DB host info)
+        gd_conf = {}
+        if is_two_server and s1_host:
+            gd_conf = {'two_server': True, 'db_host': s1_host, 'db_port': int(db_port)}
+        with open('/opt/tak-guarddog/guarddog.conf', 'w') as f:
+            json.dump(gd_conf, f)
         units = [
             ('tak8089guard.service', '[Unit]\nDescription=TAK 8089 Health Guard Dog\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-8089-watch.sh\n'),
             ('tak8089guard.timer', '[Unit]\nDescription=Run TAK 8089 guard dog every 1 minute\n\n[Timer]\nOnBootSec=10min\nOnUnitActiveSec=1min\nUnit=tak8089guard.service\n\n[Install]\nWantedBy=timers.target\n'),
@@ -1656,10 +1713,6 @@ def run_guarddog_deploy(alert_email):
             ('takoomguard.timer', '[Unit]\nDescription=Run TAK OOM guard dog every 1 minute\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1min\nUnit=takoomguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('takdiskguard.service', '[Unit]\nDescription=TAK Disk Space Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-disk-watch.sh\n'),
             ('takdiskguard.timer', '[Unit]\nDescription=Run TAK disk monitor every hour\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=1h\nUnit=takdiskguard.service\n\n[Install]\nWantedBy=timers.target\n'),
-            ('takdbguard.service', '[Unit]\nDescription=TAK PostgreSQL Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-db-watch.sh\n'),
-            ('takdbguard.timer', '[Unit]\nDescription=Run TAK DB monitor every 5 minutes\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=5min\nUnit=takdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
-            ('takcotdbguard.service', '[Unit]\nDescription=TAK CoT Database Size Monitor\nAfter=postgresql.service postgresql-15.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cotdb-watch.sh\n'),
-            ('takcotdbguard.timer', '[Unit]\nDescription=Run TAK CoT DB size monitor every 6 hours\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=6h\nUnit=takcotdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('taknetguard.service', '[Unit]\nDescription=TAK Network Monitor\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-network-watch.sh\n'),
             ('taknetguard.timer', '[Unit]\nDescription=TAK Network Monitor Timer\nRequires=taknetguard.service\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=1min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n'),
             ('takprocessguard.service', '[Unit]\nDescription=TAK Server Process Monitor\nAfter=network.target takserver.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-process-watch.sh\n'),
@@ -1670,6 +1723,19 @@ def run_guarddog_deploy(alert_email):
             ('takintcaguard.timer', '[Unit]\nDescription=Run TAK Intermediate CA expiry monitor daily\n\n[Timer]\nOnBootSec=2h\nOnUnitActiveSec=1d\nUnit=takintcaguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ('tak-health.service', '[Unit]\nDescription=TAK Server Health Check Endpoint\nAfter=network.target takserver.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-health-endpoint.py\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n'),
         ]
+        # Two-server: remote DB monitor instead of local PG monitors
+        if is_two_server and s1_host:
+            units.extend([
+                ('takremotedbguard.service', '[Unit]\nDescription=Guard Dog Remote Database Monitor\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-remotedb-watch.sh\n'),
+                ('takremotedbguard.timer', '[Unit]\nDescription=Run remote DB monitor every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=takremotedbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
+        else:
+            units.extend([
+                ('takdbguard.service', '[Unit]\nDescription=TAK PostgreSQL Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-db-watch.sh\n'),
+                ('takdbguard.timer', '[Unit]\nDescription=Run TAK DB monitor every 5 minutes\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=5min\nUnit=takdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+                ('takcotdbguard.service', '[Unit]\nDescription=TAK CoT Database Size Monitor\nAfter=postgresql.service postgresql-15.service\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cotdb-watch.sh\n'),
+                ('takcotdbguard.timer', '[Unit]\nDescription=Run TAK CoT DB size monitor every 6 hours\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=6h\nUnit=takcotdbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+            ])
         # Optional timers for other services (only if we installed the script)
         if 'tak-authentik-watch.sh' in script_files:
             units.extend([
@@ -1735,8 +1801,12 @@ def run_guarddog_deploy(alert_email):
             plog(f"✗ daemon-reload failed: {r.stderr}")
             guarddog_deploy_status.update({'running': False, 'error': True})
             return
-        timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer', 'takdbguard.timer',
-                  'takcotdbguard.timer', 'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer', 'takintcaguard.timer']
+        timers = ['tak8089guard.timer', 'takoomguard.timer', 'takdiskguard.timer',
+                  'taknetguard.timer', 'takprocessguard.timer', 'takcertguard.timer', 'takintcaguard.timer']
+        if is_two_server and s1_host:
+            timers.append('takremotedbguard.timer')
+        else:
+            timers.extend(['takdbguard.timer', 'takcotdbguard.timer'])
         if 'tak-authentik-watch.sh' in script_files:
             timers.append('takauthentikguard.timer')
         if 'tak-mediamtx-watch.sh' in script_files:
@@ -1769,6 +1839,51 @@ def run_guarddog_deploy(alert_email):
             guarddog_deploy_status.update({'running': False, 'error': True})
             return
         plog("✓ Timers and health endpoint started")
+
+        # Two-server: deploy health agent to Server One via SSH/SCP
+        if is_two_server and s1_host and os.path.exists(ssh_key_path):
+            plog(f"Deploying health agent to Server One ({s1_host})...")
+            s1_cfg = tak_cfg.get('server_one', {})
+            agent_src = os.path.join(scripts_dir, 'tak-db-health-agent.py')
+            if os.path.isfile(agent_src):
+                scp_ok, scp_out = _scp_to_host(s1_cfg, agent_src, '/opt/', timeout=30)
+                if scp_ok:
+                    # Create systemd service and open port 8080 on Server One
+                    setup_cmd = (
+                        'sudo mkdir -p /opt/tak-guarddog && '
+                        'sudo mv /opt/tak-db-health-agent.py /opt/tak-guarddog/tak-db-health-agent.py && '
+                        'sudo chmod 644 /opt/tak-guarddog/tak-db-health-agent.py && '
+                        'cat > /tmp/tak-db-health.service << \'UNIT\'\n'
+                        '[Unit]\n'
+                        'Description=TAK Database Health Endpoint\n'
+                        'After=network.target postgresql.service\n\n'
+                        '[Service]\n'
+                        'Type=simple\n'
+                        'ExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-db-health-agent.py\n'
+                        'Restart=always\n'
+                        'RestartSec=10\n\n'
+                        '[Install]\n'
+                        'WantedBy=multi-user.target\n'
+                        'UNIT\n'
+                        'sudo mv /tmp/tak-db-health.service /etc/systemd/system/tak-db-health.service && '
+                        'sudo systemctl daemon-reload && '
+                        'sudo systemctl enable tak-db-health.service && '
+                        'sudo systemctl restart tak-db-health.service && '
+                        'sudo ufw allow 8080/tcp >/dev/null 2>&1; '
+                        'echo AGENT_OK'
+                    )
+                    ok, out = _ssh_probe(s1_cfg, setup_cmd, timeout=30)
+                    if ok and 'AGENT_OK' in (out or ''):
+                        plog(f"✓ Health agent running on Server One — http://{s1_host}:8080/health")
+                    else:
+                        plog(f"⚠ Health agent install on Server One had issues: {(out or '')[:200]}")
+                else:
+                    plog(f"⚠ Could not SCP health agent to Server One: {(scp_out or '')[:200]}")
+            else:
+                plog("⚠ tak-db-health-agent.py not found in scripts — skipping Server One agent")
+        elif is_two_server and s1_host:
+            plog("⚠ SSH key not found — skipping Server One health agent deploy")
+
         plog("✓ Deployment complete")
         guarddog_deploy_status.update({'running': False, 'complete': True, 'error': False})
     except Exception as e:
@@ -10892,14 +11007,24 @@ def takserver_vacuum():
         return jsonify({'success': False, 'error': 'TAK Server not installed'}), 400
     data = request.get_json() or {}
     use_full = data.get('full') is True
-    if use_full:
-        cmd = "sudo -u postgres psql -d cot -c 'VACUUM FULL;' 2>&1"
-        timeout_sec = 3600
-    else:
-        cmd = "sudo -u postgres psql -d cot -c 'VACUUM ANALYZE;' 2>&1"
-        timeout_sec = 600
+    vacuum_sql = "VACUUM FULL;" if use_full else "VACUUM ANALYZE;"
+    timeout_sec = 3600 if use_full else 600
+
+    # Two-server: run VACUUM on Server One via SSH
+    settings = load_settings()
+    tak_cfg = _get_tak_deployment_config(settings)
+    if tak_cfg.get('mode') == 'two_server':
+        s1 = tak_cfg.get('server_one', {})
+        if not s1.get('host'):
+            return jsonify({'success': False, 'error': 'Server One host not configured'}), 400
+        vacuum_cmd = f"sudo -u postgres psql -d cot -c '{vacuum_sql}' 2>&1"
+        ok, out = _ssh_probe(s1, vacuum_cmd, timeout=timeout_sec)
+        if not ok:
+            return jsonify({'success': False, 'error': (out or 'SSH command failed')[:500]}), 400
+        return jsonify({'success': True, 'output': (out or '').strip(), 'full': use_full, 'remote': True})
+
+    cmd = f"sudo -u postgres psql -d cot -c '{vacuum_sql}' 2>&1"
     try:
-        # Run from / so postgres user does not hit "Permission denied" on app dir (e.g. /root/infra-TAK)
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_sec, cwd='/')
         out = (r.stdout or '') + (r.stderr or '')
         if r.returncode != 0:
@@ -10917,12 +11042,20 @@ def takserver_cot_db_size():
     """Return CoT database size in bytes and human-readable (for UI)."""
     if not os.path.exists('/opt/tak'):
         return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': 'TAK Server not installed'})
+    size_cmd = "sudo -u postgres psql -t -A -c \"SELECT COALESCE(pg_database_size('cot'), 0);\" 2>/dev/null"
     try:
-        r = subprocess.run(
-            "sudo -u postgres psql -t -A -c \"SELECT COALESCE(pg_database_size('cot'), 0);\" 2>/dev/null",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        size = int((r.stdout or '0').strip() or 0)
+        settings = load_settings()
+        tak_cfg = _get_tak_deployment_config(settings)
+        if tak_cfg.get('mode') == 'two_server':
+            s1 = tak_cfg.get('server_one', {})
+            if not s1.get('host'):
+                return jsonify({'size_bytes': 0, 'size_human': 'N/A', 'error': 'Server One host not configured'})
+            ok, out = _ssh_probe(s1, size_cmd, timeout=15)
+            raw = (out or '0').strip()
+        else:
+            r = subprocess.run(size_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            raw = (r.stdout or '0').strip()
+        size = int(raw or 0)
         if size >= 1024 ** 3:
             human = f'{size // (1024**3)} GB'
         elif size >= 1024 ** 2:
