@@ -2179,8 +2179,9 @@ def _ssh_probe(host_cfg, cmd='echo ok', timeout=15):
     if is_local:
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-            out = (r.stdout or r.stderr or '').strip()
-            return r.returncode == 0, out
+            if r.returncode == 0:
+                return True, (r.stdout or '').strip()
+            return False, ((r.stderr or '') + '\n' + (r.stdout or '')).strip()
         except Exception as e:
             return False, str(e)
     auth_method = (host_cfg.get('auth_method') or 'ssh_key').strip().lower()
@@ -2209,8 +2210,9 @@ def _ssh_probe(host_cfg, cmd='echo ok', timeout=15):
     ssh_cmd.extend([f'{user}@{host}', cmd])
     try:
         r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
-        out = (r.stdout or r.stderr or '').strip()
-        return r.returncode == 0, out
+        if r.returncode == 0:
+            return True, (r.stdout or '').strip()
+        return False, ((r.stderr or '') + '\n' + (r.stdout or '')).strip()
     except Exception as e:
         return False, str(e)
 
