@@ -315,7 +315,7 @@ def _get_unattended_upgrades_status():
         pass
     running = False
     try:
-        proc = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
+        proc = subprocess.run('ps aux | grep -E "unattended-upgrade|unattended-upgr" | grep -v shutdown | grep -v grep',
             shell=True, capture_output=True, text=True, timeout=5)
         running = bool(proc.stdout.strip())
     except Exception:
@@ -2905,13 +2905,15 @@ def wait_for_apt_lock(log_fn, log_list):
     uu_disabled = not uu.get('enabled', True)
 
     def _unattended_process_running():
-        r = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
+        # Match full path and truncated process name (ps may show "unattended-upgr")
+        r = subprocess.run(
+            'ps aux | grep -E "unattended-upgrade|unattended-upgr" | grep -v shutdown | grep -v grep',
             shell=True, capture_output=True, text=True)
         return bool(r.stdout.strip())
 
     def is_locked():
-        # Check dpkg lock file
-        lock = subprocess.run('lsof /var/lib/dpkg/lock-frontend 2>/dev/null',
+        # Check dpkg lock file (sudo so we see holder when app runs as non-root)
+        lock = subprocess.run('sudo lsof /var/lib/dpkg/lock-frontend 2>/dev/null',
             shell=True, capture_output=True, text=True)
         if lock.stdout.strip():
             return True
@@ -2924,7 +2926,7 @@ def wait_for_apt_lock(log_fn, log_list):
     # Unattended-upgrades is disabled but process/lock still present (e.g. user just turned it off)
     if uu_disabled:
         log_fn("Unattended-upgrades is disabled; stopping any remaining upgrade process...")
-        subprocess.run('pkill -TERM -f "/usr/bin/unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
+        subprocess.run('pkill -TERM -f "unattended-upgrade" 2>/dev/null; true', shell=True, timeout=5)
         # Wait up to 60s for process to exit and lock to release
         for _ in range(12):
             time.sleep(5)
@@ -3139,6 +3141,7 @@ def run_caddy_deploy(domain):
         pkg_mgr = settings.get('pkg_mgr', 'apt')
 
         if pkg_mgr == 'apt':
+            plog("Checking for package manager lock (unattended-upgrades)...")
             wait_for_apt_lock(plog, caddy_deploy_log)
 
         plog("━━━ Step 1/4: Installing Caddy ━━━")
@@ -3149,7 +3152,6 @@ def run_caddy_deploy(domain):
                 'curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" | gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>&1',
                 'curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" | tee /etc/apt/sources.list.d/caddy-stable.list 2>&1',
                 'apt-get update -qq 2>&1',
-                'apt-get install -y caddy 2>&1'
             ]
             for cmd in cmds:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120,
@@ -3157,6 +3159,25 @@ def run_caddy_deploy(domain):
                 if r.returncode != 0:
                     err = (r.stderr.strip() or r.stdout.strip())[:300]
                     plog(f"✗ Caddy install failed at: {cmd[:60]}")
+                    plog(f"  Error: {err}")
+                    caddy_deploy_status.update({'running': False, 'error': True})
+                    return
+            # Re-check lock before apt-get install caddy (unattended-upgrades may have started meanwhile)
+            plog("  Checking package manager lock again before installing Caddy...")
+            wait_for_apt_lock(plog, caddy_deploy_log)
+            install_caddy_cmd = 'apt-get install -y caddy 2>&1'
+            r = subprocess.run(install_caddy_cmd, shell=True, capture_output=True, text=True, timeout=120,
+                env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive', 'NEEDRESTART_MODE': 'a'})
+            if r.returncode != 0:
+                err = (r.stderr.strip() or r.stdout.strip())[:300]
+                if 'lock' in err.lower() or 'unattended-upgr' in err or 'unable to acquire' in err.lower():
+                    plog("  System updates are using the package manager. Waiting 60s then retrying...")
+                    time.sleep(60)
+                    r = subprocess.run(install_caddy_cmd, shell=True, capture_output=True, text=True, timeout=120,
+                        env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive', 'NEEDRESTART_MODE': 'a'})
+                if r.returncode != 0:
+                    err = (r.stderr.strip() or r.stdout.strip())[:300]
+                    plog(f"✗ Caddy install failed at: apt-get install -y caddy")
                     plog(f"  Error: {err}")
                     caddy_deploy_status.update({'running': False, 'error': True})
                     return
