@@ -2350,13 +2350,65 @@ def takportal_control():
         pull = subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
         pull_msg = pull.stdout.strip().split('\n')[-1] if pull.stdout.strip() else ''
         build = subprocess.run(f'cd {portal_dir} && docker compose up -d --build', shell=True, capture_output=True, text=True, timeout=180)
+        settings_synced = False
+        settings_sync_error = ''
+        cloudtak_url = ''
+        try:
+            settings = load_settings()
+            server_ip = settings.get('server_ip', 'localhost')
+            ak_env_path = os.path.expanduser('~/authentik/.env')
+            ak_token = ''
+            if os.path.exists(ak_env_path):
+                with open(ak_env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                            ak_token = line.strip().split('=', 1)[1].strip()
+            import json as json_mod
+            cloudtak_host = _get_service_domain(settings, 'cloudtak_map')
+            portal_settings = {
+                "AUTHENTIK_URL": f"http://{server_ip}:9090",
+                "AUTHENTIK_TOKEN": ak_token,
+                "USERS_HIDDEN_PREFIXES": "ak-,adm_,nodered-,ma-",
+                "GROUPS_HIDDEN_PREFIXES": "authentik, MA -, vid_, tak_ROLE_",
+                "USERS_ACTIONS_HIDDEN_PREFIXES": "",
+                "GROUPS_ACTIONS_HIDDEN_PREFIXES": "",
+                "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
+                "PORTAL_AUTH_ENABLED": "true" if settings.get('fqdn') else "false",
+                "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
+                "AUTHENTIK_PUBLIC_URL": _get_authentik_base_url(settings),
+                "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
+                "TAK_URL": f"https://{_get_takserver_host(settings)}:8443/Marti" if _get_takserver_host(settings) else f"https://{server_ip}:8443/Marti",
+                "TAK_API_P12_PATH": "data/certs/tak-client.p12",
+                "TAK_API_P12_PASSPHRASE": "atakatak",
+                "TAK_CA_PATH": "data/certs/tak-ca.pem",
+                "TAK_REVOKE_ON_DISABLE": "true",
+                "TAK_DEBUG": "false",
+                "TAK_BYPASS_ENABLED": "false",
+                "CLOUDTAK_URL": f"https://{cloudtak_host}" if cloudtak_host else "",
+                **_portal_email_settings(settings),
+                "BRAND_THEME": "dark",
+                "BRAND_LOGO_URL": ""
+            }
+            cloudtak_url = portal_settings.get('CLOUDTAK_URL', '')
+            settings_json = json_mod.dumps(portal_settings, indent=2)
+            with open('/tmp/tak-portal-settings.json', 'w') as f:
+                f.write(settings_json)
+            cp = subprocess.run('docker cp /tmp/tak-portal-settings.json tak-portal:/usr/src/app/data/settings.json', shell=True, capture_output=True, text=True, timeout=20)
+            os.remove('/tmp/tak-portal-settings.json')
+            if cp.returncode == 0:
+                subprocess.run('docker restart tak-portal', shell=True, capture_output=True, text=True, timeout=30)
+                settings_synced = True
+            else:
+                settings_sync_error = (cp.stderr or cp.stdout or 'docker cp failed').strip()[:300]
+        except Exception as e:
+            settings_sync_error = str(e)[:300]
         subprocess.run(f'cd {portal_dir} && docker image prune -f', shell=True, capture_output=True, text=True, timeout=30)
         time.sleep(3)
         vinfo = _get_takportal_version_info()
         new_version = vinfo['version'] or ''
         r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
         running = 'Up' in r.stdout
-        return jsonify({'success': True, 'running': running, 'action': action, 'pull': pull_msg, 'version': new_version})
+        return jsonify({'success': True, 'running': running, 'action': action, 'pull': pull_msg, 'version': new_version, 'settings_synced': settings_synced, 'settings_sync_error': settings_sync_error, 'cloudtak_url': cloudtak_url})
     else:
         return jsonify({'error': 'Invalid action'}), 400
     time.sleep(3)
@@ -2643,6 +2695,7 @@ def run_takportal_deploy():
                     if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
                         ak_token = line.strip().split('=', 1)[1].strip()
         import json as json_mod
+        cloudtak_host = _get_service_domain(settings, 'cloudtak_map')
         portal_settings = {
             "AUTHENTIK_URL": f"http://{server_ip}:9090",
             "AUTHENTIK_TOKEN": ak_token,
@@ -2662,7 +2715,7 @@ def run_takportal_deploy():
             "TAK_REVOKE_ON_DISABLE": "true",
             "TAK_DEBUG": "false",
             "TAK_BYPASS_ENABLED": "false",
-            "CLOUDTAK_URL": f"https://cloudtak.{settings['fqdn']}" if settings.get('fqdn') else "",
+            "CLOUDTAK_URL": f"https://{cloudtak_host}" if cloudtak_host else "",
             **_portal_email_settings(settings),
             "BRAND_THEME": "dark",
             "BRAND_LOGO_URL": ""
