@@ -13647,10 +13647,12 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .module-desc{font-size:12px;color:var(--text-dim);line-height:1.35}
 .module-status{font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 8px;border-radius:4px;display:inline-flex;align-items:center;gap:4px;margin-top:8px}
 .status-running{background:rgba(16,185,129,0.1);color:var(--green)}
+.status-caution{background:rgba(234,179,8,0.15);color:var(--yellow)}
+.status-critical{background:rgba(239,68,68,0.1);color:var(--red)}
 .status-stopped{background:rgba(239,68,68,0.1);color:var(--red)}
 .status-not-installed{background:rgba(71,85,105,0.2);color:var(--text-dim)}
 .status-dot{width:5px;height:5px;border-radius:50%;background:currentColor}
-.status-running .status-dot{animation:pulse 2s infinite}
+.status-running .status-dot,.status-caution .status-dot{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 .uu-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uu-spin .7s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes uu-spin{to{transform:rotate(360deg)}}
@@ -13728,7 +13730,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div class="module-desc">{{ mod.description }}</div>
 {% if module_versions.get(key) %}{% set v = module_versions.get(key) %}{% if v.version or v.update_available %}<div class="meta-line module-version-line" id="module-version-{{ key }}" style="margin-bottom:4px">{% if v.version %}v{{ v.version }}{% endif %}{% if v.update_available %} <span style="color:var(--cyan);font-size:10px" title="Update available">update</span>{% endif %}</div>{% endif %}{% endif %}
-<span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
+<span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}" data-gd-overall="{% if key == 'guarddog' and mod.installed and mod.running %}fetch{% endif %}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
 {% if key == 'takserver' and mod.installed %}<div id="takserver-card-cert-expiry" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-top:4px"></div>{% endif %}
 </a>
 {% endfor %}
@@ -13765,10 +13767,26 @@ function refreshModuleCards(){
             var el=document.getElementById('module-status-'+k);
             if(!el)continue;
             var m=mods[k];
+            if(k==='guarddog'&&m.installed&&m.running){ updateGuardDogOverallHealth(); continue; }
             var cls='module-status status-'+(m.installed&&m.running?'running':m.installed?'stopped':'not-installed');
             var label=m.installed&&m.running?'<span class="status-dot"></span> Running':m.installed?'<span class="status-dot"></span> Stopped':'Not Installed';
             el.className=cls;el.innerHTML=label;
         }
+        if(mods.guarddog&&mods.guarddog.installed&&mods.guarddog.running) updateGuardDogOverallHealth();
+    }).catch(function(){});
+}
+function updateGuardDogOverallHealth(){
+    var el=document.getElementById('module-status-guarddog');
+    if(!el||!el.classList.contains('status-running')&&!el.classList.contains('status-caution')&&!el.classList.contains('status-critical')) return;
+    fetch('/api/guarddog/health',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(h){
+        var vals=Object.keys(h).map(function(k){return h[k];});
+        if(vals.length===0){ el.className='module-status status-running'; el.innerHTML='<span class="status-dot"></span> Healthy'; return; }
+        var allOk=vals.every(function(v){return v==='ok';});
+        var allFail=vals.every(function(v){return v==='fail';});
+        var overall=allOk?'ok':allFail?'fail':'caution';
+        var cls='module-status status-'+(overall==='ok'?'running':overall==='caution'?'caution':'critical');
+        var label=overall==='ok'?'Healthy':overall==='caution'?'Caution':'Critical';
+        el.className=cls; el.innerHTML='<span class="status-dot"></span> '+label;
     }).catch(function(){});
 }
 setInterval(refreshModuleCards,8000);
