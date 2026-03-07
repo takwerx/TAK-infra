@@ -720,7 +720,13 @@ def takserver_two_server_open_db_firewall():
         server_two_ip = (s2.get('host') or '').strip()
         if not server_two_ip:
             return jsonify({'success': False, 'error': 'Server Two host not set'}), 400
-    cmd = f'sudo ufw allow from {server_two_ip} to any port {db_port} proto tcp && sudo ufw allow {db_port}/tcp && sudo ufw --force enable && sudo ufw reload'
+    cmd = (
+        f'sudo ufw allow 22/tcp && '
+        f'sudo ufw allow from {server_two_ip} to any port 22 proto tcp && '
+        f'sudo ufw allow from {server_two_ip} to any port {db_port} proto tcp && '
+        f'sudo ufw allow {db_port}/tcp && '
+        'sudo ufw --force enable && sudo ufw reload'
+    )
     ok, out = _ssh_probe(s1, cmd, timeout=25)
     if not ok:
         return jsonify({'success': False, 'error': out or 'UFW command failed on Server One'}), 400
