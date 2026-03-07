@@ -1605,7 +1605,7 @@ def _monitor_health_check(monitor_id):
             if not db_host:
                 return None
             req = urllib.request.Request(f'http://{db_host}:8080/health', method='GET')
-            resp = urllib.request.urlopen(req, timeout=5)
+            resp = urllib.request.urlopen(req, timeout=10)
             return resp.status == 200
         if monitor_id == 'authentik_http':
             req = urllib.request.Request('http://127.0.0.1:9090/', method='GET')
@@ -13770,7 +13770,7 @@ function refreshModuleCards(){
             var el=document.getElementById('module-status-'+k);
             if(!el)continue;
             var m=mods[k];
-            if(k==='guarddog'&&m.installed&&m.running){ updateGuardDogOverallHealth(); continue; }
+            if(k==='guarddog'&&m.installed&&m.running){ continue; }
             var cls='module-status status-'+(m.installed&&m.running?'running':m.installed?'stopped':'not-installed');
             var label=m.installed&&m.running?'<span class="status-dot"></span> Running':m.installed?'<span class="status-dot"></span> Stopped':'Not Installed';
             el.className=cls;el.innerHTML=label;
@@ -13780,16 +13780,31 @@ function refreshModuleCards(){
 }
 function updateGuardDogOverallHealth(){
     var el=document.getElementById('module-status-guarddog');
-    if(!el||!el.classList.contains('status-running')&&!el.classList.contains('status-caution')&&!el.classList.contains('status-critical')) return;
-    fetch('/api/guarddog/health?_='+Date.now(),{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json();}).then(function(h){
-        var vals=Object.keys(h).map(function(k){return h[k];});
-        if(vals.length===0){ el.className='module-status status-running'; el.innerHTML='<span class="status-dot"></span> Healthy'; return; }
-        var allOk=vals.every(function(v){return v==='ok';});
-        var allFail=vals.every(function(v){return v==='fail';});
-        var overall=allOk?'ok':allFail?'fail':'caution';
+    if(!el)return;
+    if(!el.classList.contains('status-running')&&!el.classList.contains('status-caution')&&!el.classList.contains('status-critical')) return;
+    function setOverall(overall){
         var cls='module-status status-'+(overall==='ok'?'running':overall==='caution'?'caution':'critical');
         var label=overall==='ok'?'Healthy':overall==='caution'?'Caution':'Critical';
         el.className=cls; el.innerHTML='<span class="status-dot"></span> '+label;
+    }
+    function fromResponse(h){
+        var vals=Object.keys(h).map(function(k){return h[k];});
+        if(vals.length===0) return 'ok';
+        var allOk=vals.every(function(v){return v==='ok';});
+        var allFail=vals.every(function(v){return v==='fail';});
+        return allOk?'ok':allFail?'fail':'caution';
+    }
+    fetch('/api/guarddog/health?_='+Date.now(),{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json();}).then(function(h){
+        var overall=fromResponse(h);
+        if(overall==='caution'){
+            setTimeout(function(){
+                fetch('/api/guarddog/health?_='+Date.now(),{credentials:'same-origin',cache:'no-store'}).then(function(r2){return r2.json();}).then(function(h2){
+                    var o2=fromResponse(h2);
+                    setOverall(o2==='ok'?'ok':overall);
+                }).catch(function(){ setOverall('caution'); });
+            },2200);
+        }
+        setOverall(overall);
     }).catch(function(){});
 }
 setInterval(refreshModuleCards,8000);
