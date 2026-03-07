@@ -166,7 +166,7 @@ async function loadCertExpiry(){
         if(bd<=90)bcolor='var(--red)';else if(bd<=365)bcolor='var(--yellow)';
         var byrs=Math.floor(bd/365),brem=bd%365,bmo=Math.floor(brem/30),bdd=brem%30;
         var bp=[];if(byrs>0)bp.push(byrs+'y');if(bmo>0)bp.push(bmo+'mo');if(bdd>0||bp.length===0)bp.push(bdd+'d');
-        if(bh)bh+=' &middot; ';
+        if(bh)bh+='<br>';
         bh+=bl+' <span style="color:'+bcolor+';font-weight:600">'+bp.join(' ')+'</span>';
       }
       banner.innerHTML=bh;
