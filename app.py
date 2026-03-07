@@ -503,15 +503,20 @@ def takserver_page():
     if tak.get('installed') and tak.get('running') and not deploy_status.get('running', False):
         deploy_status.update({'complete': False, 'error': False})
     tak_version = _get_takserver_version_info().get('version', '') if tak.get('installed') else ''
+    _settings = load_settings()
+    _tak_cfg = _get_tak_deployment_config(_settings)
+    _is_two_server = _tak_cfg.get('mode') == 'two_server'
+    _s1_host = (_tak_cfg.get('server_one', {}).get('host') or '').strip() if _is_two_server else ''
     return render_template_string(TAKSERVER_TEMPLATE,
-        settings=load_settings(), modules=modules, tak=tak, tak_version=tak_version,
+        settings=_settings, modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
-        authentik_base_url=_get_authentik_base_url(load_settings()),
-        takserver_base_url=_get_takserver_base_url(load_settings()),
+        authentik_base_url=_get_authentik_base_url(_settings),
+        takserver_base_url=_get_takserver_base_url(_settings),
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False),
         upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
-        upgrade_error=upgrade_status.get('error', False))
+        upgrade_error=upgrade_status.get('error', False),
+        two_server_mode=_is_two_server, s1_host=_s1_host)
 
 @app.route('/api/takserver/deployment-config', methods=['GET'])
 @login_required
@@ -11990,7 +11995,7 @@ upgrade_status = {'running': False, 'complete': False, 'error': False}
 @app.route('/api/takserver/update', methods=['POST'])
 @login_required
 def takserver_update():
-    """Run TAK Server upgrade (Ubuntu: apt install ./takserver_*.deb). User uploads new .deb first."""
+    """Run TAK Server upgrade. Two-server: core first (local), then database (SSH to Server One)."""
     if not os.path.exists('/opt/tak'):
         return jsonify({'error': 'TAK Server not installed. Deploy TAK Server first.'}), 400
     settings = load_settings()
@@ -11998,13 +12003,31 @@ def takserver_update():
         return jsonify({'error': 'TAK Server update is supported on Ubuntu only for now. Rocky/RHEL coming later.'}), 400
     if upgrade_status['running']:
         return jsonify({'error': 'Update already in progress'}), 409
+    tak_cfg = _get_tak_deployment_config(settings)
+    is_two_server = tak_cfg.get('mode') == 'two_server'
     pkg_files = sorted([f for f in os.listdir(UPLOAD_DIR) if f.endswith('.deb')],
         key=lambda f: os.path.getmtime(os.path.join(UPLOAD_DIR, f)), reverse=True)
     if not pkg_files:
         return jsonify({'error': 'No .deb package found. Upload the new TAK Server .deb from tak.gov first.'}), 400
-    upgrade_log.clear()
-    upgrade_status.update({'running': True, 'complete': False, 'error': False})
-    threading.Thread(target=run_takserver_upgrade, args=(os.path.join(UPLOAD_DIR, pkg_files[0]),), daemon=True).start()
+    if is_two_server:
+        core_pkg = next((f for f in pkg_files if 'core' in f.lower()), '')
+        db_pkg = next((f for f in pkg_files if 'database' in f.lower()), '')
+        if not core_pkg or not db_pkg:
+            return jsonify({'error': 'Two-server update requires both takserver-core and takserver-database .deb packages. Upload both.'}), 400
+        s1 = tak_cfg.get('server_one', {})
+        if not s1.get('host'):
+            return jsonify({'error': 'Server One host not configured in deployment settings.'}), 400
+        upgrade_log.clear()
+        upgrade_status.update({'running': True, 'complete': False, 'error': False})
+        threading.Thread(target=run_takserver_upgrade_two_server, args=(
+            os.path.join(UPLOAD_DIR, core_pkg),
+            os.path.join(UPLOAD_DIR, db_pkg),
+            s1, tak_cfg
+        ), daemon=True).start()
+    else:
+        upgrade_log.clear()
+        upgrade_status.update({'running': True, 'complete': False, 'error': False})
+        threading.Thread(target=run_takserver_upgrade, args=(os.path.join(UPLOAD_DIR, pkg_files[0]),), daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/takserver/update/log')
@@ -12044,6 +12067,124 @@ def run_takserver_upgrade(pkg_path):
         upgrade_status.update({'running': False, 'complete': True, 'error': False})
     except Exception as e:
         ulog("Error: " + str(e))
+        upgrade_status.update({'running': False, 'complete': False, 'error': True})
+
+def run_takserver_upgrade_two_server(core_pkg_path, db_pkg_path, s1_cfg, tak_cfg):
+    """Two-server upgrade: core first (local), then database (SSH to Server One)."""
+    def ulog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        upgrade_log.append(entry)
+        print(entry, flush=True)
+    try:
+        core_name = os.path.basename(core_pkg_path)
+        db_name = os.path.basename(db_pkg_path)
+        s1_host = s1_cfg.get('host', '')
+        ulog("=" * 50)
+        ulog("TAK Server Two-Server Update")
+        ulog(f"  Core package: {core_name}")
+        ulog(f"  Database package: {db_name}")
+        ulog(f"  Server One (DB): {s1_host}")
+        ulog("=" * 50)
+
+        # Step 1: Update Core (local) — per TAK guide, core first
+        ulog("")
+        ulog("━━━ Step 1/4: Stopping TAK Server ━━━")
+        subprocess.run('systemctl stop takserver', shell=True, capture_output=True, text=True, timeout=30)
+        ulog("✓ TAK Server stopped")
+
+        ulog("")
+        ulog("━━━ Step 2/4: Upgrading Core (this host) ━━━")
+        wait_for_apt_lock(ulog, upgrade_log)
+        ulog(f"Installing {core_name}...")
+        r = subprocess.run(
+            f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y ./{core_name} 2>&1',
+            shell=True, cwd=os.path.dirname(core_pkg_path), capture_output=True, text=True, timeout=600)
+        out = (r.stdout or '') + (r.stderr or '')
+        for line in out.strip().split('\n'):
+            if line.strip() and 'NEEDRESTART' not in line:
+                upgrade_log.append("  " + line)
+        if r.returncode != 0:
+            ulog(f"✗ Core upgrade failed (exit {r.returncode})")
+            upgrade_status.update({'running': False, 'complete': False, 'error': True})
+            return
+        ulog("✓ Core package upgraded")
+
+        # Restore JDBC URL to Server One (the upgrade may have reset CoreConfig)
+        db_host = s1_host
+        db_port = int(tak_cfg.get('database', {}).get('port') or 5432)
+        db_password = (tak_cfg.get('database', {}).get('password') or '').strip()
+        if db_host:
+            import re as _re
+            try:
+                with open('/opt/tak/CoreConfig.xml', 'r') as f:
+                    cc = f.read()
+                jdbc_url = f'jdbc:postgresql://{db_host}:{db_port}/cot'
+                if '127.0.0.1' in cc and db_host not in cc:
+                    cc = _re.sub(r'jdbc:postgresql://[^"]*', jdbc_url, cc)
+                    if db_password:
+                        cc = _re.sub(r'(<connection[^>]*password=")[^"]*(")', lambda m: m.group(1) + db_password + m.group(2), cc)
+                    with open('/opt/tak/CoreConfig.xml', 'w') as f:
+                        f.write(cc)
+                    ulog(f"✓ CoreConfig.xml JDBC restored to {db_host}:{db_port}")
+                else:
+                    ulog(f"✓ CoreConfig.xml JDBC already points to {db_host}")
+            except Exception as e:
+                ulog(f"⚠ Could not verify CoreConfig JDBC: {e}")
+
+        # Step 3: Update Database (Server One via SSH)
+        ulog("")
+        ulog(f"━━━ Step 3/4: Upgrading Database on Server One ({s1_host}) ━━━")
+        ulog(f"Copying {db_name} to Server One...")
+        ok, scp_out = _scp_to_host(s1_cfg, db_pkg_path, '/tmp/', timeout=300)
+        if not ok:
+            ulog(f"✗ SCP failed: {(scp_out or '')[:300]}")
+            ulog("Core was upgraded but database was NOT. You can manually install the database .deb on Server One.")
+            upgrade_status.update({'running': False, 'complete': False, 'error': True})
+            return
+        ulog("✓ Package copied to Server One")
+
+        install_cmd = (
+            f'cd /tmp && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./{db_name} 2>&1'
+        )
+        ulog(f"Installing {db_name} on Server One...")
+        ok, install_out = _ssh_probe(s1_cfg, install_cmd, timeout=600)
+        if install_out:
+            for line in (install_out or '').strip().split('\n'):
+                if line.strip() and 'NEEDRESTART' not in line:
+                    upgrade_log.append("  " + line)
+        if not ok:
+            # Verify PG is still running (SchemaManager may exit non-zero with warnings)
+            _ssh_probe(s1_cfg, 'sudo pg_ctlcluster 15 main start 2>/dev/null; true', timeout=20)
+            verify_cmd = 'sudo -u postgres psql -lqt 2>/dev/null | grep -q cot && pg_isready -q && echo PG_OK'
+            vok, vout = _ssh_probe(s1_cfg, verify_cmd, timeout=10)
+            if vok and 'PG_OK' in (vout or ''):
+                ulog("⚠ Install had warnings but PostgreSQL is running and cot database exists")
+            else:
+                ulog(f"✗ Database upgrade failed on Server One")
+                ulog("Core was upgraded but database upgrade had issues. Check Server One manually.")
+                upgrade_status.update({'running': False, 'complete': False, 'error': True})
+                return
+        ulog("✓ Database package upgraded on Server One")
+
+        # Step 4: Start TAK Server
+        ulog("")
+        ulog("━━━ Step 4/4: Starting TAK Server ━━━")
+        subprocess.run('systemctl start takserver', shell=True, capture_output=True, text=True, timeout=30)
+        ulog("Waiting 30 seconds for startup...")
+        for remaining in range(20, -1, -10):
+            time.sleep(10)
+            upgrade_log.append(f"  ⏳ {remaining//60:02d}:{remaining%60:02d} remaining")
+        ulog("✓ TAK Server started")
+
+        ulog("")
+        ulog("=" * 50)
+        ulog("✓ Two-server update complete")
+        ulog(f"  Core: upgraded on this host")
+        ulog(f"  Database: upgraded on {s1_host}")
+        ulog("=" * 50)
+        upgrade_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        ulog(f"✗ Error: {str(e)}")
         upgrade_status.update({'running': False, 'complete': False, 'error': True})
 
 @app.route('/api/deploy/cancel', methods=['POST'])
@@ -13467,10 +13608,12 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <span id="tak-update-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease{% if upgrading or upgrade_done or upgrade_error %};transform:rotate(180deg){% endif %}">&#9662;</span>
 </div>
 <div id="tak-update-body" style="display:{{ 'block' if upgrading or upgrade_done or upgrade_error else 'none' }};padding:0 24px 24px 24px;border-top:1px solid var(--border)">
-<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">To upgrade to a newer release, download the new <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver_X.X_all.deb</span> from tak.gov, upload it below, then click Update. This runs <span style="font-family:'JetBrains Mono',monospace;font-size:12px">apt install ./package.deb</span> and restarts TAK Server.</p>
+{% if two_server_mode %}<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px"><span style="color:var(--cyan);font-weight:600">Two-server mode detected.</span> Upload <strong>both</strong> the <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver-core</span> and <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver-database</span> .deb packages from tak.gov. The update will upgrade the core on this host first, then the database on Server One ({{ s1_host }}) via SSH.</p>
+{% else %}<p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;padding-top:16px">To upgrade to a newer release, download the new <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">takserver_X.X_all.deb</span> from tak.gov, upload it below, then click Update. This runs <span style="font-family:'JetBrains Mono',monospace;font-size:12px">apt install ./package.deb</span> and restarts TAK Server.</p>
+{% endif %}
 <div class="upload-area" id="upgrade-upload-area" style="padding:24px;margin-bottom:16px" onclick="document.getElementById('upgrade-file-input').click()" ondrop="handleUpgradeDrop(event)" ondragover="event.preventDefault();this.classList.add('dragover')" ondragleave="event.preventDefault();this.classList.remove('dragover')">
-<input type="file" id="upgrade-file-input" style="display:none" accept=".deb" onchange="handleUpgradeFile(event)">
-<div id="upgrade-upload-text" style="color:var(--text-dim);font-size:13px">Click or drop to select upgrade package (.deb)</div>
+<input type="file" id="upgrade-file-input" style="display:none" accept=".deb" {% if two_server_mode %}multiple{% endif %} onchange="handleUpgradeFile(event)">
+<div id="upgrade-upload-text" style="color:var(--text-dim);font-size:13px">{% if two_server_mode %}Click or drop to select both core and database .deb packages{% else %}Click or drop to select upgrade package (.deb){% endif %}</div>
 <div id="upgrade-filename" style="display:none;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--cyan);margin-top:8px"></div>
 </div>
 <div id="upgrade-progress-area" style="margin-bottom:16px"></div>
