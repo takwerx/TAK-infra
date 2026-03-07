@@ -723,16 +723,18 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
     Returns (ok, log_lines, db_password).
     """
     log = []
-    # Kill stale apt/dpkg locks (unattended-upgrades, prior attempts) before any apt operation.
+    # Kill stale apt/dpkg locks and fix broken packages from interrupted installs.
     apt_unlock = (
-        'sudo killall -q apt-get dpkg 2>/dev/null; '
+        'sudo killall -q apt-get dpkg unattended-upgr 2>/dev/null; '
         'for i in 1 2 3 4 5 6; do '
         'fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1 || break; '
         'echo "Waiting for apt lock ($i)…"; sleep 5; done; '
         'sudo rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null; '
-        'sudo dpkg --configure -a 2>/dev/null; true'
+        'sudo dpkg --force-remove-reinstreq --remove takserver-database 2>/dev/null; '
+        'sudo dpkg --configure -a 2>/dev/null; '
+        'sudo apt-get -f install -y 2>/dev/null; true'
     )
-    _ssh_probe(s1, apt_unlock, timeout=45)
+    _ssh_probe(s1, apt_unlock, timeout=60)
 
     # Step 1: SCP and install the database .deb if provided
     if db_pkg_path and db_pkg_name:
