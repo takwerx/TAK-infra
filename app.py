@@ -810,14 +810,16 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
             log.append('PostgreSQL installed on Server One.')
 
     # Step 2: Configure PostgreSQL for remote access
+    # Fix any previously corrupted pg_hba.conf lines (e.g. "md5host" from missing newline)
     pg_config_cmd = (
         'PG_MAIN=$(find /etc/postgresql -type d -name main 2>/dev/null | head -1) && '
         '[ -n "$PG_MAIN" ] && [ -f "$PG_MAIN/postgresql.conf" ] && '
         "sudo sed -i '/^\\s*#*\\s*listen_addresses\\s*=/d' \"$PG_MAIN/postgresql.conf\" && "
-        "printf \"listen_addresses = '*'\\n\" | sudo tee -a \"$PG_MAIN/postgresql.conf\" > /dev/null && "
-        f'(grep -q "{core_ip}/32" "$PG_MAIN/pg_hba.conf" 2>/dev/null || '
-        f'echo "host    all    all    {core_ip}/32    scram-sha-256" | sudo tee -a "$PG_MAIN/pg_hba.conf" > /dev/null) && '
-        '(sudo systemctl restart postgresql 2>/dev/null || sudo systemctl restart postgresql-15 2>/dev/null || true)'
+        "printf \"\\nlisten_addresses = '*'\\n\" | sudo tee -a \"$PG_MAIN/postgresql.conf\" > /dev/null && "
+        'sudo sed -i "s/md5host/md5\\nhost/g" "$PG_MAIN/pg_hba.conf" && '
+        f'(grep -q "^host.*{core_ip}/32" "$PG_MAIN/pg_hba.conf" 2>/dev/null || '
+        f'printf "\\nhost    all    all    {core_ip}/32    scram-sha-256\\n" | sudo tee -a "$PG_MAIN/pg_hba.conf" > /dev/null) && '
+        '(sudo pg_ctlcluster 15 main restart 2>/dev/null || sudo systemctl restart postgresql 2>/dev/null || true)'
     )
     ok, out = _ssh_probe(s1, pg_config_cmd, timeout=30)
     if not ok:
