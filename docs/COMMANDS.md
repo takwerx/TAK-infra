@@ -542,7 +542,15 @@ If root is 100% full, the cause is often **one huge container log** (e.g. Node-R
 
 ## Pull then restart console (two steps)
 
-Run the pull, then run the restart (separate lines):
+**One-liner script (from repo root):**
+
+```bash
+cd /path/to/infra-TAK && chmod +x pull-dev-and-restart.sh && ./pull-dev-and-restart.sh
+```
+
+*(First time: `chmod +x pull-dev-and-restart.sh`. After that, `./pull-dev-and-restart.sh` is enough. Uses sudo for the restart.)*
+
+**Or run the steps manually:**
 
 ```bash
 cd ~/infra-TAK && git fetch origin dev && git checkout dev && git pull origin dev

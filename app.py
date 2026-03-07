@@ -11408,7 +11408,7 @@ def upload_takserver_package():
     if not files or all(f.filename == '' for f in files):
         return jsonify({'error': 'No files selected'}), 400
     os_type = load_settings().get('os_type', '')
-    results = {'package': None, 'gpg_key': None, 'policy': None}
+    results = {'packages': [], 'gpg_key': None, 'policy': None}
     for f in files:
         fn = f.filename
         if not fn: continue
@@ -11419,12 +11419,12 @@ def upload_takserver_package():
             if 'rocky' in os_type:
                 os.remove(fp)
                 return jsonify({'error': f'DEB uploaded but system is {os_type}. Need .rpm.'}), 400
-            results['package'] = {'filename': fn, 'filepath': fp, 'pkg_type': 'deb', 'size_mb': sz}
+            results['packages'].append({'filename': fn, 'filepath': fp, 'pkg_type': 'deb', 'size_mb': sz})
         elif fn.endswith('.rpm'):
             if 'ubuntu' in os_type:
                 os.remove(fp)
                 return jsonify({'error': f'RPM uploaded but system is {os_type}. Need .deb.'}), 400
-            results['package'] = {'filename': fn, 'filepath': fp, 'pkg_type': 'rpm', 'size_mb': sz}
+            results['packages'].append({'filename': fn, 'filepath': fp, 'pkg_type': 'rpm', 'size_mb': sz})
         elif fn.endswith('.key') or 'gpg' in fn.lower():
             results['gpg_key'] = {'filename': fn, 'filepath': fp, 'size_mb': sz}
         elif fn.endswith('.pol') or 'policy' in fn.lower():
@@ -11448,17 +11448,19 @@ def delete_uploaded_file():
 @app.route('/api/upload/takserver/existing')
 @login_required
 def check_existing_uploads():
-    """Check for files already uploaded from a previous session"""
-    files = {}
-    for fn in os.listdir(UPLOAD_DIR):
+    """Check for files already uploaded from a previous session. Returns all .deb/.rpm as packages list (database + core both shown)."""
+    files = {'packages': []}
+    for fn in sorted(os.listdir(UPLOAD_DIR)):
         fp = os.path.join(UPLOAD_DIR, fn)
+        if not os.path.isfile(fp):
+            continue
         sz = os.path.getsize(fp)
         sz_mb = round(sz / (1024*1024), 1)
         if fn.endswith('.deb') or fn.endswith('.rpm'):
-            files['package'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
-        elif fn.endswith('.key'):
+            files['packages'].append({'filename': fn, 'filepath': fp, 'size_mb': sz_mb})
+        elif fn.endswith('.key') or 'gpg' in fn.lower():
             files['gpg_key'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
-        elif fn.endswith('.pol'):
+        elif fn.endswith('.pol') or 'policy' in fn.lower():
             files['policy'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
     return jsonify(files)
 
@@ -13060,22 +13062,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
-<div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
+<div class="upload-area" id="upload-area" data-os-type="{{ settings.get('os_type', '') }}" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
 <div class="upload-icon">📦</div><div class="upload-text">Drop your TAK Server files here</div>
 <div class="upload-hint" style="margin-bottom:6px"><span style="color:var(--text-dim);font-size:12px">Slow upload? Use the backdoor — open <strong>https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</strong> and upload from the TAK Server page there (skips proxy, no timeout).</span></div>
-<div class="upload-hint">
-{% if 'ubuntu' in settings.get('os_type', '') %}
-<strong style="color:var(--text-secondary)">Ubuntu — upload these files from tak.gov:</strong><br>
-Required: <span style="color:var(--cyan)">takserver_X.X_all.deb</span><br>
-Optional: <span style="color:var(--text-secondary)">deb_policy.pol</span> + <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>
-{% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}
-<strong style="color:var(--text-secondary)">Rocky/RHEL — upload these files from tak.gov:</strong><br>
-Required: <span style="color:var(--cyan)">takserver-X.X.noarch.rpm</span><br>
-Optional: <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>
-{% else %}
-Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(--cyan)">.rpm</span> package
-{% endif %}
-<br><span style="color:var(--text-dim);font-size:11px">Select all at once or add files one at a time</span>
+<div class="upload-hint" id="upload-requirements-hint">
+<span style="color:var(--text-dim);font-size:12px">One server: takserver .deb/.rpm + optional .pol and .key — Split server: takserver-core and takserver-database.</span>
 </div>
 <input type="file" id="file-input" style="display:none" multiple {% if 'ubuntu' in settings.get('os_type', '') %}accept=".deb,.key,.pol"{% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}accept=".rpm,.key"{% else %}accept=".deb,.rpm,.key,.pol"{% endif %} onchange="handleFileSelect(event)">
 </div>

@@ -492,13 +492,15 @@ async function connectLdap(){
 
 (function(){
     if(document.getElementById('upload-area')){
+        updateUploadHint();
         fetch('/api/upload/takserver/existing').then(r=>r.json()).then(d=>{
-            if(d.package||d.gpg_key||d.policy){
-                if(d.package)uploadedFiles.package=d.package;
+            var hasAny=(d.packages&&d.packages.length)||d.gpg_key||d.policy;
+            if(hasAny){
+                if(d.packages)uploadedFiles.packages=d.packages.slice();
                 if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;
                 if(d.policy)uploadedFiles.policy=d.policy;
                 var pa=document.getElementById('progress-area');
-                if(d.package){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.package.filename+' ('+d.package.size_mb+' MB)</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
+                (d.packages||[]).forEach(function(p){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+p.filename+' ('+p.size_mb+' MB)</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')});
                 if(d.gpg_key){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.gpg_key.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
                 if(d.policy){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.policy.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
                 var a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';var ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
@@ -551,7 +553,7 @@ async function cancelDeploy(){
     catch(e){alert('Failed: '+e.message)}
 }
 
-let uploadedFiles={package:null,gpg_key:null,policy:null};
+let uploadedFiles={packages:[],gpg_key:null,policy:null};
 let uploadsInProgress=0;
 let takDeploymentConfigCache=null;
 
@@ -566,7 +568,7 @@ function formatSize(b){if(b<1024)return b+' B';if(b<1024*1024)return(b/1024).toF
 async function removeFile(fn,elId){
     try{await fetch('/api/upload/takserver/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:fn})})}catch(e){}
     var el=document.getElementById(elId);if(el)el.remove();
-    if(uploadedFiles.package&&uploadedFiles.package.filename===fn)uploadedFiles.package=null;
+    if(uploadedFiles.packages)uploadedFiles.packages=uploadedFiles.packages.filter(function(p){return p.filename!==fn});
     if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===fn)uploadedFiles.gpg_key=null;
     if(uploadedFiles.policy&&uploadedFiles.policy.filename===fn)uploadedFiles.policy=null;
     updateUploadSummary();
@@ -576,7 +578,7 @@ function queueFiles(fl){
     const a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';const ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
     for(const f of fl){
         var isDupe=false;
-        if(uploadedFiles.package&&uploadedFiles.package.filename===f.name)isDupe=true;
+        if(uploadedFiles.packages&&uploadedFiles.packages.some(function(p){return p.filename===f.name}))isDupe=true;
         if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===f.name)isDupe=true;
         if(uploadedFiles.policy&&uploadedFiles.policy.filename===f.name)isDupe=true;
         if(isDupe){var pa=document.getElementById('progress-area');pa.insertAdjacentHTML('beforeend','<div class="progress-item" style="opacity:0.6"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--yellow)">\u26a0 '+f.name+' already uploaded - skipped</span></div>');continue}
@@ -607,7 +609,7 @@ function uploadFile(file){
         delete window['xhr_'+id];
         const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
         var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn);updateUploadSummary()}
+        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.packages&&d.packages.length)d.packages.forEach(function(p){if(!uploadedFiles.packages.some(function(x){return x.filename===p.filename}))uploadedFiles.packages.push(p)});else if(d.package){var p=d.package;if(!uploadedFiles.packages.some(function(x){return x.filename===p.filename}))uploadedFiles.packages.push({filename:p.filename,filepath:p.filepath,size_mb:p.size_mb})}if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn);updateUploadSummary()}
         else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
         uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
     };
@@ -627,14 +629,14 @@ function cancelUpload(id){
 function updateUploadSummary(){
     const r=document.getElementById('upload-results');const fl=document.getElementById('upload-files-list');r.style.display='block';
     let h='';
-    if(uploadedFiles.package)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.package.filename+'</span> <span style="color:var(--text-dim)">('+uploadedFiles.package.size_mb+' MB)</span></div>';
+    (uploadedFiles.packages||[]).forEach(function(p){h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+p.filename+'</span> <span style="color:var(--text-dim)">('+p.size_mb+' MB)</span></div>'});
     if(uploadedFiles.gpg_key)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.gpg_key.filename+'</span> <span style="color:var(--text-dim)">(GPG key)</span></div>';
     if(uploadedFiles.policy)h+='<div style="margin-bottom:8px">✓ <span style="color:var(--green)">'+uploadedFiles.policy.filename+'</span> <span style="color:var(--text-dim)">(policy)</span></div>';
     if(uploadedFiles.gpg_key&&uploadedFiles.policy)h+='<div style="margin-top:12px;color:var(--green)">🔐 GPG verification enabled</div>';
     else if(!uploadedFiles.gpg_key&&!uploadedFiles.policy)h+='<div style="margin-top:12px;color:var(--text-dim)">\u2139 No GPG key/policy - verification will be skipped</div>';
     else h+='<div style="margin-top:12px;color:var(--yellow)">\u26a0 Need both GPG key + policy for verification</div>';
     fl.innerHTML=h;
-    if(uploadedFiles.package)document.getElementById('deploy-btn-area').style.display='block';
+    if(uploadedFiles.packages&&uploadedFiles.packages.length)document.getElementById('deploy-btn-area').style.display='block';
 }
 
 function showDeployConfig(){
@@ -766,6 +768,27 @@ function getTakDeploymentMode(){
     return checked?checked.value:'single_server';
 }
 
+function updateUploadHint(){
+    var el=document.getElementById('upload-requirements-hint');
+    if(!el)return;
+    var mode=getTakDeploymentMode();
+    var osType=(document.getElementById('upload-area')||{}).getAttribute('data-os-type')||'';
+    var ubuntu=osType.indexOf('ubuntu')!==-1;
+    var rocky=osType.indexOf('rocky')!==-1||osType.indexOf('rhel')!==-1;
+    var line2='<br><span style="color:var(--text-dim);font-size:11px">Select all at once or add files one at a time</span>';
+    var html;
+    if(mode==='two_server'){
+      if(ubuntu)html='<strong style="color:var(--text-secondary)">Split server (Ubuntu) — from tak.gov:</strong><br>Required: <span style="color:var(--cyan)">takserver-database_X.X_all.deb</span> and <span style="color:var(--cyan)">takserver-core_X.X_all.deb</span><br>Optional: <span style="color:var(--text-secondary)">deb_policy.pol</span> + <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>'+line2;
+      else if(rocky)html='<strong style="color:var(--text-secondary)">Split server (Rocky/RHEL) — from tak.gov:</strong><br>Required: <span style="color:var(--cyan)">takserver-database</span> and <span style="color:var(--cyan)">takserver-core</span> .rpm<br>Optional: <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>'+line2;
+      else html='<strong style="color:var(--text-secondary)">Split server:</strong><br>Required: <span style="color:var(--cyan)">takserver-database</span> and <span style="color:var(--cyan)">takserver-core</span> .deb or .rpm<br>Optional: .pol + .key'+line2;
+    }else{
+      if(ubuntu)html='<strong style="color:var(--text-secondary)">One server (Ubuntu) — from tak.gov:</strong><br>Required: <span style="color:var(--cyan)">takserver_X.X_all.deb</span><br>Optional: <span style="color:var(--text-secondary)">deb_policy.pol</span> + <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>'+line2;
+      else if(rocky)html='<strong style="color:var(--text-secondary)">One server (Rocky/RHEL) — from tak.gov:</strong><br>Required: <span style="color:var(--cyan)">takserver-X.X.noarch.rpm</span><br>Optional: <span style="color:var(--text-secondary)">takserver-public-gpg.key</span>'+line2;
+      else html='<strong style="color:var(--text-secondary)">One server:</strong><br>Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(--cyan)">.rpm</span> package<br>Optional: .pol + .key'+line2;
+    }
+    el.innerHTML=html;
+}
+
 function toggleTwoServerPanel(){
     var mode=getTakDeploymentMode();
     var panel=document.getElementById('two-server-config-panel');
@@ -776,6 +799,7 @@ function toggleTwoServerPanel(){
         ?'Split mode selected. Save config, run preflight, then apply Server One and Server Two steps in order.'
         :'One server selected. This path is recommended up to ~500 concurrent users.';
     }
+    updateUploadHint();
 }
 
 function toggleServerTwoLocal(){
