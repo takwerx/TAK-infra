@@ -1042,6 +1042,15 @@ def takserver_two_server_deploy_server_one():
 
     if not ok:
         return jsonify({'success': False, 'error': log[-1] if log else 'Deploy failed on Server One', 'log': log}), 400
+
+    # Deploy Guard Dog health agent to Server One so Remote DB monitor can go green without a separate deploy
+    ssh_key_path = (s1.get('ssh_key_path') or '').strip()
+    if ssh_key_path and os.path.exists(os.path.expanduser(ssh_key_path)):
+        ha_ok, ha_msg = _deploy_health_agent_to_server_one(s1)
+        log.append('Health agent: ' + (ha_msg if ha_ok else f'Skip/fail: {ha_msg}'))
+    else:
+        log.append('Health agent: skipped (no SSH key to Server One)')
+
     return jsonify({
         'success': True,
         'message': 'Server One (Database) deploy complete. Next: 5. Deploy Server Two (Core), then fill out certs and hit Deploy TAK Server.',
@@ -1300,6 +1309,64 @@ def guarddog_deploy_api():
     guarddog_deploy_status.update({'running': True, 'complete': False, 'error': False})
     threading.Thread(target=run_guarddog_deploy, args=(alert_email,), daemon=True).start()
     return jsonify({'success': True})
+
+def _deploy_health_agent_to_server_one(s1_cfg):
+    """Deploy Guard Dog health agent to Server One (SCP + systemd + 8080). Returns (ok, message)."""
+    scripts_dir = os.path.join(BASE_DIR, 'scripts', 'guarddog')
+    agent_src = os.path.join(scripts_dir, 'tak-db-health-agent.py')
+    if not os.path.isfile(agent_src):
+        return False, 'tak-db-health-agent.py not found'
+    scp_ok, scp_out = _scp_to_host(s1_cfg, agent_src, '/opt/', timeout=30)
+    if not scp_ok:
+        return False, f'SCP failed: {(scp_out or "")[:150]}'
+    setup_cmd = (
+        'sudo mkdir -p /opt/tak-guarddog && '
+        'sudo mv /opt/tak-db-health-agent.py /opt/tak-guarddog/tak-db-health-agent.py && '
+        'sudo chmod 644 /opt/tak-guarddog/tak-db-health-agent.py && '
+        "cat > /tmp/tak-db-health.service << 'UNIT'\n"
+        '[Unit]\n'
+        'Description=TAK Database Health Endpoint\n'
+        'After=network.target postgresql.service\n\n'
+        '[Service]\n'
+        'Type=simple\n'
+        'ExecStart=/usr/bin/python3 /opt/tak-guarddog/tak-db-health-agent.py\n'
+        'Restart=always\n'
+        'RestartSec=10\n\n'
+        '[Install]\n'
+        'WantedBy=multi-user.target\n'
+        "UNIT\n"
+        'sudo mv /tmp/tak-db-health.service /etc/systemd/system/tak-db-health.service && '
+        'sudo systemctl daemon-reload && '
+        'sudo systemctl enable tak-db-health.service && '
+        'sudo systemctl restart tak-db-health.service && '
+        'sudo ufw allow 8080/tcp >/dev/null 2>&1; '
+        'echo AGENT_OK'
+    )
+    ok, out = _ssh_probe(s1_cfg, setup_cmd, timeout=30)
+    if not ok or 'AGENT_OK' not in (out or ''):
+        return False, f'Setup failed: {(out or "")[:150]}'
+    return True, 'Health agent deployed (port 8080/health for Guard Dog).'
+
+
+@app.route('/api/guarddog/deploy-health-agent', methods=['POST'])
+@login_required
+def guarddog_deploy_health_agent_api():
+    """Deploy only the health agent to Server One (two-server). Does not run full Guard Dog deploy."""
+    settings = load_settings()
+    tak_cfg = _get_tak_deployment_config(settings)
+    if tak_cfg.get('mode') != 'two_server':
+        return jsonify({'success': False, 'error': 'Not in two-server mode'}), 400
+    s1_host = (tak_cfg.get('server_one', {}).get('host') or '').strip()
+    if not s1_host:
+        return jsonify({'success': False, 'error': 'Server One host not set in TAK deployment'}), 400
+    s1_cfg = tak_cfg.get('server_one', {})
+    ssh_key_path = (s1_cfg.get('ssh_key_path') or '').strip()
+    if not ssh_key_path or not os.path.exists(os.path.expanduser(ssh_key_path)):
+        return jsonify({'success': False, 'error': 'SSH key to Server One not found. Set it in TAK Server deployment and run steps 2–3.'}), 400
+    ok, msg = _deploy_health_agent_to_server_one(s1_cfg)
+    if not ok:
+        return jsonify({'success': False, 'error': msg}), 400
+    return jsonify({'success': True, 'message': f'Health agent deployed on {s1_host}. It may take a moment to show green.'})
 
 @app.route('/api/guarddog/deploy/log')
 @login_required
@@ -6860,6 +6927,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       {% endif %}
       {% endfor %}
     </div>
+    {% for svc in guarddog_services %}
+    {% if svc.id == 'remotedb' %}
+    <p style="margin-top:12px;font-size:12px;color:var(--text-secondary)">If <strong>Health Agent</strong> is red, the agent may not be on Server One. <button type="button" class="btn btn-ghost" id="gd-deploy-agent-btn" onclick="gdDeployHealthAgent()" style="padding:6px 14px;font-size:12px">Deploy health agent to Server One</button> <span id="gd-deploy-agent-msg"></span></p>
+    {% endif %}
+    {% endfor %}
     <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint (for Uptime Robot): <code style="color:var(--cyan);word-break:break-all">{{ health_url }}</code></p>
     <p style="margin-top:10px;font-size:12px;color:var(--text-dim)"><a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p>
     <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>

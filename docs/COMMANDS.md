@@ -83,7 +83,7 @@ These steps are also in the main **README** (backdoor, reset password, recovery)
 1. **Save Config** — Set Server One host, SSH user/port/key (or password). Use “Use this infra-TAK host as Server Two” so the console host is Server Two.
 2. **Setup SSH key** — Creates a key on this host if needed.
 3. **Copy key to Server One** — One-time; you’ll be prompted for Server One’s SSH password. After this, the console can SSH to Server One without a password.
-4. **Deploy Server One (DB)** — Copies the database .deb to Server One, installs it, configures PostgreSQL and firewall. At the end it **reads the DB password from Server One over that same SSH** and saves it. You should see “DB password captured automatically. Move to step 5.”
+4. **Deploy Server One (DB)** — Copies the database .deb to Server One, installs it, configures PostgreSQL and firewall. At the end it **reads the DB password from Server One over that same SSH** and saves it, and **installs the Guard Dog health agent** on Server One (port 8080) so the Remote DB Health Agent monitor can go green once Guard Dog is deployed. You should see “DB password captured automatically. Move to step 5.”
 5. **Deploy Server Two (Core)** — Installs the core .deb on this host and points CoreConfig at Server One’s DB using the saved password.
 6. Fill out **Certificate Information**, then click **Deploy TAK Server** to generate certs and finish.
 

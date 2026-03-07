@@ -51,7 +51,7 @@ In **two-server** mode, Guard Dog deploys a small **health agent** on Server One
 
 **Why it might be red:**
 
-- **Agent not deployed** — Guard Dog deploys the agent only during its deploy, and only when two-server is configured and the SSH key to Server One is present. If you set up two-server after installing Guard Dog, or SSH failed during deploy, the agent was never installed. **Fix:** Re-deploy Guard Dog (Guard Dog page → deploy again). That will SCP the agent to Server One and set up `tak-db-health.service` and open port 8080.
+- **Agent not deployed** — The agent is installed automatically during **two-server step 4 (Deploy Server One)** when an SSH key to Server One is set, so a fresh two-server install gets the agent before Guard Dog is deployed. Guard Dog also deploys the agent when you deploy Guard Dog (if two-server + SSH are configured). If you set up two-server after installing Guard Dog, or SSH failed during step 4 or Guard Dog deploy, the agent may not be there. **Fix:** Use **Deploy health agent to Server One** on the Guard Dog page, or re-deploy Guard Dog.
 - **Agent not running on Server One** — On Server One run `systemctl status tak-db-health`. If it’s inactive, run `sudo systemctl start tak-db-health` and `sudo systemctl enable tak-db-health`.
 - **Port 8080 not reachable** — Server Two (the console host) must be able to reach Server One:8080. On Server One run `sudo ufw allow 8080/tcp` (or allow from Server Two’s IP only) and ensure nothing else is blocking 8080.
 - **Agent returns 503** — The agent returns 200 only when PostgreSQL is ready, the `cot` database exists, and disk usage is under 90%. If any of those fail, it returns 503 and the monitor shows red. Fix PG, the database, or disk on Server One.
