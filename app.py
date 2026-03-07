@@ -740,7 +740,7 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
     # Step 1: SCP and install the database .deb if provided
     if db_pkg_path and db_pkg_name:
         # Try to start PostgreSQL if installed but stopped, then check if already healthy
-        _ssh_probe(s1, 'sudo systemctl start postgresql 2>/dev/null; true', timeout=15)
+        _ssh_probe(s1, 'sudo pg_ctlcluster 15 main start 2>/dev/null; true', timeout=20)
         already_ok = False
         verify_cmd = 'sudo -u postgres psql -lqt 2>/dev/null | grep -q cot && systemctl is-active postgresql >/dev/null 2>&1 && echo PG_OK'
         vok, vout = _ssh_probe(s1, verify_cmd, timeout=10)
@@ -767,17 +767,20 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
             ok, out = _ssh_probe(s1, install_cmd, timeout=600)
             log.append(out or '')
             if not ok:
-                _ssh_probe(s1, 'sudo systemctl start postgresql 2>/dev/null; true', timeout=15)
+                _ssh_probe(s1, 'sudo pg_ctlcluster 15 main start 2>/dev/null; true', timeout=20)
                 vok, vout = _ssh_probe(s1, verify_cmd, timeout=10)
                 if not (vok and 'PG_OK' in (vout or '')):
                     diag_cmd = (
-                        'echo "--- PG packages ---"; dpkg -l 2>/dev/null | grep -i postgres; '
-                        'echo "--- PG service ---"; systemctl status postgresql 2>&1 | head -15; '
-                        'echo "--- PG clusters ---"; pg_lsclusters 2>/dev/null; '
-                        'echo "--- PG databases ---"; sudo -u postgres psql -lqt 2>&1 | head -10; '
-                        'echo "--- PG logs ---"; tail -20 /var/log/postgresql/*.log 2>/dev/null || echo "no logs"'
+                        'echo "--- cluster start attempt ---"; '
+                        'sudo pg_ctlcluster 15 main start 2>&1; '
+                        'echo "--- cluster logs ---"; '
+                        'sudo cat /var/lib/postgresql/15/main/log/$(ls -t /var/lib/postgresql/15/main/log/ 2>/dev/null | head -1) 2>/dev/null | tail -30 || echo "no cluster logs"; '
+                        'echo "--- postgresql.conf listen ---"; '
+                        'grep -n listen_addresses /etc/postgresql/15/main/postgresql.conf 2>/dev/null; '
+                        'echo "--- pg_hba.conf ---"; '
+                        'cat /etc/postgresql/15/main/pg_hba.conf 2>/dev/null | grep -v "^#" | grep -v "^$"'
                     )
-                    _, diag = _ssh_probe(s1, diag_cmd, timeout=15)
+                    _, diag = _ssh_probe(s1, diag_cmd, timeout=20)
                     log.append('Install failed. Diagnostics from Server One:')
                     log.append(diag or 'no diagnostic output')
                     return False, log, ''
