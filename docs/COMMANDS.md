@@ -69,7 +69,8 @@ After a VPS reboot, everything that’s **enabled** starts automatically. You do
   sudo systemctl start caddy    # if it’s not running
   sudo systemctl reload caddy   # if it is running but config changed
   ```
-- From the console (via backdoor): **Caddy** → **Domains** → **Save** to regenerate the Caddyfile, then run the `reload` command above if needed.
+- **So Caddy starts after reboot:** If you had to run `start caddy` manually, enable it: `sudo systemctl enable caddy`.
+- From the console (via backdoor): **Caddy** → **Domains** → **Save** to regenerate the Caddyfile, then run the `reload` command above if needed. Using **Start** on the Caddy page also enables the service for boot.
 
 These steps are also in the main **README** (backdoor, reset password, recovery). The scripts `fix-console-after-pull.sh` and `reset-console-password.sh` live in the repo root and are intended to be run on the server when you’re locked out or after a bad update.
 

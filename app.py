@@ -2277,8 +2277,9 @@ def caddy_control():
         return jsonify({'success': r.returncode == 0, 'output': (r.stdout or r.stderr or '').strip()})
     elif action == 'start':
         generate_caddyfile(load_settings())
+        subprocess.run('systemctl enable caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=5)
         threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
-        return jsonify({'success': True, 'output': 'Caddy start scheduled; connection may drop briefly.'})
+        return jsonify({'success': True, 'output': 'Caddy start scheduled (and enabled for boot); connection may drop briefly.'})
     elif action == 'reload':
         generate_caddyfile(load_settings())
         threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
