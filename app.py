@@ -686,6 +686,47 @@ def takserver_two_server_install_ssh_key():
     return jsonify({'success': True, 'message': 'Key installed on Server One. You can run Preflight now.'})
 
 
+@app.route('/api/takserver/two-server/open-db-firewall', methods=['POST'])
+@login_required
+def takserver_two_server_open_db_firewall():
+    """SSH to Server One and open UFW for DB port from Server Two (infra-TAK) IP. Requires SSH key already installed."""
+    data = request.get_json() or {}
+    settings = load_settings()
+    cfg = _get_tak_deployment_config(settings)
+    if isinstance(data.get('config'), dict):
+        cfg = _normalize_tak_deployment_config(_deep_merge_dict(cfg, data.get('config')))
+    if cfg.get('mode') != 'two_server':
+        return jsonify({'success': False, 'error': 'Deployment mode is not two_server'}), 400
+    s1 = cfg.get('server_one', {})
+    s2 = cfg.get('server_two', {})
+    db_port = int(cfg.get('database', {}).get('port') or 5432)
+    host = (s1.get('host') or '').strip()
+    if not host:
+        return jsonify({'success': False, 'error': 'Server One host not set'}), 400
+    if s2.get('use_localhost'):
+        server_two_ip = (settings.get('server_ip') or '').strip()
+        if not server_two_ip:
+            try:
+                r = subprocess.run(
+                    ['curl', '-s', '--connect-timeout', '5', 'https://ifconfig.me'],
+                    capture_output=True, text=True, timeout=8
+                )
+                server_two_ip = (r.stdout or '').strip() if r.returncode == 0 else ''
+            except Exception:
+                pass
+            if not server_two_ip:
+                return jsonify({'success': False, 'error': 'Server Two IP unknown. Set Server IP in Settings (or run from infra-TAK host with network access).'}), 400
+    else:
+        server_two_ip = (s2.get('host') or '').strip()
+        if not server_two_ip:
+            return jsonify({'success': False, 'error': 'Server Two host not set'}), 400
+    cmd = f'sudo ufw allow from {server_two_ip} to any port {db_port} proto tcp && sudo ufw allow {db_port}/tcp && sudo ufw --force enable && sudo ufw reload'
+    ok, out = _ssh_probe(s1, cmd, timeout=25)
+    if not ok:
+        return jsonify({'success': False, 'error': out or 'UFW command failed on Server One'}), 400
+    return jsonify({'success': True, 'message': f'Firewall on Server One updated: allowed {server_two_ip} → port {db_port}. Run Preflight again.'})
+
+
 @app.route('/api/takserver/two-server/runbook', methods=['GET'])
 @login_required
 def takserver_two_server_runbook():

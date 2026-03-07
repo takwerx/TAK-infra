@@ -755,6 +755,7 @@ function initTakDeployModeUI(rootEl){
       '<button type="button" onclick="saveTakDeploymentConfig()" style="padding:8px 14px;background:rgba(59,130,246,0.15);color:var(--accent);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Save Split Config</button>',
       '<button type="button" onclick="ensureTakSshKey()" style="padding:8px 14px;background:rgba(139,92,246,0.15);color:var(--purple, #a78bfa);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Setup SSH key</button>',
       '<button type="button" onclick="installTakSshKey()" style="padding:8px 14px;background:rgba(245,158,11,0.15);color:var(--amber, #f59e0b);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Copy key to Server One</button>',
+      '<button type="button" onclick="openTakDbFirewall()" style="padding:8px 14px;background:rgba(239,68,68,0.15);color:var(--red,#ef4444);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Open firewall on Server One</button>',
       '<button type="button" onclick="runTakTwoServerPreflight()" style="padding:8px 14px;background:rgba(14,116,144,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Run Preflight</button>',
       '<button type="button" onclick="loadTakTwoServerRunbook()" style="padding:8px 14px;background:rgba(16,185,129,0.15);color:var(--green);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Generate Runbook</button>',
       '</div>',
@@ -959,6 +960,21 @@ async function saveTakDeploymentConfig(silent){
       return d.config;
     }catch(e){
       if(msg&&!silent){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
+      throw e;
+    }
+}
+
+async function openTakDbFirewall(){
+    var msg=document.getElementById('two-server-msg');
+    try{
+      var cfg=collectTakDeploymentConfigFromForm();
+      var r=await fetch('/api/takserver/two-server/open-db-firewall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:cfg})});
+      var d=await r.json();
+      if(!d.success)throw new Error(d.error||'Failed');
+      if(msg){msg.textContent='✓ '+(d.message||'Firewall updated');msg.style.color='var(--green)';}
+      return d;
+    }catch(e){
+      if(msg){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
       throw e;
     }
 }
