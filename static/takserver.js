@@ -769,6 +769,8 @@ function initTakDeployModeUI(rootEl){
       '<div class="form-field"><label>DB Name</label><input type="text" id="ts_db_name" value="cot"></div>',
       '<div class="form-field"><label>DB User</label><input type="text" id="ts_db_user" value="martiuser"></div>',
       '</div>',
+      '<div class="form-field" style="margin-top:10px"><label>DB password (from Server One)</label><input type="password" id="ts_db_password" placeholder="Paste after installing Server One (or leave blank if SSH captured it)" autocomplete="off" style="width:100%;padding:8px 12px;background:#0a0e1a;border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:\'JetBrains Mono\',monospace;font-size:12px"></div>',
+      '<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Set this before or after step 4. Required for CoreConfig on Server Two; save config then run step 5 / Deploy TAK Server.</div>',
       '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">',
       '<button type="button" onclick="saveTakDeploymentConfig()" style="padding:8px 14px;background:rgba(59,130,246,0.15);color:var(--accent);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">1. Save Config</button>',
       '<button type="button" onclick="ensureTakSshKey()" style="padding:8px 14px;background:rgba(139,92,246,0.15);color:var(--purple, #a78bfa);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">2. Setup SSH key</button>',
@@ -918,7 +920,8 @@ function collectTakDeploymentConfigFromForm(){
       database:{
         port:parseInt((document.getElementById('ts_db_port')||{}).value||'5432',10),
         name:(document.getElementById('ts_db_name')||{}).value||'cot',
-        user:(document.getElementById('ts_db_user')||{}).value||'martiuser'
+        user:(document.getElementById('ts_db_user')||{}).value||'martiuser',
+        password:(document.getElementById('ts_db_password')||{}).value||''
       }
     };
 }
@@ -950,6 +953,7 @@ function populateTakDeploymentConfigForm(cfg){
     set('ts_db_port',cfg.database&&cfg.database.port);
     set('ts_db_name',cfg.database&&cfg.database.name);
     set('ts_db_user',cfg.database&&cfg.database.user);
+    set('ts_db_password',cfg.database&&cfg.database.password);
     toggleTwoServerAuthInputs('one');
     toggleTwoServerAuthInputs('two');
     toggleServerTwoLocal();
