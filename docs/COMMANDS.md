@@ -349,6 +349,18 @@ sudo systemctl restart takwerx-console
 
 ---
 
+## Update Now — "dubious ownership" (git safe.directory)
+
+If **Update Now** in the console fails with `fatal: detected dubious ownership in repository at '...'`, the process running the update (e.g. root) doesn’t own the repo directory (e.g. it was cloned by another user). Git 2.35.2+ blocks this for security. **Fix:** on the server, add the repo as a safe directory for the user that runs the update (usually root):
+
+```bash
+sudo git config --global --add safe.directory /path/to/infra-TAK
+```
+
+Use the path shown in the error (e.g. `/home/tntakazureadmin/infra-TAK`). After that, **Update Now** should work. Newer console versions run `git -c safe.directory=<path>` so this is only needed if you hit the error before updating or on older installs.
+
+---
+
 ## infratak / subdomain — "This site can't provide a secure connection"
 
 That message usually means Caddy couldn’t get a valid TLS certificate (e.g. Let’s Encrypt) for that hostname. Fix in this order:

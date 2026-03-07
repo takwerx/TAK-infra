@@ -476,13 +476,22 @@ def update_check():
 def update_apply():
     console_dir = os.path.dirname(os.path.abspath(__file__))
     try:
-        r = subprocess.run(f'cd {console_dir} && git pull --rebase --autostash 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+        # Git 2.35.2+ refuses to run when repo owner != process user (CVE-2022-24765). Use -c safe.directory
+        # so Update Now works when the app runs as root but the repo was cloned by another user.
+        cmd = ['git', '-c', f'safe.directory={console_dir}', 'pull', '--rebase', '--autostash']
+        r = subprocess.run(cmd, cwd=console_dir, capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
-            return jsonify({'success': False, 'error': r.stderr.strip() or r.stdout.strip()})
+            err = (r.stderr or '').strip() or (r.stdout or '').strip()
+            out = {'success': False, 'error': err}
+            if 'dubious ownership' in err.lower() or 'safe.directory' in err.lower():
+                out['workaround'] = (
+                    f'On the server run: sudo git config --global --add safe.directory {console_dir}'
+                )
+            return jsonify(out)
         update_cache.update({'latest': None, 'checked': 0})
         subprocess.Popen('sleep 2 && systemctl restart takwerx-console', shell=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return jsonify({'success': True, 'output': r.stdout.strip(), 'restart_required': True})
+        return jsonify({'success': True, 'output': (r.stdout or '').strip(), 'restart_required': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -13739,6 +13748,7 @@ async function applyUpdate(){
             setTimeout(function(){window.location.reload()},5000);
         }else{
             status.style.color='var(--red)';status.textContent='Error: '+d.error;
+            if(d.workaround){status.innerHTML=status.textContent+'<br><small style=\"opacity:0.9\">'+d.workaround+'</small>';}
             btn.disabled=false;btn.textContent='Update Now';btn.style.opacity='1';
         }
     }catch(e){status.style.color='var(--red)';status.textContent='Error: '+e.message;btn.disabled=false;btn.textContent='Update Now';btn.style.opacity='1'}
