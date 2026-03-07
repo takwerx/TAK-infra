@@ -588,6 +588,104 @@ def takserver_two_server_preflight():
         }
     })
 
+@app.route('/api/takserver/two-server/ensure-ssh-key', methods=['POST'])
+@login_required
+def takserver_two_server_ensure_ssh_key():
+    """Ensure an SSH key exists on this host for Server One. Generate if missing. Returns pub path and fingerprint."""
+    data = request.get_json() or {}
+    settings = load_settings()
+    cfg = _get_tak_deployment_config(settings)
+    if isinstance(data.get('config'), dict):
+        cfg = _normalize_tak_deployment_config(_deep_merge_dict(cfg, data.get('config')))
+    s1 = cfg.get('server_one', {})
+    key_path = (s1.get('ssh_key_path') or '').strip() or os.path.expanduser('~/.ssh/id_rsa')
+    key_path = os.path.expanduser(key_path)
+    pub_path = key_path + '.pub'
+    if os.path.exists(key_path) and os.path.exists(pub_path):
+        try:
+            r = subprocess.run(
+                ['ssh-keygen', '-l', '-f', pub_path],
+                capture_output=True, text=True, timeout=5
+            )
+            fingerprint = (r.stdout or '').strip() if r.returncode == 0 else ''
+        except Exception:
+            fingerprint = ''
+        return jsonify({
+            'success': True,
+            'key_path': key_path,
+            'public_key_path': pub_path,
+            'fingerprint': fingerprint,
+            'message': 'Key already exists',
+        })
+    key_dir = os.path.dirname(key_path)
+    if key_dir and not os.path.isdir(key_dir):
+        try:
+            os.makedirs(key_dir, mode=0o700)
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Could not create {key_dir}: {e}'}), 400
+    try:
+        subprocess.run(
+            ['ssh-keygen', '-t', 'ed25519', '-N', '', '-f', key_path, '-C', 'infra-tak-server-one'],
+            capture_output=True, text=True, timeout=30,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        return jsonify({'success': False, 'error': (e.stderr or e.stdout or str(e))[:400]}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:400]}), 400
+    try:
+        r = subprocess.run(['ssh-keygen', '-l', '-f', pub_path], capture_output=True, text=True, timeout=5)
+        fingerprint = (r.stdout or '').strip() if r.returncode == 0 else ''
+    except Exception:
+        fingerprint = ''
+    return jsonify({
+        'success': True,
+        'key_path': key_path,
+        'public_key_path': pub_path,
+        'fingerprint': fingerprint,
+        'message': 'New key generated',
+    })
+
+
+@app.route('/api/takserver/two-server/install-ssh-key', methods=['POST'])
+@login_required
+def takserver_two_server_install_ssh_key():
+    """Copy this host's SSH public key to Server One using ssh-copy-id (one-time password). Password not stored."""
+    data = request.get_json() or {}
+    password = (data.get('password') or '').strip()
+    if not password:
+        return jsonify({'success': False, 'error': 'Password required for one-time copy'}), 400
+    settings = load_settings()
+    cfg = _get_tak_deployment_config(settings)
+    if isinstance(data.get('config'), dict):
+        cfg = _normalize_tak_deployment_config(_deep_merge_dict(cfg, data.get('config')))
+    s1 = cfg.get('server_one', {})
+    host = (s1.get('host') or '').strip()
+    if not host:
+        return jsonify({'success': False, 'error': 'Server One host not set'}), 400
+    user = (s1.get('ssh_user') or 'root').strip() or 'root'
+    port = int(s1.get('ssh_port') or 22)
+    key_path = (s1.get('ssh_key_path') or '').strip() or os.path.expanduser('~/.ssh/id_rsa')
+    key_path = os.path.expanduser(key_path)
+    pub_path = key_path + '.pub'
+    if not os.path.exists(pub_path):
+        return jsonify({'success': False, 'error': f'Public key not found at {pub_path}. Run "Setup SSH key" first.'}), 400
+    if shutil.which('sshpass') is None:
+        return jsonify({'success': False, 'error': 'sshpass not installed. Run: apt install sshpass (or use manual ssh-copy-id)'}), 400
+    try:
+        r = subprocess.run(
+            ['sshpass', '-p', password, 'ssh-copy-id', '-i', pub_path,
+             '-o', 'StrictHostKeyChecking=accept-new', '-p', str(port), f'{user}@{host}'],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or 'Unknown error').strip()[:500]
+            return jsonify({'success': False, 'error': err}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:400]}), 400
+    return jsonify({'success': True, 'message': 'Key installed on Server One. You can run Preflight now.'})
+
+
 @app.route('/api/takserver/two-server/runbook', methods=['GET'])
 @login_required
 def takserver_two_server_runbook():

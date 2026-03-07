@@ -742,6 +742,8 @@ function initTakDeployModeUI(rootEl){
       '</div>',
       '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">',
       '<button type="button" onclick="saveTakDeploymentConfig()" style="padding:8px 14px;background:rgba(59,130,246,0.15);color:var(--accent);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Save Split Config</button>',
+      '<button type="button" onclick="ensureTakSshKey()" style="padding:8px 14px;background:rgba(139,92,246,0.15);color:var(--purple, #a78bfa);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Setup SSH key</button>',
+      '<button type="button" onclick="installTakSshKey()" style="padding:8px 14px;background:rgba(245,158,11,0.15);color:var(--amber, #f59e0b);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Copy key to Server One</button>',
       '<button type="button" onclick="runTakTwoServerPreflight()" style="padding:8px 14px;background:rgba(14,116,144,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Run Preflight</button>',
       '<button type="button" onclick="loadTakTwoServerRunbook()" style="padding:8px 14px;background:rgba(16,185,129,0.15);color:var(--green);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer">Generate Runbook</button>',
       '</div>',
@@ -904,6 +906,39 @@ async function runTakTwoServerPreflight(silent){
       if(out){out.style.display='block';out.textContent='Preflight error: '+e.message;}
       if(msg&&!silent){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
       return {success:false,error:e.message};
+    }
+}
+
+async function ensureTakSshKey(){
+    var msg=document.getElementById('two-server-msg');
+    try{
+      var cfg=collectTakDeploymentConfigFromForm();
+      var r=await fetch('/api/takserver/two-server/ensure-ssh-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:cfg})});
+      var d=await r.json();
+      if(!d.success)throw new Error(d.error||'Setup failed');
+      if(msg){msg.textContent='✓ '+(d.message||'Key ready')+(d.fingerprint?' — '+d.fingerprint:'');msg.style.color='var(--green)';}
+      return d;
+    }catch(e){
+      if(msg){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
+      throw e;
+    }
+}
+
+async function installTakSshKey(){
+    var msg=document.getElementById('two-server-msg');
+    var password=prompt('Server One SSH password (one-time; not stored):');
+    if(password==null)return;
+    if(!password.trim()){if(msg){msg.textContent='No password entered.';msg.style.color='var(--yellow)';}return;}
+    try{
+      var cfg=collectTakDeploymentConfigFromForm();
+      var r=await fetch('/api/takserver/two-server/install-ssh-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:cfg,password:password})});
+      var d=await r.json();
+      if(!d.success)throw new Error(d.error||'Install failed');
+      if(msg){msg.textContent='✓ '+(d.message||'Key installed on Server One');msg.style.color='var(--green)';}
+      return d;
+    }catch(e){
+      if(msg){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
+      throw e;
     }
 }
 
