@@ -43,7 +43,7 @@ Guard Dog is designed so that **a restart does not trigger another monitor to re
 
 ## Health endpoint
 
-Guard Dog runs a small HTTP service that answers on port 8888 (by default). The path `/health` returns 200 when TAK Server is considered healthy (port 8089 and processes). Use this URL in Uptime Robot or other outside-in monitoring.
+Guard Dog runs a small HTTP service on **port 8080**. The path `/health` returns 200 when TAK Server is considered healthy (port 8089 and processes). infra-TAK's Caddy config also exposes this as `https://<infratak-host>/health`, so Uptime Robot can check over normal HTTPS/443 without opening 8080 publicly.
 
 ## Remote Database — Health Agent red
 

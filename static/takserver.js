@@ -37,10 +37,34 @@ async function syncWebadmin(){
     try{
         var r=await fetch('/api/takserver/sync-webadmin',{method:'POST',headers:{'Content-Type':'application/json'}});
         var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+        if(d.success){if(msg){msg.textContent=d.message||'Synced.';msg.style.color='var(--green)';} if(btn){btn.disabled=false;btn.style.opacity='1';} loadWebadminSuperuserStatus();}
         else{if(msg){msg.textContent=d.error||d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
+}
+
+async function loadWebadminSuperuserStatus(){
+    var el=document.getElementById('webadmin-superuser-status');
+    if(!el)return;
+    try{
+        var r=await fetch('/api/takserver/webadmin-authentik-status');
+        var d=await r.json();
+        if(!d.available){
+            el.textContent='Unavailable';
+            el.style.color='var(--text-dim)';
+            return;
+        }
+        if(!d.exists){
+            el.textContent='No';
+            el.style.color='var(--red)';
+            return;
+        }
+        el.textContent=d.is_superuser?'Yes':'No';
+        el.style.color=d.is_superuser?'var(--green)':'var(--yellow)';
+    }catch(e){
+        el.textContent='Error';
+        el.style.color='var(--red)';
+    }
 }
 async function loadServices(){
     var el=document.getElementById('services-list');
@@ -70,6 +94,7 @@ async function loadServices(){
     }catch(e){el.textContent='Failed to load services'}
 }
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
+if(document.getElementById('webadmin-superuser-status')){loadWebadminSuperuserStatus();}
 if(document.getElementById('cot-db-size')){refreshCotSize();}
 if(document.getElementById('cert-expiry-info')){loadCertExpiry();}
 if(document.getElementById('rotate-ca-info')){loadCAInfo();}

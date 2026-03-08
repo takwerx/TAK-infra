@@ -1239,7 +1239,11 @@ def _guarddog_health_url(settings):
     fqdn = (settings.get('fqdn') or '').strip()
     server_ip = (settings.get('server_ip') or '').strip()
     if fqdn:
-        return f"http://{fqdn.split(':')[0]}:8080/health"
+        try:
+            sd = _get_all_service_domains(settings)
+            return f"https://{sd['infratak']}/health"
+        except Exception:
+            return f"https://{fqdn.split(':')[0]}/health"
     if server_ip:
         return f"http://{server_ip}:8080/health"
     return "http://YOUR_SERVER_IP:8080/health"
@@ -2872,6 +2876,11 @@ def generate_caddyfile(settings=None):
     nodered = modules.get('nodered', {})
     infratak_host = sd['infratak']
     lines.append(f"{infratak_host} {{")
+    # Public health endpoint for external monitors (Uptime Robot) on normal HTTPS/443.
+    # This avoids requiring port 8080 to be open to the internet.
+    lines.append(f"    route /health* {{")
+    lines.append(f"        reverse_proxy 127.0.0.1:8080")
+    lines.append(f"    }}")
     if ak.get('installed'):
         lines.append(f"    route /login* {{")
         lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
@@ -11329,11 +11338,21 @@ def _ensure_authentik_webadmin():
         results = json.loads(resp.read().decode())['results']
         user_obj = next((u for u in results if u.get('username') == 'webadmin'), None)
         if not user_obj:
-            ud = {'username': 'webadmin', 'name': 'TAK Admin', 'is_active': True, 'path': 'users', 'groups': [group_pk] if group_pk else []}
+            ud = {
+                'username': 'webadmin',
+                'name': 'TAK Admin',
+                'is_active': True,
+                # Keep webadmin as a true admin account in Authentik even when TAK was deployed first.
+                'is_superuser': True,
+                'path': 'users',
+                'groups': [group_pk] if group_pk else []
+            }
             req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps(ud).encode(), headers=headers, method='POST')
             user_obj = json.loads(_req.urlopen(req, timeout=10).read().decode())
         webadmin_pk = user_obj['pk']
         patch_fields = {}
+        if user_obj.get('is_superuser') is not True:
+            patch_fields['is_superuser'] = True
         if user_obj.get('path', '') != 'users':
             patch_fields['path'] = 'users'
         existing = user_obj.get('groups') or []
@@ -11386,6 +11405,49 @@ def takserver_sync_webadmin():
     return jsonify({'success': False, 'message': err or 'Sync failed'}), 400
 
 
+def _get_authentik_webadmin_status():
+    """Return webadmin presence/superuser status from Authentik API."""
+    import urllib.request as _req
+    import urllib.error
+
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return {'available': False, 'exists': False, 'is_superuser': False, 'error': 'Authentik not installed'}
+
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = line.strip().split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        return {'available': False, 'exists': False, 'is_superuser': False, 'error': 'Authentik token not found'}
+
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        req = _req.Request(f'{url}/api/v3/core/users/?search=webadmin', headers=headers)
+        resp = _req.urlopen(req, timeout=10)
+        results = json.loads(resp.read().decode()).get('results', [])
+        user_obj = next((u for u in results if u.get('username') == 'webadmin'), None)
+        if not user_obj:
+            return {'available': True, 'exists': False, 'is_superuser': False}
+        return {
+            'available': True,
+            'exists': True,
+            'is_superuser': bool(user_obj.get('is_superuser')),
+            'path': user_obj.get('path', ''),
+        }
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            body = ''
+        return {'available': False, 'exists': False, 'is_superuser': False, 'error': f'Authentik API {e.code}: {body}'}
+    except Exception as e:
+        return {'available': False, 'exists': False, 'is_superuser': False, 'error': str(e)[:160]}
+
+
 @app.route('/api/takserver/webadmin-password')
 @login_required
 def takserver_webadmin_password():
@@ -11395,6 +11457,14 @@ def takserver_webadmin_password():
     if pw:
         return jsonify({'password': pw})
     return jsonify({'password': ''})
+
+
+@app.route('/api/takserver/webadmin-authentik-status')
+@login_required
+def takserver_webadmin_authentik_status():
+    """Return whether webadmin exists in Authentik and has superuser set."""
+    status = _get_authentik_webadmin_status()
+    return jsonify(status)
 
 
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
@@ -14156,6 +14226,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px">webadmin superuser in Authentik: <span id="webadmin-superuser-status" style="color:var(--text-dim)">Checking...</span></div>
 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
 <button type="button" id="resync-ldap-btn" onclick="resyncLdap()" style="padding:8px 16px;background:rgba(16,185,129,.2);color:var(--green);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Resync LDAP to TAK Server</button>
 <button type="button" id="sync-webadmin-btn" onclick="syncWebadmin()" style="padding:8px 16px;background:rgba(59,130,246,.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer">Sync webadmin to Authentik</button>
