@@ -64,6 +64,16 @@ detect_os() {
                 PKG_MGR="apt"
             fi
             ;;
+        debian)
+            if [[ "$OS_VERSION" == "12"* ]]; then
+                OS_TYPE="debian-12"
+                PKG_MGR="apt"
+            else
+                echo -e "${YELLOW}WARNING: Debian $OS_VERSION not tested. Debian 12 recommended.${NC}"
+                OS_TYPE="debian-$OS_VERSION"
+                PKG_MGR="apt"
+            fi
+            ;;
         rocky|rhel)
             if [[ "$OS_VERSION" == 9* ]]; then
                 OS_TYPE="rocky-9"
@@ -76,7 +86,7 @@ detect_os() {
             ;;
         *)
             echo -e "${YELLOW}WARNING: $OS_NAME is not officially supported.${NC}"
-            echo -e "${YELLOW}Supported: Ubuntu 22.04, Rocky Linux 9${NC}"
+            echo -e "${YELLOW}Supported: Ubuntu 22.04/24.04, Debian 12, Rocky Linux 9${NC}"
             OS_TYPE="$OS_ID-$OS_VERSION"
             PKG_MGR="unknown"
             ;;

@@ -34,6 +34,33 @@
 
 **Other recent UI/two-server tweaks (2026-03-07):** TAK Server status area: control buttons (Restart, Restart DB, Sync DB password, etc.) moved to a second row below the status/CA text so the cert expiry (Root CA / Intermediate CA) doesn’t wrap. Cert banner: Intermediate CA shown on its own line below Root CA. Guard Dog: per-monitor green/red status dots (Port 8089, Process, Network, OOM, Disk, Cert, etc.) via `/api/guarddog/monitor-health`; cache-bust on guarddog.js with version query.
 
+### Post-v0.2.0 Backlog — Multi-OS Framework (Plan, not implemented)
+
+**Goal:** Keep Ubuntu behavior unchanged while adding safe cross-OS support (Debian family + Rocky/RHEL family) for local and future remote deploy targets.
+
+**Strategy (low-risk):**
+- **Adapter-first, no big-bang rewrite:** Introduce backend wrappers for package install, service control, firewall opens, and package-lock waits. Route existing code through wrappers gradually.
+- **Golden baseline:** Ubuntu flows are reference behavior; preserve existing commands/results while wrappers are introduced.
+- **Family/capability detection:** Detect `family` (`debian`/`rhel`), `pkg_mgr` (`apt`/`dnf`), `firewall_mgr` (`ufw`/`firewalld`), and service aliases (e.g. PostgreSQL unit names).
+- **Incremental migration order:** Caddy + Guard Dog firewall bits first, then TAK deploy/update paths, then remaining modules.
+- **Support tiers in UI/docs:** Tested (Ubuntu 22/24, Debian 12, Rocky 9), compatible/untested (RHEL 9/Alma), experimental (others) with clear preflight warnings.
+
+**Inputs captured for Rocky 9 mapping (from user scripts):**
+- `Rocky_9_Caddy_setup.sh`
+- `Rocky_9_TAK_Server_install.sh`
+- `Rocky_9_TAK_Server_Hardening.sh`
+
+**Key Rocky/RHEL behaviors to map into adapters:**
+- `dnf` + CRB/EPEL/PGDG repo handling
+- `firewall-cmd` (firewalld) port operations
+- PostgreSQL service naming differences (`postgresql` vs `postgresql-15`)
+- SELinux policy/apply step as best-effort path
+- Existing Guard Dog timers/health endpoint patterns (already mostly OS-neutral)
+
+**Current quick wins already done:**
+- `start.sh` now supports Debian 12 (bookworm) with `apt` (no longer `PKG_MGR=unknown`).
+- Guard Dog/Uptime health is now exposed via Caddy on `https://<infratak-host>/health` so Caddy regenerations (e.g., Node-RED deploy) keep the route.
+
 ### v0.1.9 (2026-03-06) — Domain sync hardening, Caddy alias, UX/docs updates
 
 **Authentik domain sync on Update (important):**

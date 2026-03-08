@@ -5,7 +5,7 @@ from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory, make_response)
 from werkzeug.security import check_password_hash, generate_password_hash
 from functools import wraps
-import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil, copy
+import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil, copy, tempfile
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -226,15 +226,27 @@ def detect_modules():
             nodered_running = True
     modules['nodered'] = {'name': 'Node-RED', 'installed': nodered_installed, 'running': nodered_running,
         'description': 'Flow-based automation & integrations', 'icon': '🔴', 'icon_url': NODERED_LOGO_URL_2, 'route': '/nodered', 'priority': 6}
-    # CloudTAK
+    # CloudTAK (local or remote deployment target)
     cloudtak_dir = os.path.expanduser('~/CloudTAK')
-    cloudtak_installed = os.path.exists(cloudtak_dir) and os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml'))
+    cloudtak_cfg = _get_cloudtak_deployment_config(settings)
+    cloudtak_installed = False
     cloudtak_running = False
-    r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
-    if r.stdout and 'Up' in r.stdout:
-        cloudtak_running = True
-    if not cloudtak_installed and cloudtak_running:
-        cloudtak_installed = True  # container up but dir missing (e.g. different user) — show as installed so card is accurate
+    if cloudtak_cfg.get('target_mode') == 'remote':
+        remote_cfg = cloudtak_cfg.get('remote', {})
+        if cloudtak_cfg.get('deployed') and (remote_cfg.get('host') or '').strip():
+            cloudtak_installed = True
+            ok, out = _ssh_probe(remote_cfg, "docker ps --filter name=cloudtak-api --format '{{.Status}}' 2>/dev/null", timeout=12)
+            cloudtak_running = bool(ok and out and 'Up' in out)
+    else:
+        cloudtak_installed = os.path.exists(cloudtak_dir) and (
+            os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml')) or
+            os.path.exists(os.path.join(cloudtak_dir, 'compose.yaml'))
+        )
+        r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+        if r.stdout and 'Up' in r.stdout:
+            cloudtak_running = True
+        if not cloudtak_installed and cloudtak_running:
+            cloudtak_installed = True  # container up but dir missing (e.g. different user) — show as installed so card is accurate
     modules['cloudtak'] = {'name': 'CloudTAK', 'installed': cloudtak_installed, 'running': cloudtak_running,
         'description': 'Web-based TAK client — browser access to TAK', 'icon': '☁️', 'icon_data': CLOUDTAK_ICON, 'route': '/cloudtak', 'priority': 7}
     # Email Relay (Postfix)
@@ -1717,6 +1729,14 @@ def _monitor_health_check(monitor_id):
             resp = urllib.request.urlopen(req, timeout=5)
             return resp.status in (200, 302, 301)
         if monitor_id == 'cloudtak_ctr':
+            settings = load_settings()
+            cfg = _get_cloudtak_deployment_config(settings)
+            if cfg.get('target_mode') == 'remote':
+                rcfg = cfg.get('remote', {})
+                if not cfg.get('deployed') or not (rcfg.get('host') or '').strip():
+                    return False
+                ok, out = _ssh_probe(rcfg, "docker ps --filter name=cloudtak-api --format '{{.Status}}' 2>/dev/null", timeout=10)
+                return bool(ok and out and 'Up' in out)
             r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}"', shell=True, capture_output=True, text=True, timeout=5)
             return bool(r.stdout and 'Up' in r.stdout)
     except Exception:
@@ -2366,20 +2386,31 @@ def nodered_page():
 @login_required
 def cloudtak_page():
     settings = load_settings()
+    cloudtak_cfg = _get_cloudtak_deployment_config(settings)
     cloudtak = detect_modules().get('cloudtak', {})
     container_info = {}
     if cloudtak.get('running'):
-        r = subprocess.run('docker ps --filter "name=cloudtak" --format "{{.Names}}|||{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
         containers = []
-        for line in (r.stdout or '').strip().split('\n'):
-            if line.strip():
-                parts = line.split('|||')
-                containers.append({'name': parts[0], 'status': parts[1] if len(parts) > 1 else ''})
+        if cloudtak_cfg.get('target_mode') == 'remote':
+            rcfg = cloudtak_cfg.get('remote', {})
+            ok, out = _ssh_probe(rcfg, "docker ps --filter 'name=cloudtak' --format '{{.Names}}|||{{.Status}}' 2>/dev/null", timeout=12)
+            if ok:
+                for line in (out or '').strip().split('\n'):
+                    if line.strip():
+                        parts = line.split('|||')
+                        containers.append({'name': parts[0], 'status': parts[1] if len(parts) > 1 else ''})
+        else:
+            r = subprocess.run('docker ps --filter "name=cloudtak" --format "{{.Names}}|||{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+            for line in (r.stdout or '').strip().split('\n'):
+                if line.strip():
+                    parts = line.split('|||')
+                    containers.append({'name': parts[0], 'status': parts[1] if len(parts) > 1 else ''})
         container_info['containers'] = containers
     return render_template_string(CLOUDTAK_TEMPLATE,
         settings=settings, cloudtak=cloudtak,
         version=VERSION,
         cloudtak_icon=CLOUDTAK_ICON,
+        cloudtak_cfg=cloudtak_cfg,
         container_info=container_info,
         deploying=cloudtak_deploy_status.get('running', False),
         deploy_done=cloudtak_deploy_status.get('complete', False),
@@ -2666,6 +2697,72 @@ def _get_service_domain(settings, service_key):
 def _get_all_service_domains(settings):
     """Return dict of service_key → current domain for all services."""
     return {k: _get_service_domain(settings, k) for k in SERVICE_DOMAIN_DEFAULTS}
+
+
+def _cloudtak_deployment_defaults():
+    """Default CloudTAK deployment config: local by default, optional remote target."""
+    return {
+        'target_mode': 'local',  # local | remote
+        'deployed': False,
+        'remote': {
+            'host': '',
+            'ssh_user': 'root',
+            'ssh_port': 22,
+            'auth_method': 'ssh_key',  # ssh_key | password
+            'ssh_key_path': '',
+            'ssh_password': '',
+            'os_family': 'ubuntu',
+        },
+    }
+
+
+def _normalize_cloudtak_deployment_config(cfg):
+    """Validate and normalize CloudTAK deployment settings."""
+    c = _deep_merge_dict(_cloudtak_deployment_defaults(), cfg or {})
+    mode = (c.get('target_mode') or 'local').strip().lower()
+    c['target_mode'] = 'remote' if mode == 'remote' else 'local'
+    c['deployed'] = bool(c.get('deployed', False))
+    r = c.get('remote', {}) if isinstance(c.get('remote'), dict) else {}
+    r['host'] = (r.get('host') or '').strip()
+    r['ssh_user'] = (r.get('ssh_user') or 'root').strip() or 'root'
+    try:
+        r['ssh_port'] = int(r.get('ssh_port') or 22)
+    except Exception:
+        r['ssh_port'] = 22
+    auth_method = (r.get('auth_method') or 'ssh_key').strip().lower()
+    r['auth_method'] = 'password' if auth_method == 'password' else 'ssh_key'
+    r['ssh_key_path'] = (r.get('ssh_key_path') or '').strip()
+    r['ssh_password'] = (r.get('ssh_password') or '').strip()
+    r['os_family'] = (r.get('os_family') or 'ubuntu').strip().lower() or 'ubuntu'
+    c['remote'] = r
+    if c['target_mode'] == 'local':
+        c['deployed'] = bool(c.get('deployed', False))
+    return c
+
+
+def _get_cloudtak_deployment_config(settings):
+    """Get normalized CloudTAK deployment config from settings."""
+    return _normalize_cloudtak_deployment_config(settings.get('cloudtak_deployment', {}))
+
+
+def _get_cloudtak_upstreams(settings):
+    """Return CloudTAK upstream endpoints for Caddy and readiness checks."""
+    cfg = _get_cloudtak_deployment_config(settings)
+    if cfg.get('target_mode') == 'remote':
+        host = (cfg.get('remote', {}).get('host') or '').strip()
+        if host:
+            return {
+                'map': f'{host}:5000',
+                'tiles': f'{host}:5002',
+                'video_hls': f'{host}:18888',
+                'video_api': f'{host}:9997',
+            }
+    return {
+        'map': '127.0.0.1:5000',
+        'tiles': '127.0.0.1:5002',
+        'video_hls': '127.0.0.1:18888',
+        'video_api': '127.0.0.1:9997',
+    }
 
 def _get_authentik_host(settings):
     """Return the hostname for the Authentik service (configurable via Caddy/Domains, default tak.<fqdn> = hub)."""
@@ -3006,26 +3103,27 @@ def generate_caddyfile(settings=None):
         ct_map = sd['cloudtak_map']
         ct_tiles = sd['cloudtak_tiles']
         ct_video = sd['cloudtak_video']
+        ct_up = _get_cloudtak_upstreams(settings)
         lines.append(f"# CloudTAK Web UI")
         lines.append(f"{ct_map} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:5000")
+        lines.append(f"    reverse_proxy {ct_up['map']}")
         lines.append(f"}}")
         lines.append("")
         lines.append(f"# CloudTAK Tile Server (CORS for map origin)")
         lines.append(f"{ct_tiles} {{")
         lines.append(f"    header Access-Control-Allow-Origin *")
-        lines.append(f"    reverse_proxy 127.0.0.1:5002")
+        lines.append(f"    reverse_proxy {ct_up['tiles']}")
         lines.append(f"}}")
         lines.append("")
         lines.append(f"# CloudTAK Media (video) — /stream/* → HLS, rest → MediaMTX API")
         lines.append(f"{ct_video} {{")
         lines.append(f"    handle /stream/* {{")
         lines.append(f"        header Access-Control-Allow-Origin *")
-        lines.append(f"        reverse_proxy 127.0.0.1:18888")
+        lines.append(f"        reverse_proxy {ct_up['video_hls']}")
         lines.append(f"    }}")
         lines.append(f"    handle {{")
         lines.append(f"        header Access-Control-Allow-Origin *")
-        lines.append(f"        reverse_proxy 127.0.0.1:9997")
+        lines.append(f"        reverse_proxy {ct_up['video_api']}")
         lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
@@ -4934,15 +5032,41 @@ cloudtak_deploy_status = {'running': False, 'complete': False, 'error': False}
 cloudtak_uninstall_status = {'running': False, 'done': False, 'error': None}
 _cloudtak_deploy_lock = threading.Lock()
 
+@app.route('/api/cloudtak/deployment-config', methods=['GET'])
+@login_required
+def cloudtak_get_deployment_config():
+    settings = load_settings()
+    return jsonify({'success': True, 'config': _get_cloudtak_deployment_config(settings)})
+
+
+@app.route('/api/cloudtak/deployment-config', methods=['POST'])
+@login_required
+def cloudtak_save_deployment_config():
+    data = request.get_json() or {}
+    incoming = data.get('config', data)
+    cfg = _normalize_cloudtak_deployment_config(incoming)
+    settings = load_settings()
+    settings['cloudtak_deployment'] = cfg
+    save_settings(settings)
+    return jsonify({'success': True, 'config': cfg})
+
+
 @app.route('/api/cloudtak/deploy', methods=['POST'])
 @login_required
 def cloudtak_deploy_api():
+    data = request.get_json() or {}
+    settings = load_settings()
+    cfg = _get_cloudtak_deployment_config(settings)
+    if isinstance(data.get('config'), dict):
+        cfg = _normalize_cloudtak_deployment_config(_deep_merge_dict(cfg, data.get('config')))
+        settings['cloudtak_deployment'] = cfg
+        save_settings(settings)
     with _cloudtak_deploy_lock:
         if cloudtak_deploy_status.get('running'):
             return jsonify({'error': 'Deployment already in progress'}), 409
         cloudtak_deploy_log.clear()
         cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
-        threading.Thread(target=run_cloudtak_deploy, daemon=True).start()
+        threading.Thread(target=run_cloudtak_deploy, args=(cfg,), daemon=True).start()
     return jsonify({'success': True})
 
 @app.route('/api/cloudtak/deploy/log')
@@ -4957,33 +5081,63 @@ def cloudtak_deploy_log_api():
 @login_required
 def cloudtak_redeploy_api():
     """Update .env and override, restart containers, re-apply nginx patch. Use when CloudTAK is already installed."""
+    data = request.get_json() or {}
+    settings = load_settings()
+    cfg = _get_cloudtak_deployment_config(settings)
+    if isinstance(data.get('config'), dict):
+        cfg = _normalize_cloudtak_deployment_config(_deep_merge_dict(cfg, data.get('config')))
+        settings['cloudtak_deployment'] = cfg
+        save_settings(settings)
     with _cloudtak_deploy_lock:
         if cloudtak_deploy_status.get('running'):
             return jsonify({'error': 'Another operation is in progress'}), 409
         cloudtak_deploy_log.clear()
         cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
         cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
-        threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
+        threading.Thread(target=run_cloudtak_redeploy, args=(cfg,), daemon=True).start()
     return jsonify({'success': True, 'message': 'Update config & restart started'})
 
 @app.route('/api/cloudtak/control', methods=['POST'])
 @login_required
 def cloudtak_control():
     action = (request.json or {}).get('action', '')
-    cloudtak_dir = os.path.expanduser('~/CloudTAK')
-    if action == 'start':
-        subprocess.run(f'cd {cloudtak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, timeout=60)
-    elif action == 'stop':
-        subprocess.run(f'cd {cloudtak_dir} && docker compose stop 2>&1', shell=True, capture_output=True, timeout=60)
-    elif action == 'restart':
-        subprocess.run(f'cd {cloudtak_dir} && docker compose restart 2>&1', shell=True, capture_output=True, timeout=60)
-    elif action == 'update':
-        subprocess.run(f'cd {cloudtak_dir} && ./cloudtak.sh update 2>&1', shell=True, capture_output=True, timeout=600)
+    settings = load_settings()
+    cfg = _get_cloudtak_deployment_config(settings)
+    if cfg.get('target_mode') == 'remote':
+        rcfg = cfg.get('remote', {})
+        if not (rcfg.get('host') or '').strip():
+            return jsonify({'error': 'Remote host not configured'}), 400
+        if action == 'start':
+            cmd = "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" up -d"
+        elif action == 'stop':
+            cmd = "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" stop"
+        elif action == 'restart':
+            cmd = "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" restart"
+        elif action == 'update':
+            cmd = "cd ~/CloudTAK && [ -x ./cloudtak.sh ] && ./cloudtak.sh update || (COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" pull && docker compose -f \"$COMPOSE_FILE\" up -d)"
+        else:
+            return jsonify({'error': 'Invalid action'}), 400
+        ok, out = _ssh_probe(rcfg, cmd, timeout=900 if action == 'update' else 120)
+        if not ok:
+            return jsonify({'error': (out or 'Remote action failed')[:220]}), 400
+        time.sleep(2)
+        ok, out = _ssh_probe(rcfg, "docker ps --filter name=cloudtak-api --format '{{.Status}}' 2>/dev/null", timeout=10)
+        running = bool(ok and out and 'Up' in out)
     else:
-        return jsonify({'error': 'Invalid action'}), 400
-    time.sleep(3)
-    r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
-    running = 'Up' in r.stdout
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        if action == 'start':
+            subprocess.run(f'cd {cloudtak_dir} && docker compose up -d 2>&1', shell=True, capture_output=True, timeout=60)
+        elif action == 'stop':
+            subprocess.run(f'cd {cloudtak_dir} && docker compose stop 2>&1', shell=True, capture_output=True, timeout=60)
+        elif action == 'restart':
+            subprocess.run(f'cd {cloudtak_dir} && docker compose restart 2>&1', shell=True, capture_output=True, timeout=60)
+        elif action == 'update':
+            subprocess.run(f'cd {cloudtak_dir} && ./cloudtak.sh update 2>&1', shell=True, capture_output=True, timeout=600)
+        else:
+            return jsonify({'error': 'Invalid action'}), 400
+        time.sleep(3)
+        r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+        running = 'Up' in r.stdout
     return jsonify({'success': True, 'running': running})
 
 @app.route('/api/cloudtak/logs')
@@ -4991,6 +5145,21 @@ def cloudtak_control():
 def cloudtak_container_logs():
     lines = request.args.get('lines', 80, type=int)
     container = request.args.get('container', '').strip()
+    settings = load_settings()
+    cfg = _get_cloudtak_deployment_config(settings)
+    if cfg.get('target_mode') == 'remote':
+        rcfg = cfg.get('remote', {})
+        if not (rcfg.get('host') or '').strip():
+            return jsonify({'entries': ['Remote host not configured']})
+        if container:
+            cmd = f"docker logs {container} --tail {lines} 2>&1"
+        else:
+            cmd = "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" logs --tail " + str(lines) + " 2>&1"
+        ok, out = _ssh_probe(rcfg, cmd, timeout=20)
+        entries = [l for l in ((out or '').strip().split('\n') if (out or '').strip() else []) if l.strip()]
+        if not ok and not entries:
+            entries = ['Could not fetch remote logs']
+        return jsonify({'entries': entries})
     cloudtak_dir = os.path.expanduser('~/CloudTAK')
     compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
     if not os.path.exists(compose_yml):
@@ -5018,17 +5187,27 @@ def cloudtak_uninstall():
     cloudtak_uninstall_status.update({'running': True, 'done': False, 'error': None})
     def do_uninstall():
         try:
-            cloudtak_dir = os.path.expanduser('~/CloudTAK')
-            compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
-            compose_yaml = os.path.join(cloudtak_dir, 'compose.yaml')
-            if os.path.exists(cloudtak_dir):
-                yml = compose_yml if os.path.exists(compose_yml) else (compose_yaml if os.path.exists(compose_yaml) else None)
-                if yml:
-                    subprocess.run(
-                        f'docker compose -f "{yml}" down -v --rmi local',
-                        shell=True, capture_output=True, timeout=180, cwd=cloudtak_dir
-                    )
-                subprocess.run(f'rm -rf "{cloudtak_dir}"', shell=True, capture_output=True, timeout=60)
+            settings = load_settings()
+            cfg = _get_cloudtak_deployment_config(settings)
+            if cfg.get('target_mode') == 'remote':
+                rcfg = cfg.get('remote', {})
+                if (rcfg.get('host') or '').strip():
+                    _ssh_probe(rcfg, "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; docker compose -f \"$COMPOSE_FILE\" down -v --rmi local 2>/dev/null || true; rm -rf ~/CloudTAK", timeout=240)
+            else:
+                cloudtak_dir = os.path.expanduser('~/CloudTAK')
+                compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+                compose_yaml = os.path.join(cloudtak_dir, 'compose.yaml')
+                if os.path.exists(cloudtak_dir):
+                    yml = compose_yml if os.path.exists(compose_yml) else (compose_yaml if os.path.exists(compose_yaml) else None)
+                    if yml:
+                        subprocess.run(
+                            f'docker compose -f "{yml}" down -v --rmi local',
+                            shell=True, capture_output=True, timeout=180, cwd=cloudtak_dir
+                        )
+                    subprocess.run(f'rm -rf "{cloudtak_dir}"', shell=True, capture_output=True, timeout=60)
+            cfg['deployed'] = False
+            settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
+            save_settings(settings)
             cloudtak_deploy_log.clear()
             cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
             generate_caddyfile()
@@ -5050,15 +5229,212 @@ def cloudtak_uninstall_status_api():
         'error': cloudtak_uninstall_status.get('error')
     })
 
-def run_cloudtak_deploy():
+def _cloudtak_build_env_content(settings, domain, signing_secret, minio_pass, remote_host=''):
+    """Build CloudTAK .env content for local or remote target."""
+    if domain:
+        api_url = f"https://map.{domain}"
+        pmtiles_url = f"https://tiles.map.{domain}"
+        media_url = f"https://video.{domain}"
+    else:
+        if remote_host:
+            api_url = f"http://{remote_host}:5000"
+            pmtiles_url = f"http://{remote_host}:5002"
+        else:
+            api_url = f"http://172.20.0.1:5000"
+            pmtiles_url = f"http://{settings.get('server_ip', '127.0.0.1')}:5002"
+        media_url = "http://media:9997"
+    return f"""CLOUDTAK_Mode=docker-compose
+CLOUDTAK_Config_media_url={media_url}
+
+SigningSecret={signing_secret}
+
+ASSET_BUCKET=cloudtak
+AWS_S3_Endpoint=http://store:9000
+AWS_S3_AccessKeyId=cloudtakminioadmin
+AWS_S3_SecretAccessKey={minio_pass}
+MINIO_ROOT_USER=cloudtakminioadmin
+MINIO_ROOT_PASSWORD={minio_pass}
+
+POSTGRES=postgres://docker:docker@postgis:5432/gis
+
+# API_URL must be reachable by the browser (for tile URLs in TileJSON). We set it to the public
+# map URL when domain is set so the map and basemaps render.
+API_URL={api_url}
+PMTILES_URL={pmtiles_url}
+
+# Port remapping — avoids conflicts with standalone MediaMTX which owns the original ports.
+# CloudTAK's docker-compose.yml supports these env vars natively (no override file needed).
+# MEDIA_PORT_API=9997 because video-service.ts hardcodes port 9997 for all MediaMTX API calls.
+# Standalone MediaMTX API moved to 9898 to free up 9997 for CloudTAK media container.
+MEDIA_PORT_API=9997
+MEDIA_PORT_RTSP=18554
+MEDIA_PORT_RTMP=11935
+MEDIA_PORT_HLS=18888
+MEDIA_PORT_SRT=18890
+"""
+
+
+def run_cloudtak_deploy(cfg=None):
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         cloudtak_deploy_log.append(entry)
         print(entry, flush=True)
     try:
-        cloudtak_dir = os.path.expanduser('~/CloudTAK')
         settings = load_settings()
+        cfg = cfg or _get_cloudtak_deployment_config(settings)
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
         domain = settings.get('fqdn', '')
+        target_mode = (cfg.get('target_mode') or 'local').strip().lower()
+
+        if target_mode == 'remote':
+            remote_cfg = cfg.get('remote', {})
+            remote_host = (remote_cfg.get('host') or '').strip()
+            if not remote_host:
+                plog("✗ Remote host not set. Save CloudTAK target settings first.")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog("━━━ Step 1/6: Checking remote SSH ━━━")
+            ok, out = _ssh_probe(remote_cfg, 'echo REMOTE_OK', timeout=20)
+            if not ok or 'REMOTE_OK' not in (out or ''):
+                plog(f"✗ Cannot SSH to remote CloudTAK host: {(out or '')[:200]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog(f"✓ SSH connected to {remote_host}")
+
+            plog("")
+            plog("━━━ Step 2/6: Ensuring Docker on remote ━━━")
+            docker_cmd = (
+                "if ! command -v docker >/dev/null 2>&1; then "
+                "curl -fsSL https://get.docker.com | sh; "
+                "fi; "
+                "(sudo systemctl enable docker >/dev/null 2>&1 || systemctl enable docker >/dev/null 2>&1 || true); "
+                "(sudo systemctl start docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1 || true); "
+                "docker --version"
+            )
+            ok, out = _ssh_probe(remote_cfg, docker_cmd, timeout=420)
+            if not ok:
+                plog(f"✗ Docker setup failed on remote: {(out or '')[:220]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog(f"✓ {((out or '').splitlines()[-1] if out else 'Docker ready')}")
+
+            plog("")
+            plog("━━━ Step 3/6: Cloning/Updating CloudTAK on remote ━━━")
+            prep_cmd = (
+                "if [ -d ~/CloudTAK/.git ]; then "
+                "cd ~/CloudTAK && git pull --rebase --autostash; "
+                "else "
+                "rm -rf ~/CloudTAK && git clone --depth 1 https://github.com/dfpc-coe/CloudTAK.git ~/CloudTAK; "
+                "fi; "
+                "test -f ~/CloudTAK/docker-compose.yml -o -f ~/CloudTAK/compose.yaml"
+            )
+            ok, out = _ssh_probe(remote_cfg, prep_cmd, timeout=600)
+            if not ok:
+                plog(f"✗ CloudTAK repo prep failed on remote: {(out or '')[:220]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog("✓ Remote repository ready")
+
+            plog("")
+            plog("━━━ Step 4/6: Writing CloudTAK config on remote ━━━")
+            import secrets as _secrets
+            signing_secret = _secrets.token_hex(32)
+            minio_pass = _secrets.token_hex(16)
+            env_content = _cloudtak_build_env_content(settings, domain, signing_secret, minio_pass, remote_host=remote_host)
+            override_yml = """# TAKWERX: API container must reach host (e.g. :5001 for Marti/TAK Server proxy)
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+"""
+            tmp_dir = tempfile.mkdtemp(prefix='cloudtak-remote-')
+            try:
+                env_tmp = os.path.join(tmp_dir, '.env')
+                ov_tmp = os.path.join(tmp_dir, 'docker-compose.override.yml')
+                with open(env_tmp, 'w') as f:
+                    f.write(env_content)
+                with open(ov_tmp, 'w') as f:
+                    f.write(override_yml)
+                ok1, o1 = _scp_to_host(remote_cfg, env_tmp, '/tmp/.env')
+                ok2, o2 = _scp_to_host(remote_cfg, ov_tmp, '/tmp/docker-compose.override.yml')
+                if not ok1 or not ok2:
+                    plog(f"✗ Could not copy CloudTAK config to remote: {((o1 or o2) or '')[:220]}")
+                    cloudtak_deploy_status.update({'running': False, 'error': True})
+                    return
+                mv_cmd = (
+                    "mv /tmp/.env ~/CloudTAK/.env && "
+                    "mv /tmp/docker-compose.override.yml ~/CloudTAK/docker-compose.override.yml"
+                )
+                ok, out = _ssh_probe(remote_cfg, mv_cmd, timeout=40)
+                if not ok:
+                    plog(f"✗ Could not place remote config files: {(out or '')[:220]}")
+                    cloudtak_deploy_status.update({'running': False, 'error': True})
+                    return
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            plog("✓ Remote .env and override written")
+
+            plog("")
+            plog("━━━ Step 5/6: Building/Starting remote containers ━━━")
+            run_cmd = (
+                "cd ~/CloudTAK && "
+                "COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; "
+                "docker compose -f \"$COMPOSE_FILE\" build && "
+                "docker compose -f \"$COMPOSE_FILE\" up -d"
+            )
+            ok, out = _ssh_probe(remote_cfg, run_cmd, timeout=3600)
+            if not ok:
+                plog(f"✗ Remote build/start failed: {(out or '')[:220]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            fw_cmd = (
+                "sudo ufw allow 5000/tcp >/dev/null 2>&1 || true; "
+                "sudo ufw allow 5002/tcp >/dev/null 2>&1 || true; "
+                "command -v firewall-cmd >/dev/null 2>&1 && "
+                "(sudo firewall-cmd --permanent --add-port=5000/tcp >/dev/null 2>&1 || true); "
+                "command -v firewall-cmd >/dev/null 2>&1 && "
+                "(sudo firewall-cmd --permanent --add-port=5002/tcp >/dev/null 2>&1 || true); "
+                "command -v firewall-cmd >/dev/null 2>&1 && (sudo firewall-cmd --reload >/dev/null 2>&1 || true)"
+            )
+            _ssh_probe(remote_cfg, fw_cmd, timeout=40)
+            ready_cmd = (
+                "python3 - <<'PY'\n"
+                "import urllib.request,sys,time\n"
+                "ok=False\n"
+                "for _ in range(120):\n"
+                "  try:\n"
+                "    r=urllib.request.urlopen('http://127.0.0.1:5000/api/connections', timeout=4)\n"
+                "    if r.getcode() in (200,401,403,404): ok=True; break\n"
+                "  except Exception:\n"
+                "    pass\n"
+                "  time.sleep(2)\n"
+                "print('READY' if ok else 'NOT_READY')\n"
+                "sys.exit(0 if ok else 1)\n"
+                "PY"
+            )
+            ok, out = _ssh_probe(remote_cfg, ready_cmd, timeout=270)
+            if ok and 'READY' in (out or ''):
+                plog("✓ Remote CloudTAK API is responding")
+            else:
+                plog("⚠ Remote CloudTAK API did not confirm readiness in time; continuing")
+
+            plog("")
+            plog("━━━ Step 6/6: Updating Caddy ━━━")
+            if domain:
+                generate_caddyfile(settings)
+                r = subprocess.run('systemctl reload caddy 2>&1', shell=True, capture_output=True, text=True, timeout=15)
+                if r.returncode == 0:
+                    plog(f"✓ Caddy updated — map.{domain} routed to remote CloudTAK")
+                else:
+                    plog(f"⚠ Caddy reload issue: {(r.stderr or r.stdout or '').strip()[:140]}")
+            else:
+                plog("⚠ No FQDN configured. Use remote direct URL on port 5000.")
+            cfg['deployed'] = True
+            settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
+            save_settings(settings)
+            plog("✓ CloudTAK remote deployment complete")
+            cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
+            return
 
         # Step 1: Check Docker
         plog("━━━ Step 1/7: Checking Docker ━━━")
@@ -5374,19 +5750,80 @@ services:
             plog(f"🎉 CloudTAK deployed! Open http://{server_ip}:5000 in your browser")
         plog(f"   Log in and go to Admin → Connections to configure your TAK Server")
         plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        cfg['deployed'] = True
+        settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
+        save_settings(settings)
         cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
 
     except Exception as e:
         plog(f"✗ Unexpected error: {str(e)}")
         cloudtak_deploy_status.update({'running': False, 'error': True})
 
-def run_cloudtak_redeploy():
+def run_cloudtak_redeploy(cfg=None):
     """Rewrite .env and override, restart stack, re-apply nginx patch. Reuses deploy log/status."""
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         cloudtak_deploy_log.append(entry)
         print(entry, flush=True)
     try:
+        settings = load_settings()
+        cfg = cfg or _get_cloudtak_deployment_config(settings)
+        if cfg.get('target_mode') == 'remote':
+            remote_cfg = cfg.get('remote', {})
+            remote_host = (remote_cfg.get('host') or '').strip()
+            if not remote_host:
+                plog("✗ Remote host not configured")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            plog(f"  Updating remote CloudTAK config on {remote_host}...")
+            domain = (settings.get('fqdn') or '').strip() or None
+            import secrets as _secrets
+            signing_secret = _secrets.token_hex(32)
+            minio_pass = _secrets.token_hex(16)
+            env_content = _cloudtak_build_env_content(settings, domain, signing_secret, minio_pass, remote_host=remote_host)
+            override_yml = """# TAKWERX: API container must reach host (e.g. :5001 for Marti/TAK Server proxy)
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+"""
+            tmp_dir = tempfile.mkdtemp(prefix='cloudtak-reremote-')
+            try:
+                env_tmp = os.path.join(tmp_dir, '.env')
+                ov_tmp = os.path.join(tmp_dir, 'docker-compose.override.yml')
+                with open(env_tmp, 'w') as f:
+                    f.write(env_content)
+                with open(ov_tmp, 'w') as f:
+                    f.write(override_yml)
+                ok1, o1 = _scp_to_host(remote_cfg, env_tmp, '/tmp/.env')
+                ok2, o2 = _scp_to_host(remote_cfg, ov_tmp, '/tmp/docker-compose.override.yml')
+                if not ok1 or not ok2:
+                    plog(f"✗ Could not copy config to remote: {((o1 or o2) or '')[:200]}")
+                    cloudtak_deploy_status.update({'running': False, 'error': True})
+                    return
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            cmd = (
+                "mv /tmp/.env ~/CloudTAK/.env && "
+                "mv /tmp/docker-compose.override.yml ~/CloudTAK/docker-compose.override.yml && "
+                "cd ~/CloudTAK && COMPOSE_FILE=docker-compose.yml; [ -f compose.yaml ] && COMPOSE_FILE=compose.yaml; "
+                "docker compose -f \"$COMPOSE_FILE\" restart"
+            )
+            ok, out = _ssh_probe(remote_cfg, cmd, timeout=180)
+            if not ok:
+                plog(f"✗ Restart failed: {(out or '')[:200]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            if domain:
+                generate_caddyfile(settings)
+                try:
+                    subprocess.run('systemctl reload caddy 2>/dev/null', shell=True, capture_output=True, timeout=45)
+                    plog("✓ Caddy reloaded")
+                except subprocess.TimeoutExpired:
+                    plog("⚠ Caddy reload timed out — reload manually if needed")
+            plog("✓ Update config & restart done (remote)")
+            cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
+            return
         cloudtak_dir = os.path.expanduser('~/CloudTAK')
         compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
         if not os.path.exists(compose_yml):
@@ -5395,7 +5832,6 @@ def run_cloudtak_redeploy():
             plog("✗ CloudTAK not found (no compose file)")
             cloudtak_deploy_status.update({'running': False, 'error': True})
             return
-        settings = load_settings()
         domain = (settings.get('fqdn') or '').strip() or None
         if domain:
             api_url = f"https://map.{domain}"
@@ -7547,6 +7983,54 @@ document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); }
 CLOUDTAK_PAGE_JS = r'''window.logIndex = 0;
 window.logInterval = null;
 
+window.collectDeployConfig = function() {
+  var modeEl = document.getElementById("cloudtak-target-mode");
+  var mode = modeEl ? modeEl.value : "local";
+  var cfg = { target_mode: mode };
+  if (mode === "remote") {
+    var host = (document.getElementById("cloudtak-remote-host") || {}).value || "";
+    var user = (document.getElementById("cloudtak-remote-user") || {}).value || "root";
+    var key = (document.getElementById("cloudtak-remote-key") || {}).value || "";
+    var portVal = (document.getElementById("cloudtak-remote-port") || {}).value || "22";
+    var p = parseInt(portVal, 10);
+    cfg.remote = {
+      host: host.trim(),
+      username: (user || "root").trim(),
+      port: isNaN(p) ? 22 : p,
+      ssh_key_path: key.trim()
+    };
+  }
+  return cfg;
+};
+
+window.toggleCloudtakTargetFields = function() {
+  var modeEl = document.getElementById("cloudtak-target-mode");
+  var remoteBox = document.getElementById("cloudtak-remote-fields");
+  if (!modeEl || !remoteBox) return;
+  remoteBox.style.display = modeEl.value === "remote" ? "block" : "none";
+};
+
+window.saveCloudtakTarget = function() {
+  var msg = document.getElementById("cloudtak-target-save-msg");
+  if (msg) msg.textContent = "Saving...";
+  var cfg = window.collectDeployConfig();
+  fetch("/api/cloudtak/deployment-config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({config: cfg}),
+    credentials: "same-origin"
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.success) {
+      if (msg) msg.textContent = "Saved";
+      setTimeout(function() { if (msg) msg.textContent = ""; }, 1600);
+    } else {
+      if (msg) msg.textContent = (d && d.error) ? d.error : "Save failed";
+    }
+  }).catch(function(e) {
+    if (msg) msg.textContent = "Save failed: " + (e && e.message ? e.message : String(e));
+  });
+};
+
 window.startRedeploy = function() {
   var btn = document.getElementById("redeploy-btn");
   var logCard = document.getElementById("log-card");
@@ -7569,7 +8053,7 @@ window.startRedeploy = function() {
   fetch("/api/cloudtak/redeploy", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({}),
+    body: JSON.stringify({config: window.collectDeployConfig()}),
     credentials: "same-origin"
   }).then(function(r) {
     if (!r.ok) {
@@ -7595,7 +8079,7 @@ window.startDeploy = function() {
   fetch("/api/cloudtak/deploy", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({})
+    body: JSON.stringify({config: window.collectDeployConfig()})
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.error) {
       document.getElementById("deploy-log-dyn").textContent = "Error: " + d.error;
@@ -7605,6 +8089,12 @@ window.startDeploy = function() {
     }
   });
 };
+
+document.addEventListener("DOMContentLoaded", function() {
+  var modeEl = document.getElementById("cloudtak-target-mode");
+  if (modeEl) modeEl.addEventListener("change", window.toggleCloudtakTargetFields);
+  window.toggleCloudtakTargetFields();
+});
 
 window.pollLog = function(redeployBtn) {
   if (window.logInterval) clearInterval(window.logInterval);
@@ -7843,6 +8333,43 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% else %}
   <div class="status-banner not-installed"><div class="dot"></div>CloudTAK is not installed</div>
   {% endif %}
+
+  <div class="card">
+    <div class="card-title">Deployment Target</div>
+    <div class="form-group">
+      <label class="form-label">Where should CloudTAK run?</label>
+      <select id="cloudtak-target-mode" class="form-input">
+        <option value="local" {% if cloudtak_cfg.target_mode != 'remote' %}selected{% endif %}>On this infra-TAK host</option>
+        <option value="remote" {% if cloudtak_cfg.target_mode == 'remote' %}selected{% endif %}>On a remote host (SSH)</option>
+      </select>
+    </div>
+    <div id="cloudtak-remote-fields" style="display:{% if cloudtak_cfg.target_mode == 'remote' %}block{% else %}none{% endif %}">
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">Remote Host/IP</label>
+          <input id="cloudtak-remote-host" class="form-input" type="text" placeholder="10.0.0.15" value="{{ cloudtak_cfg.remote.host or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">SSH Port</label>
+          <input id="cloudtak-remote-port" class="form-input" type="number" min="1" max="65535" value="{{ cloudtak_cfg.remote.port or 22 }}">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">SSH Username</label>
+          <input id="cloudtak-remote-user" class="form-input" type="text" placeholder="root" value="{{ cloudtak_cfg.remote.username or 'root' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">SSH Key Path (optional)</label>
+          <input id="cloudtak-remote-key" class="form-input" type="text" placeholder="~/.ssh/id_rsa" value="{{ cloudtak_cfg.remote.ssh_key_path or '' }}">
+        </div>
+      </div>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <button class="btn btn-ghost" type="button" onclick="saveCloudtakTarget()">Save target settings</button>
+      <span id="cloudtak-target-save-msg" style="font-size:12px;color:var(--text-dim)"></span>
+    </div>
+  </div>
 
   {% if cloudtak.installed %}
   <!-- Controls at top -->
