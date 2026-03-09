@@ -5575,17 +5575,27 @@ def cloudtak_bootstrap_server_api():
         payload_json = json.dumps(payload)
         import shlex
         ssh_curl_cmd = (
-            "curl -sf -X PATCH http://localhost:5000/api/server "
+            "curl -s -w '\\n%{http_code}' -X PATCH http://localhost:5000/api/server "
             "-H 'Content-Type: application/json' "
             f"-d {shlex.quote(payload_json)} "
             "--max-time 30"
         )
         ssh_ok, ssh_out = _ssh_probe(rcfg, ssh_curl_cmd, timeout=45)
-        if ssh_ok:
+        raw_lines = (ssh_out or '').strip().splitlines()
+        http_code = 0
+        resp_body = ''
+        if raw_lines:
             try:
-                body = json.loads((ssh_out or '').strip())
-            except Exception:
-                body = {}
+                http_code = int(raw_lines[-1].strip())
+                resp_body = '\n'.join(raw_lines[:-1]).strip()
+            except ValueError:
+                resp_body = '\n'.join(raw_lines).strip()
+        resp_json = {}
+        try:
+            resp_json = json.loads(resp_body) if resp_body else {}
+        except Exception:
+            pass
+        if ssh_ok and 200 <= http_code < 300:
             return jsonify({
                 'success': True,
                 'message': (
@@ -5595,14 +5605,12 @@ def cloudtak_bootstrap_server_api():
                 'p12_source': p12_source,
                 'api_base': 'http://localhost:5000 (via SSH)',
             })
-        # curl failed — parse error from output
-        err_body = {}
-        try:
-            err_body = json.loads((ssh_out or '').strip().splitlines()[-1])
-        except Exception:
-            pass
-        err_msg = (err_body.get('message') if isinstance(err_body, dict) else '') or (ssh_out or 'unknown error')[:300]
-        return jsonify({'success': False, 'error': f'CloudTAK bootstrap failed: {err_msg}', 'api_base': 'localhost:5000 (via SSH)'}), 400
+        err_msg = (resp_json.get('message') if isinstance(resp_json, dict) else '') or resp_body or (ssh_out or 'SSH curl failed')
+        return jsonify({
+            'success': False,
+            'error': f'CloudTAK bootstrap failed (HTTP {http_code}): {str(err_msg)[:300]}',
+            'api_base': 'localhost:5000 (via SSH)'
+        }), 400
 
     # Local target — hit API directly from this host.
     last_err = ''
