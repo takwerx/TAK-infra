@@ -6006,6 +6006,11 @@ services:
     environment:
       - NODE_TLS_REJECT_UNAUTHORIZED=0
       - API_URL=http://api:5000
+  media:
+    extra_hosts:
+{hosts_block}
+    environment:
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
 """
 
 
