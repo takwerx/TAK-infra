@@ -2887,6 +2887,63 @@ def _p12_bytes_to_pem(p12_bytes, password=''):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _ensure_cloudtak_container_connectivity(settings, rcfg, tak_host, marti_port):
+    """Ensure the remote CloudTAK Docker container can reach TAK Server.
+
+    Host-level preflight passes but containers may fail due to:
+    1) Docker DNS can't resolve the FQDN — fixed by pushing updated override with extra_hosts
+    2) iptables FORWARD chain drops outbound Docker traffic — fixed by adding ACCEPT rule
+    """
+    container_test_cmd = (
+        f'docker exec $(docker ps -qf name=api 2>/dev/null | head -1) '
+        f'node -e "'
+        f"const s=require('net').connect({marti_port},'{tak_host}',()=>{{console.log('OK');s.end();process.exit(0)}});"
+        f"s.on('error',e=>{{console.log('FAIL:'+e.code);process.exit(1)}});"
+        f"s.setTimeout(4000,()=>{{console.log('TIMEOUT');s.destroy();process.exit(1)}});"
+        f'"'
+    )
+    ok, out = _ssh_probe(rcfg, container_test_cmd, timeout=20)
+    result = (out or '').strip().splitlines()[-1] if out else ''
+    if ok and result == 'OK':
+        return
+
+    # Container can't reach TAK Server. Push updated override with extra_hosts and fix iptables.
+    override_yml = _cloudtak_build_override_yml(settings)
+    tmp_dir = tempfile.mkdtemp(prefix='cloudtak-fixconn-')
+    try:
+        ov_tmp = os.path.join(tmp_dir, 'docker-compose.override.yml')
+        with open(ov_tmp, 'w') as f:
+            f.write(override_yml)
+        _scp_to_host(rcfg, ov_tmp, '~/CloudTAK/docker-compose.override.yml')
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Ensure iptables FORWARD allows Docker outbound traffic
+    _ssh_probe(rcfg, (
+        'sudo iptables -C FORWARD -j ACCEPT 2>/dev/null || '
+        'sudo iptables -I FORWARD 1 -j ACCEPT 2>/dev/null || true'
+    ), timeout=10)
+
+    # Restart containers to pick up new override
+    _ssh_probe(rcfg, (
+        'cd ~/CloudTAK && '
+        '(docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true)'
+    ), timeout=60)
+
+    # Brief wait for containers to be ready
+    import time
+    time.sleep(5)
+
+    # Re-test connectivity from inside container
+    ok2, out2 = _ssh_probe(rcfg, container_test_cmd, timeout=20)
+    result2 = (out2 or '').strip().splitlines()[-1] if out2 else ''
+    if not ok2 or result2 != 'OK':
+        app.logger.warning(
+            'CloudTAK container still cannot reach TAK Server after fix attempt: %s', result2
+        )
+
+
 def _cloudtak_bootstrap_preflight(cfg, tak_host, cot_port, marti_port, webtak_port):
     """Connectivity check to TAK ports from CloudTAK target host perspective."""
     import socket
@@ -5494,6 +5551,12 @@ def cloudtak_bootstrap_server_api():
             ),
             'preflight': preflight,
         }), 400
+
+    # For remote deployments, ensure the Docker container can also reach the TAK server.
+    # Host-level preflight passes but Docker containers may be blocked by iptables FORWARD.
+    if cfg.get('target_mode') == 'remote':
+        rcfg = cfg.get('remote', {})
+        _ensure_cloudtak_container_connectivity(settings, rcfg, tak_host, int(marti_port))
 
     payload = {
         'name': server_name,
