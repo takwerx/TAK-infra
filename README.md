@@ -27,13 +27,15 @@ No more SSH. No more editing XML by hand. No more running scripts and hoping.
 ## Quick Start
 
 ```bash
-git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git
+git clone --depth 1 https://github.com/takwerx/infra-TAK.git
 cd infra-TAK
 chmod +x start.sh
 sudo ./start.sh
 ```
 
-For the stable branch use `git clone --depth 1 https://github.com/takwerx/infra-TAK.git` (no `-b dev`).
+If you explicitly want the development branch, use:
+
+`git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git`
 
 The script will:
 1. Detect your OS (**Ubuntu 22.04 only** for now; goal is a universal installer)
