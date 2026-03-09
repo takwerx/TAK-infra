@@ -5548,6 +5548,28 @@ def cloudtak_bootstrap_server_api():
     })
 
 
+@app.route('/api/cloudtak/bootstrap-admin-p12-status')
+@login_required
+def cloudtak_bootstrap_admin_p12_status_api():
+    """Check whether admin.p12 can be auto-loaded from TAK core."""
+    settings = load_settings()
+    p12_bytes, p12_loc, p12_err = _load_admin_p12_bytes_from_tak_core(settings)
+    if p12_bytes:
+        return jsonify({
+            'success': True,
+            'found': True,
+            'source': p12_loc,
+            'message': f'admin.p12 found ({p12_loc})',
+        })
+    return jsonify({
+        'success': True,
+        'found': False,
+        'source': p12_loc,
+        'error': p12_err,
+        'message': 'admin.p12 not found (upload still works)',
+    })
+
+
 @app.route('/api/cloudtak/deploy', methods=['POST'])
 @login_required
 def cloudtak_deploy_api():
@@ -8624,6 +8646,33 @@ window.bootstrapCloudtakServer = async function() {
   }
 };
 
+window.checkCloudtakAdminP12Status = function() {
+  var el = document.getElementById("cloudtak-admin-p12-status");
+  if (!el) return;
+  el.style.color = "var(--text-dim)";
+  el.textContent = "Checking admin.p12...";
+  fetch("/api/cloudtak/bootstrap-admin-p12-status", { credentials: "same-origin" })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d || d.success === false) {
+        el.style.color = "var(--red)";
+        el.textContent = (d && d.error) ? d.error : "Could not check admin.p12 status";
+        return;
+      }
+      if (d.found) {
+        el.style.color = "var(--green)";
+        el.textContent = d.message || "admin.p12 found";
+      } else {
+        el.style.color = "var(--yellow)";
+        el.textContent = d.message || "admin.p12 not found (upload still works)";
+      }
+    })
+    .catch(function(e) {
+      el.style.color = "var(--red)";
+      el.textContent = "Could not check admin.p12: " + (e && e.message ? e.message : String(e));
+    });
+};
+
 window._cloudtakSshStatus = function(msg, isError) {
   var el = document.getElementById("cloudtak-ssh-status");
   if (!el) return;
@@ -8773,6 +8822,7 @@ document.addEventListener("DOMContentLoaded", function() {
   var modeEl = document.getElementById("cloudtak-target-mode");
   if (modeEl) modeEl.addEventListener("change", window.toggleCloudtakTargetFields);
   window.toggleCloudtakTargetFields();
+  window.checkCloudtakAdminP12Status();
 });
 
 window.pollLog = function(redeployBtn) {
@@ -9014,6 +9064,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .svc-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px}
 .svc-name{color:var(--text-secondary);font-weight:600;margin-bottom:4px}
 .svc-status{font-size:11px}
+.collapse-card{margin-bottom:20px}
+.collapse-summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;padding:12px 2px;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;user-select:none}
+.collapse-summary::-webkit-details-marker{display:none}
+.collapse-summary .chev{transition:transform .2s ease;color:var(--text-dim)}
+.collapse-card[open] .collapse-summary .chev{transform:rotate(180deg)}
 </style></head>
 <body data-deploying="{{ 'true' if deploying else 'false' }}">
 {{ sidebar_html }}
@@ -9031,8 +9086,12 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   <div class="status-banner not-installed"><div class="dot"></div>CloudTAK is not installed</div>
   {% endif %}
 
-  <div class="card">
-    <div class="card-title">Deployment Target</div>
+  <details id="cloudtak-target-card" class="collapse-card" open>
+    <summary class="collapse-summary">
+      <span>Deployment Target</span>
+      <span class="chev">&#9662;</span>
+    </summary>
+  <div class="card" style="margin-bottom:0">
     <div class="form-group">
       <label class="form-label">Where should CloudTAK run?</label>
       <select id="cloudtak-target-mode" class="form-input">
@@ -9082,6 +9141,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       <span id="cloudtak-target-save-msg" style="font-size:12px;color:var(--text-dim)"></span>
     </div>
   </div>
+  </details>
 
   {% if cloudtak.installed %}
   <div class="card">
@@ -9095,6 +9155,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
       Defaults loaded: user <code>{{ cloudtak_bootstrap_user }}</code>, cert password <code>{{ cloudtak_cert_password }}</code>. Upload is optional if <code>/opt/tak/certs/files/admin.p12</code> exists.
     </p>
+    <p id="cloudtak-admin-p12-status" style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Checking admin.p12...</p>
     <div class="grid-2">
       <div class="form-group">
         <label class="form-label">Server Name</label>
