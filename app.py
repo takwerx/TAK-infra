@@ -5925,7 +5925,16 @@ def cloudtak_uninstall_status_api():
 
 def _cloudtak_build_env_content(settings, domain, signing_secret, minio_pass, remote_host=''):
     """Build CloudTAK .env content for local or remote target."""
-    if domain:
+    # Prefer explicit CloudTAK service domains when available (works even if fqdn is unset).
+    ct_map_host = (_get_service_domain(settings, 'cloudtak_map') or '').strip()
+    ct_tiles_host = (_get_service_domain(settings, 'cloudtak_tiles') or '').strip()
+    ct_video_host = (_get_service_domain(settings, 'cloudtak_video') or '').strip()
+
+    if ct_map_host and ct_tiles_host and ct_video_host:
+        api_url = f"https://{ct_map_host}"
+        pmtiles_url = f"https://{ct_tiles_host}"
+        media_url = f"https://{ct_video_host}"
+    elif domain:
         api_url = f"https://map.{domain}"
         pmtiles_url = f"https://tiles.map.{domain}"
         media_url = f"https://video.{domain}"
@@ -6252,55 +6261,7 @@ def run_cloudtak_deploy(cfg=None):
         signing_secret = _secrets.token_hex(32)
         minio_pass = _secrets.token_hex(16)
 
-        # Build URLs
-        # API_URL is used in two places: (1) TileJSON/tile URLs sent to the browser — must be
-        # reachable by the user's browser (public URL). (2) Media container callback to the API.
-        # We use the public URL when domain is set so the map and basemaps render. The media
-        # container then calls the same URL; on same-host deployments this usually works.
-        # If domain is not set, use Docker gateway so containers can reach the API.
-        if domain:
-            api_url = f"https://map.{domain}"
-            pmtiles_url = f"https://tiles.map.{domain}"
-        else:
-            api_url = f"http://172.20.0.1:5000"
-            pmtiles_url = f"http://{settings.get('server_ip', '127.0.0.1')}:5002"
-
-        if domain:
-            media_url = f"https://video.{domain}"
-        else:
-            media_url = "http://media:9997"
-
-        env_content = f"""CLOUDTAK_Mode=docker-compose
-CLOUDTAK_Config_media_url={media_url}
-
-SigningSecret={signing_secret}
-
-ASSET_BUCKET=cloudtak
-AWS_S3_Endpoint=http://store:9000
-AWS_S3_AccessKeyId=cloudtakminioadmin
-AWS_S3_SecretAccessKey={minio_pass}
-MINIO_ROOT_USER=cloudtakminioadmin
-MINIO_ROOT_PASSWORD={minio_pass}
-
-POSTGRES=postgres://docker:docker@postgis:5432/gis
-
-# API_URL must be reachable by the browser (for tile URLs in TileJSON). We set it to the public
-# map URL when domain is set so the map and basemaps render.
-API_URL={api_url}
-PMTILES_URL={pmtiles_url}
-
-# Port remapping — avoids conflicts with standalone MediaMTX which owns the original ports.
-# CloudTAK's docker-compose.yml supports these env vars natively (no override file needed).
-# MEDIA_PORT_API=9997 because video-service.ts hardcodes port 9997 for all MediaMTX API calls.
-# Standalone MediaMTX API moved to 9898 to free up 9997 for CloudTAK media container.
-MEDIA_PORT_API=9997
-MEDIA_PORT_RTSP=18554
-MEDIA_PORT_RTMP=11935
-MEDIA_PORT_HLS=18888
-MEDIA_PORT_SRT=18890
-
-NODE_TLS_REJECT_UNAUTHORIZED=0
-"""
+        env_content = _cloudtak_build_env_content(settings, domain, signing_secret, minio_pass)
         with open(env_path, 'w') as f:
             f.write(env_content)
 
@@ -6311,9 +6272,18 @@ NODE_TLS_REJECT_UNAUTHORIZED=0
             f.write(override_yml)
         plog("  docker-compose.override.yml written (api → host.docker.internal for :5001)")
 
+        api_url = ''
+        media_url = ''
+        for _line in env_content.splitlines():
+            if _line.startswith('API_URL='):
+                api_url = _line.split('=', 1)[1].strip()
+            elif _line.startswith('CLOUDTAK_Config_media_url='):
+                media_url = _line.split('=', 1)[1].strip()
         plog(f"✓ .env written")
-        plog(f"  API URL: {api_url}")
-        plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
+        if api_url:
+            plog(f"  API URL: {api_url}")
+        if media_url:
+            plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
 
         # Step 4: Build Docker images (stream output, 45 min timeout)
         plog("")
