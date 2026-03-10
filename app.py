@@ -8946,93 +8946,7 @@ window._fileToDataURL = function(file) {
   });
 };
 
-window.bootstrapCloudtakServer = async function() {
-  var status = document.getElementById("cloudtak-bootstrap-status");
-  function setStatus(msg, isErr) {
-    if (!status) return;
-    status.textContent = msg || "";
-    status.style.color = isErr ? "var(--red)" : "var(--text-dim)";
-  }
-  try {
-    var serverName = ((document.getElementById("ct-bootstrap-server-name") || {}).value || "TAK Core").trim();
-    var takHost = ((document.getElementById("ct-bootstrap-host") || {}).value || "").trim();
-    var cotPort = parseInt(((document.getElementById("ct-bootstrap-cot-port") || {}).value || "8089"), 10);
-    var martiPort = parseInt(((document.getElementById("ct-bootstrap-marti-port") || {}).value || "8443"), 10);
-    var webtakPort = parseInt(((document.getElementById("ct-bootstrap-webtak-port") || {}).value || "8446"), 10);
-    var takUser = ((document.getElementById("ct-bootstrap-user") || {}).value || "").trim();
-    var takPass = ((document.getElementById("ct-bootstrap-pass") || {}).value || "").trim();
-    var p12Pass = ((document.getElementById("ct-bootstrap-p12-pass") || {}).value || "").trim();
-    var p12Input = document.getElementById("ct-bootstrap-p12");
-    var file = p12Input && p12Input.files && p12Input.files[0] ? p12Input.files[0] : null;
-
-    if (!takHost) return setStatus("TAK core host/IP is required.", true);
-
-    var p12Data = "";
-    if (file) {
-      setStatus("Reading certificate...", false);
-      p12Data = await window._fileToDataURL(file);
-    }
-    setStatus("Bootstrapping CloudTAK server config...", false);
-
-    var payload = {
-      server_name: serverName || "TAK Core",
-      tak_host: takHost,
-      cot_port: isNaN(cotPort) ? 8089 : cotPort,
-      marti_port: isNaN(martiPort) ? 8443 : martiPort,
-      webtak_port: isNaN(webtakPort) ? 8446 : webtakPort,
-      tak_username: takUser,
-      tak_password: takPass,
-      p12_password: p12Pass,
-      p12_data: p12Data
-    };
-
-    var r = await fetch("/api/cloudtak/bootstrap-server", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload),
-      credentials: "same-origin"
-    });
-    var d = await r.json();
-    if (!r.ok || !d || !d.success) {
-      return setStatus((d && d.error) ? d.error : "Bootstrap failed", true);
-    }
-    var msg = d.message || "CloudTAK bootstrap applied. You can log in now.";
-    setStatus(msg, false);
-    if (d && d.server && d.server.host) {
-      var hostEl = document.getElementById("ct-bootstrap-host");
-      if (hostEl) hostEl.value = d.server.host;
-    }
-  } catch (e) {
-    setStatus("Bootstrap failed: " + (e && e.message ? e.message : String(e)), true);
-  }
-};
-
-window.checkCloudtakAdminP12Status = function() {
-  var el = document.getElementById("cloudtak-admin-p12-status");
-  if (!el) return;
-  el.style.color = "var(--text-dim)";
-  el.textContent = "Checking admin.p12...";
-  fetch("/api/cloudtak/bootstrap-admin-p12-status", { credentials: "same-origin" })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (!d || d.success === false) {
-        el.style.color = "var(--red)";
-        el.textContent = (d && d.error) ? d.error : "Could not check admin.p12 status";
-        return;
-      }
-      if (d.found) {
-        el.style.color = "var(--green)";
-        el.textContent = "✓ " + (d.message || "admin.p12 found");
-      } else {
-        el.style.color = "var(--yellow)";
-        el.textContent = "⚠ " + (d.message || "admin.p12 not found (upload still works)");
-      }
-    })
-    .catch(function(e) {
-      el.style.color = "var(--red)";
-      el.textContent = "Could not check admin.p12: " + (e && e.message ? e.message : String(e));
-    });
-};
+/* Bootstrap CloudTAK — deferred to v0.2.1 */
 
 window._cloudtakSshStatus = function(msg, isError) {
   var el = document.getElementById("cloudtak-ssh-status");
@@ -9183,7 +9097,6 @@ document.addEventListener("DOMContentLoaded", function() {
   var modeEl = document.getElementById("cloudtak-target-mode");
   if (modeEl) modeEl.addEventListener("change", window.toggleCloudtakTargetFields);
   window.toggleCloudtakTargetFields();
-  window.checkCloudtakAdminP12Status();
 });
 
 window.pollLog = function(redeployBtn) {
@@ -9500,68 +9413,6 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   </div>
 
   {% if cloudtak.installed %}
-  <div class="card">
-    <div class="card-title">Initial TAK Server Bootstrap</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
-      One-click CloudTAK first-time setup. This sends your TAK core host/ports, admin <code>.p12</code>, and TAK admin credentials to CloudTAK's <code>/api/server</code> endpoint.
-    </p>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
-      Tip: Use TAK cert hostname/FQDN (recommended) instead of raw IP for best TLS compatibility.
-    </p>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
-      Defaults loaded: user <code>{{ cloudtak_bootstrap_user }}</code>, cert password <code>{{ cloudtak_cert_password }}</code>. Upload is optional if <code>/opt/tak/certs/files/admin.p12</code> exists.
-    </p>
-    <div class="grid-2">
-      <div class="form-group">
-        <label class="form-label">Server Name</label>
-        <input id="ct-bootstrap-server-name" class="form-input" type="text" value="TAK Core">
-      </div>
-      <div class="form-group">
-        <label class="form-label">TAK Core Host/IP</label>
-        <input id="ct-bootstrap-host" class="form-input" type="text" value="{{ cloudtak_tak_suggest or settings.server_ip or '' }}" placeholder="10.0.0.20">
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="form-group">
-        <label class="form-label">CoT Port</label>
-        <input id="ct-bootstrap-cot-port" class="form-input" type="number" value="8089">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Marti Port</label>
-        <input id="ct-bootstrap-marti-port" class="form-input" type="number" value="8443">
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="form-group">
-        <label class="form-label">WebTAK Port</label>
-        <input id="ct-bootstrap-webtak-port" class="form-input" type="number" value="8446">
-      </div>
-      <div class="form-group">
-        <div id="cloudtak-admin-p12-status" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;font-family:'JetBrains Mono',monospace">Checking admin.p12...</div>
-        <label class="form-label">Admin Certificate (.p12)</label>
-        <input id="ct-bootstrap-p12" class="form-input" type="file" accept=".p12,.pfx,application/x-pkcs12">
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="form-group">
-        <label class="form-label">.p12 Password</label>
-        <input id="ct-bootstrap-p12-pass" class="form-input" type="password" value="{{ cloudtak_cert_password }}" placeholder="Certificate password">
-      </div>
-      <div class="form-group">
-        <label class="form-label">TAK Admin Username</label>
-        <input id="ct-bootstrap-user" class="form-input" type="text" value="{{ cloudtak_bootstrap_user }}" placeholder="admin">
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">TAK Admin Password</label>
-      <input id="ct-bootstrap-pass" class="form-input" type="password" value="{{ cloudtak_bootstrap_pass or '' }}" placeholder="TAK admin password">
-    </div>
-    <div class="controls">
-      <button type="button" class="btn btn-primary" onclick="bootstrapCloudtakServer()">⚡ Bootstrap CloudTAK from TAK Core</button>
-      <span id="cloudtak-bootstrap-status" style="font-size:12px;color:var(--text-dim)"></span>
-    </div>
-  </div>
-
   <!-- Controls at top -->
   <div class="card">
     <div class="card-title">Controls</div>
