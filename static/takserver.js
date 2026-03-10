@@ -745,11 +745,11 @@ function showDeployConfig(){
       '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:28px;margin-bottom:20px">',
       '<div style="font-family:\'JetBrains Mono\',monospace;font-size:13px;color:var(--text-dim);margin-bottom:20px;text-transform:uppercase;letter-spacing:1px;font-weight:600">Certificate Information <span style="color:var(--red);font-size:10px;margin-left:8px">ALL FIELDS REQUIRED</span></div>',
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">',
-      '<div class="form-field"><label>Country (2 letters)</label><input type="text" id="cert_country" placeholder="US" maxlength="2" style="text-transform:uppercase"></div>',
-      '<div class="form-field"><label>State/Province</label><input type="text" id="cert_state" placeholder="CA" style="text-transform:uppercase"></div>',
-      '<div class="form-field"><label>City</label><input type="text" id="cert_city" placeholder="SACRAMENTO" style="text-transform:uppercase"></div>',
-      '<div class="form-field"><label>Organization</label><input type="text" id="cert_org" placeholder="MYAGENCY" style="text-transform:uppercase"></div>',
-      '<div class="form-field"><label>Organizational Unit</label><input type="text" id="cert_ou" placeholder="IT" style="text-transform:uppercase"></div>',
+      '<div class="form-field"><label>Country (2 letters)</label><input type="text" id="cert_country" placeholder="US" maxlength="2" style="text-transform:uppercase" pattern="[A-Za-z0-9 \'()+,\\-./:=?]*" title="No underscores, @, #, ! — only letters, numbers, spaces, and basic punctuation"></div>',
+      '<div class="form-field"><label>State/Province</label><input type="text" id="cert_state" placeholder="CA" style="text-transform:uppercase" pattern="[A-Za-z0-9 \'()+,\\-./:=?]*" title="No underscores, @, #, ! — only letters, numbers, spaces, and basic punctuation"></div>',
+      '<div class="form-field"><label>City</label><input type="text" id="cert_city" placeholder="SACRAMENTO" style="text-transform:uppercase" pattern="[A-Za-z0-9 \'()+,\\-./:=?]*" title="No underscores, @, #, ! — only letters, numbers, spaces, and basic punctuation"></div>',
+      '<div class="form-field"><label>Organization</label><input type="text" id="cert_org" placeholder="MYAGENCY" style="text-transform:uppercase" pattern="[A-Za-z0-9 \'()+,\\-./:=?]*" title="No underscores, @, #, ! — only letters, numbers, spaces, and basic punctuation"></div>',
+      '<div class="form-field"><label>Organizational Unit</label><input type="text" id="cert_ou" placeholder="IT" style="text-transform:uppercase" pattern="[A-Za-z0-9 \'()+,\\-./:=?]*" title="No underscores, @, #, ! — only letters, numbers, spaces, and basic punctuation"></div>',
       '</div>',
       '<div style="font-family:\'JetBrains Mono\',monospace;font-size:13px;color:var(--text-dim);margin:24px 0 20px;text-transform:uppercase;letter-spacing:1px;font-weight:600">Certificate Authority Names</div>',
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">',
@@ -1195,6 +1195,9 @@ async function startDeploy(){
     const rf=[{id:'cert_country',l:'Country'},{id:'cert_state',l:'State'},{id:'cert_city',l:'City'},{id:'cert_org',l:'Organization'},{id:'cert_ou',l:'Org Unit'},{id:'root_ca_name',l:'Root CA'},{id:'intermediate_ca_name',l:'Intermediate CA'}];
     const empty=rf.filter(f=>!document.getElementById(f.id).value.trim());
     if(empty.length>0){alert('Please fill in: '+empty.map(f=>f.l).join(', '));empty.forEach(f=>{const el=document.getElementById(f.id);el.style.borderColor='var(--red)';el.addEventListener('input',()=>el.style.borderColor='',{once:true})});return}
+    const asn1ok=/^[A-Za-z0-9 '()+,\-./:=?]*$/;const certFields=[{id:'cert_country',l:'Country'},{id:'cert_state',l:'State'},{id:'cert_city',l:'City'},{id:'cert_org',l:'Organization'},{id:'cert_ou',l:'Org Unit'}];
+    const badFields=certFields.filter(f=>{const v=document.getElementById(f.id).value.trim();return v&&!asn1ok.test(v)});
+    if(badFields.length>0){alert('Invalid characters in: '+badFields.map(f=>f.l).join(', ')+'\n\nCertificate fields only allow: A-Z, 0-9, spaces, and \' ( ) + , - . / : = ?\n\nNo underscores, @, #, ! or special characters.');badFields.forEach(f=>{const el=document.getElementById(f.id);el.style.borderColor='var(--red)';el.addEventListener('input',()=>el.style.borderColor='',{once:true})});return}
     const aui=document.getElementById('enable_admin_ui').checked;
     if(aui){const p=document.getElementById('webadmin_password').value;const pc=document.getElementById('webadmin_password_confirm').value;if(!p){alert('Please set a webadmin password.');return}if(p!==pc){alert('Passwords do not match.');return}if(!validatePassword()){alert('Password does not meet requirements.');return}}
     const btn=document.getElementById('deploy-btn');btn.disabled=true;btn.textContent='Deploying...';btn.style.opacity='0.6';btn.style.cursor='not-allowed';

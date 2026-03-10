@@ -3000,6 +3000,25 @@ def _get_tak_cert_password(settings):
     return (settings.get('tak_cert_password') or 'atakatak').strip() or 'atakatak'
 
 
+import re as _re_module
+_ASN1_PRINTABLE_RE = _re_module.compile(r"^[A-Za-z0-9 '()+,\-./:=?]*$")
+
+
+def _sanitize_cert_field(value, field_name):
+    """Validate and sanitize a certificate metadata field for ASN1 PrintableString.
+
+    Rejects underscores, @, #, !, and other chars that break strict ASN1 parsers
+    (e.g. TakAware's Swift ASN1 library). Returns sanitized value or raises ValueError.
+    """
+    value = (value or '').strip()
+    if not value:
+        return value
+    if not _ASN1_PRINTABLE_RE.match(value):
+        bad = ''.join(c for c in value if not _ASN1_PRINTABLE_RE.match(c))
+        raise ValueError(f'{field_name} contains invalid characters for certificate fields: {bad!r}  — only A-Z, a-z, 0-9, spaces, and \' ( ) + , - . / : = ? are allowed')
+    return value
+
+
 def _get_webadmin_defaults(settings):
     """Default CloudTAK bootstrap TAK user creds."""
     return 'webadmin', (settings.get('webadmin_password') or '').strip()
@@ -14553,6 +14572,13 @@ def deploy_takserver():
     tak_deploy_cfg = _get_tak_deployment_config(settings)
     requested_mode = (data.get('deployment_mode') or tak_deploy_cfg.get('mode') or 'single_server').strip().lower()
     is_two_server = requested_mode == 'two_server'
+    try:
+        for field, key in [('Country', 'cert_country'), ('State', 'cert_state'),
+                           ('City', 'cert_city'), ('Organization', 'cert_org'),
+                           ('Organizational Unit', 'cert_ou')]:
+            _sanitize_cert_field(data.get(key, ''), field)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     pkg_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith('.deb') or f.endswith('.rpm')]
     if not pkg_files: return jsonify({'error': 'No package file found.'}), 400
     # For two-server, prefer the core .deb (database is on Server One)
@@ -14729,13 +14755,14 @@ def run_takserver_deploy(config):
         run_cmd('rm -rf /opt/tak/certs/files')
         run_cmd('cd /opt/tak/certs && cp cert-metadata.sh cert-metadata.sh.original 2>/dev/null; true')
         run_cmd('cd /opt/tak/certs && cp cert-metadata.sh.original cert-metadata.sh 2>/dev/null; true')
-        subs = [('COUNTRY=US', f'COUNTRY={config["cert_country"]}'),
-                ('STATE=${STATE}', f'STATE={config["cert_state"]}'),
-                ('CITY=${CITY}', f'CITY={config["cert_city"]}'),
-                ('ORGANIZATION=${ORGANIZATION:-TAK}', f'ORGANIZATION={config["cert_org"]}'),
-                ('ORGANIZATIONAL_UNIT=${ORGANIZATIONAL_UNIT}', f'ORGANIZATIONAL_UNIT={config["cert_ou"]}')]
-        for old, new in subs:
-            run_cmd(f'sed -i "s/{old}/{new}/g" /opt/tak/certs/cert-metadata.sh', check=False)
+        subs = [('COUNTRY', config['cert_country']),
+                ('STATE', config['cert_state']),
+                ('CITY', config['cert_city']),
+                ('ORGANIZATION', config['cert_org']),
+                ('ORGANIZATIONAL_UNIT', config['cert_ou'])]
+        for var, val in subs:
+            if val:
+                run_cmd(f'''sed -i 's/^{var}=.*/{var}={val}/' /opt/tak/certs/cert-metadata.sh''', check=False)
         run_cmd('chown -R tak:tak /opt/tak/certs/')
         log_step(f"Creating Root CA: {root_ca}...")
         run_cmd(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1', quiet=True)
