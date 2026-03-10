@@ -3051,6 +3051,52 @@ def _patch_openssl_string_mask(log_fn=None):
         log_fn("✓ Patched OpenSSL config: string_mask = nombstr (PrintableString for TAK client compatibility)")
 
 
+def _sanitize_coreconfig_name_entries():
+    """Fix invalid characters in CoreConfig.xml nameEntry values (e.g. underscores).
+
+    TAK clients like TakAware use nameEntry values from the signing config to
+    build CSRs with PrintableString encoding. Characters like underscores are
+    not allowed in PrintableString and cause enrollment failures.
+    Called automatically before TAK Server start/restart from the console.
+    Returns (changed: bool, message: str).
+    """
+    coreconfig = '/opt/tak/CoreConfig.xml'
+    if not os.path.exists(coreconfig):
+        return False, 'no_coreconfig'
+    try:
+        with open(coreconfig, 'r') as f:
+            content = f.read()
+    except Exception:
+        return False, 'coreconfig_unreadable'
+    if '<nameEntry' not in content:
+        return False, 'no_name_entries'
+    import re as _re
+    changed = False
+    def fix_value(m):
+        nonlocal changed
+        name, val = m.group(1), m.group(2)
+        cleaned = _re_module.sub(r'[^A-Za-z0-9 \'()+,\-./:=?]', ' ', val).strip()
+        if cleaned != val:
+            changed = True
+        return f'<nameEntry name="{name}" value="{cleaned}"/>'
+    patched = _re.sub(
+        r'<nameEntry\s+name="([^"]+)"\s+value="([^"]*)"\s*/>',
+        fix_value, content
+    )
+    if not changed:
+        return False, 'name_entries_ok'
+    try:
+        with open(coreconfig, 'w') as f:
+            f.write(patched)
+    except PermissionError:
+        tmp = os.path.join(BASE_DIR, 'CoreConfig.nameentry-fix.xml')
+        with open(tmp, 'w') as f:
+            f.write(patched)
+        subprocess.run(['sudo', 'cp', tmp, coreconfig],
+                       capture_output=True, text=True, timeout=10)
+    return True, 'Fixed invalid characters in CoreConfig.xml nameEntry values (replaced underscores with spaces)'
+
+
 def _get_webadmin_defaults(settings):
     """Default CloudTAK bootstrap TAK user creds."""
     return 'webadmin', (settings.get('webadmin_password') or '').strip()
@@ -13740,6 +13786,9 @@ def takserver_rotate_intca():
 
             log("")
             log("Step 8/8: Restarting TAK Server...")
+            ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+            if ne_changed:
+                log(f"  NameEntry fix: {ne_msg}")
             changed, resync_msg = _resync_ldap_credential_to_coreconfig()
             if changed:
                 log(f"  LDAP resync: {resync_msg}")
@@ -13955,6 +14004,9 @@ def takserver_rotate_rootca():
 
             log("")
             log("Step 8/8: Restarting TAK Server and updating TAK Portal...")
+            ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+            if ne_changed:
+                log(f"  NameEntry fix: {ne_msg}")
             changed, resync_msg = _resync_ldap_credential_to_coreconfig()
             if changed:
                 log(f"  LDAP resync: {resync_msg}")
@@ -14155,6 +14207,9 @@ def takserver_control():
     # Handle local TAK Server (Core)
     if target in ('core', 'both'):
         if action in ('start', 'restart'):
+            ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+            if ne_changed:
+                results['nameentry_fix'] = ne_msg
             changed, msg = _resync_ldap_credential_to_coreconfig()
             if changed:
                 results['ldap_resync'] = msg
@@ -14454,6 +14509,9 @@ def run_takserver_upgrade(pkg_path):
             ulog("Update failed (exit " + str(r.returncode) + ")")
             upgrade_status.update({'running': False, 'complete': False, 'error': True})
             return
+        ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+        if ne_changed:
+            ulog(f"NameEntry fix: {ne_msg}")
         changed, resync_msg = _resync_ldap_credential_to_coreconfig()
         if changed:
             ulog(f"LDAP resync: {resync_msg}")
@@ -14565,6 +14623,9 @@ def run_takserver_upgrade_two_server(core_pkg_path, db_pkg_path, s1_cfg, tak_cfg
         # Step 4: Start TAK Server
         ulog("")
         ulog("━━━ Step 4/4: Starting TAK Server ━━━")
+        ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+        if ne_changed:
+            ulog(f"NameEntry fix: {ne_msg}")
         changed, resync_msg = _resync_ldap_credential_to_coreconfig()
         if changed:
             ulog(f"LDAP resync: {resync_msg}")
@@ -14819,6 +14880,9 @@ def run_takserver_deploy(config):
         run_cmd(f'keytool -import -alias root-ca -file /opt/tak/certs/files/root-ca.pem -keystore /opt/tak/certs/files/truststore-{int_ca}.jks -storepass "{cert_pass}" -noprompt 2>&1', check=False)
         log_step("✓ Root CA imported into truststore (TAK clients trust chain complete)")
         log_step("Restarting TAK Server...")
+        ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+        if ne_changed:
+            log_step(f"  NameEntry fix: {ne_msg}")
         changed, resync_msg = _resync_ldap_credential_to_coreconfig()
         if changed:
             log_step(f"LDAP resync: {resync_msg}")
@@ -14896,6 +14960,9 @@ def run_takserver_deploy(config):
                     log_step(f"⚠ Could not verify JDBC URL: {e}")
         log_step("✓ CoreConfig.xml configured")
         log_step("Final restart...")
+        ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+        if ne_changed:
+            log_step(f"  NameEntry fix: {ne_msg}")
         changed, resync_msg = _resync_ldap_credential_to_coreconfig()
         if changed:
             log_step(f"LDAP resync: {resync_msg}")
@@ -14923,6 +14990,9 @@ def run_takserver_deploy(config):
             log_step("Creating webadmin user...")
             run_cmd(f"java -jar /opt/tak/utils/UserManager.jar usermod -A -p '{webadmin_pass}' webadmin 2>&1", check=False)
             log_step("✓ webadmin user created")
+        ne_changed, ne_msg = _sanitize_coreconfig_name_entries()
+        if ne_changed:
+            log_step(f"  NameEntry fix: {ne_msg}")
         changed, resync_msg = _resync_ldap_credential_to_coreconfig()
         if changed:
             log_step(f"LDAP resync: {resync_msg}")
