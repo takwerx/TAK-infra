@@ -2849,6 +2849,229 @@ def _get_cloudtak_deployment_config(settings):
     return _normalize_cloudtak_deployment_config(settings.get('cloudtak_deployment', {}))
 
 
+# ---------------------------------------------------------------------------
+# Generic module deployment config (reused by TAK Portal, Authentik,
+# MediaMTX, Node-RED — anything that supports local/remote deploy)
+# ---------------------------------------------------------------------------
+
+def _module_deployment_defaults():
+    """Default deployment config shared by all remote-capable modules."""
+    return {
+        'target_mode': 'local',
+        'deployed': False,
+        'remote': {
+            'host': '',
+            'ssh_user': 'root',
+            'ssh_port': 22,
+            'auth_method': 'ssh_key',
+            'ssh_key_path': '',
+            'ssh_password': '',
+            'os_family': 'ubuntu',
+        },
+    }
+
+
+def _normalize_module_deployment_config(cfg):
+    """Validate and normalize deployment settings for any module."""
+    c = _deep_merge_dict(_module_deployment_defaults(), cfg or {})
+    mode = (c.get('target_mode') or 'local').strip().lower()
+    c['target_mode'] = 'remote' if mode == 'remote' else 'local'
+    c['deployed'] = bool(c.get('deployed', False))
+    r = c.get('remote', {}) if isinstance(c.get('remote'), dict) else {}
+    r['host'] = (r.get('host') or '').strip()
+    r['ssh_user'] = (r.get('ssh_user') or r.get('username') or 'root').strip() or 'root'
+    try:
+        r['ssh_port'] = int((r.get('ssh_port') if r.get('ssh_port') is not None else r.get('port')) or 22)
+    except Exception:
+        r['ssh_port'] = 22
+    auth_method = (r.get('auth_method') or 'ssh_key').strip().lower()
+    r['auth_method'] = 'password' if auth_method == 'password' else 'ssh_key'
+    r['ssh_key_path'] = (r.get('ssh_key_path') or '').strip()
+    r['ssh_password'] = (r.get('ssh_password') or '').strip()
+    r['os_family'] = (r.get('os_family') or 'ubuntu').strip().lower() or 'ubuntu'
+    r['username'] = r['ssh_user']
+    r['port'] = r['ssh_port']
+    c['remote'] = r
+    return c
+
+
+def _get_module_deployment_config(settings, key):
+    """Get normalized deployment config for a module by settings key."""
+    return _normalize_module_deployment_config(settings.get(key, {}))
+
+
+def _module_deployment_settings_key(module_name):
+    """Settings key for a module's deployment config. e.g. 'takportal' -> 'takportal_deployment'."""
+    return f'{module_name}_deployment'
+
+
+def _module_run(deploy_cfg, cmd, timeout=120, log_fn=None):
+    """Run a command locally or remotely based on deployment config.
+
+    Returns (ok: bool, output: str).
+    """
+    if deploy_cfg.get('target_mode') == 'remote':
+        remote = deploy_cfg.get('remote', {})
+        if log_fn:
+            log_fn(f"  [remote] {cmd[:80]}...")
+        return _ssh_probe(remote, cmd, timeout=timeout)
+    else:
+        if log_fn:
+            log_fn(f"  [local] {cmd[:80]}...")
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            return r.returncode == 0, (r.stdout or '') + (r.stderr or '')
+        except Exception as e:
+            return False, str(e)
+
+
+def _module_copy(deploy_cfg, local_path, remote_path, timeout=30, log_fn=None):
+    """Copy a file locally or remotely based on deployment config.
+
+    Returns (ok: bool, output: str).
+    """
+    if deploy_cfg.get('target_mode') == 'remote':
+        remote = deploy_cfg.get('remote', {})
+        if log_fn:
+            log_fn(f"  [scp] {os.path.basename(local_path)} -> {remote_path}")
+        return _scp_to_host(remote, local_path, remote_path, timeout=timeout)
+    else:
+        if log_fn:
+            log_fn(f"  [copy] {local_path} -> {remote_path}")
+        try:
+            os.makedirs(os.path.dirname(remote_path), exist_ok=True)
+            shutil.copy2(local_path, remote_path)
+            return True, 'ok'
+        except Exception as e:
+            return False, str(e)
+
+
+def _register_module_remote_routes(module_name, settings_key):
+    """Register generic deployment-config, SSH key, and test routes for a module.
+
+    Creates:
+      GET  /api/{module}/deployment-config
+      POST /api/{module}/deployment-config
+      POST /api/{module}/remote/ensure-ssh-key
+      POST /api/{module}/remote/install-ssh-key
+      POST /api/{module}/remote/test
+    """
+    key_label = f'infra-tak-{module_name}-remote'
+    default_key_path = os.path.expanduser(f'~/.ssh/infra-tak-{module_name}')
+
+    @app.route(f'/api/{module_name}/deployment-config', methods=['GET'], endpoint=f'{module_name}_get_deploy_cfg')
+    @login_required
+    def get_cfg():
+        settings = load_settings()
+        return jsonify(_get_module_deployment_config(settings, settings_key))
+
+    @app.route(f'/api/{module_name}/deployment-config', methods=['POST'], endpoint=f'{module_name}_save_deploy_cfg')
+    @login_required
+    def save_cfg():
+        data = request.get_json() or {}
+        settings = load_settings()
+        cfg = _normalize_module_deployment_config(data.get('config') or data)
+        settings[settings_key] = cfg
+        save_settings(settings)
+        return jsonify(cfg)
+
+    @app.route(f'/api/{module_name}/remote/ensure-ssh-key', methods=['POST'], endpoint=f'{module_name}_ensure_ssh_key')
+    @login_required
+    def ensure_key():
+        data = request.get_json() or {}
+        settings = load_settings()
+        cfg = _get_module_deployment_config(settings, settings_key)
+        if isinstance(data.get('config'), dict):
+            cfg = _normalize_module_deployment_config(_deep_merge_dict(cfg, data['config']))
+        rcfg = cfg.get('remote', {})
+        kp = (rcfg.get('ssh_key_path') or '').strip() or default_key_path
+        kp = os.path.expanduser(kp)
+        pub = kp + '.pub'
+        if not os.path.exists(kp):
+            kdir = os.path.dirname(kp)
+            if kdir and not os.path.isdir(kdir):
+                os.makedirs(kdir, mode=0o700, exist_ok=True)
+            subprocess.run(['ssh-keygen', '-t', 'ed25519', '-N', '', '-f', kp, '-C', key_label],
+                           capture_output=True, text=True, timeout=30, check=True)
+        fp = ''
+        try:
+            r = subprocess.run(['ssh-keygen', '-l', '-f', pub], capture_output=True, text=True, timeout=5)
+            fp = (r.stdout or '').strip() if r.returncode == 0 else ''
+        except Exception:
+            pass
+        pk = ''
+        try:
+            with open(pub, 'r') as f:
+                pk = f.read().strip()
+        except Exception:
+            pass
+        cfg['remote'] = cfg.get('remote') or {}
+        cfg['target_mode'] = 'remote'
+        cfg['remote']['ssh_key_path'] = kp
+        settings[settings_key] = _normalize_module_deployment_config(cfg)
+        save_settings(settings)
+        return jsonify({'success': True, 'key_path': kp, 'public_key': pk, 'fingerprint': fp,
+                        'config': settings[settings_key]})
+
+    @app.route(f'/api/{module_name}/remote/install-ssh-key', methods=['POST'], endpoint=f'{module_name}_install_ssh_key')
+    @login_required
+    def install_key():
+        data = request.get_json() or {}
+        pwd = (data.get('password') or '').strip()
+        if not pwd:
+            return jsonify({'success': False, 'error': 'Password is required'}), 400
+        settings = load_settings()
+        cfg = _get_module_deployment_config(settings, settings_key)
+        if isinstance(data.get('config'), dict):
+            cfg = _normalize_module_deployment_config(_deep_merge_dict(cfg, data['config']))
+        rcfg = cfg.get('remote', {})
+        host = rcfg.get('host', '')
+        user = rcfg.get('ssh_user', 'root')
+        port = rcfg.get('ssh_port', 22)
+        kp = (rcfg.get('ssh_key_path') or '').strip() or default_key_path
+        kp = os.path.expanduser(kp)
+        pub = kp + '.pub'
+        if not os.path.exists(pub):
+            return jsonify({'success': False, 'error': 'No public key found. Generate one first.'}), 400
+        if not host:
+            return jsonify({'success': False, 'error': 'Remote host is required'}), 400
+        cmd = ['sshpass', '-p', pwd, 'ssh-copy-id', '-i', pub,
+               '-o', 'StrictHostKeyChecking=no', '-p', str(port), f'{user}@{host}']
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return jsonify({'success': False, 'error': (r.stderr or r.stdout or 'ssh-copy-id failed')[:400]}), 400
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)[:400]}), 400
+        cfg['remote']['ssh_key_path'] = kp
+        cfg['remote']['auth_method'] = 'ssh_key'
+        cfg['target_mode'] = 'remote'
+        settings[settings_key] = _normalize_module_deployment_config(cfg)
+        save_settings(settings)
+        return jsonify({'success': True, 'message': 'SSH key installed', 'config': settings[settings_key]})
+
+    @app.route(f'/api/{module_name}/remote/test', methods=['POST'], endpoint=f'{module_name}_test_ssh')
+    @login_required
+    def test_ssh():
+        data = request.get_json() or {}
+        settings = load_settings()
+        cfg = _get_module_deployment_config(settings, settings_key)
+        if isinstance(data.get('config'), dict):
+            cfg = _normalize_module_deployment_config(_deep_merge_dict(cfg, data['config']))
+        rcfg = cfg.get('remote', {})
+        if not rcfg.get('host'):
+            return jsonify({'success': False, 'error': 'No remote host configured'}), 400
+        ok, out = _ssh_probe(rcfg, 'echo REMOTE_OK && docker --version 2>/dev/null', timeout=15)
+        return jsonify({'success': ok, 'output': (out or '')[:500]})
+
+
+# Register remote deploy routes for all remote-capable modules
+_register_module_remote_routes('takportal', 'takportal_deployment')
+_register_module_remote_routes('authentik', 'authentik_deployment')
+_register_module_remote_routes('mediamtx', 'mediamtx_deployment')
+_register_module_remote_routes('nodered', 'nodered_deployment')
+
+
 def _get_cloudtak_upstreams(settings):
     """Return CloudTAK upstream endpoints for Caddy and readiness checks."""
     cfg = _get_cloudtak_deployment_config(settings)
