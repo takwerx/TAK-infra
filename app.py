@@ -3070,7 +3070,10 @@ def _register_module_remote_routes(module_name, settings_key):
         rcfg = cfg.get('remote', {})
         if not rcfg.get('host'):
             return jsonify({'success': False, 'error': 'No remote host configured'}), 400
-        ok, out = _ssh_probe(rcfg, 'echo REMOTE_OK && docker --version 2>/dev/null', timeout=15)
+        test_cmd = 'echo REMOTE_OK && uname -a'
+        if module_name in ('cloudtak', 'authentik', 'nodered'):
+            test_cmd = 'echo REMOTE_OK && docker --version 2>/dev/null'
+        ok, out = _ssh_probe(rcfg, test_cmd, timeout=15)
         return jsonify({'success': ok, 'output': (out or '')[:500]})
 
 
