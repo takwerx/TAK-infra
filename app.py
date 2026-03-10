@@ -3019,6 +3019,38 @@ def _sanitize_cert_field(value, field_name):
     return value
 
 
+def _patch_openssl_string_mask(log_fn=None):
+    """Patch system openssl.cnf to use PrintableString instead of UTF8String.
+
+    Many modern distros ship string_mask = utf8only which encodes cert subject
+    fields as UTF8STRING. Some TAK clients (TakAware/Swift) require the standard
+    PRINTABLESTRING encoding. This patches the system config to use 'nombstr'
+    which selects PrintableString for ASCII-only values.
+    """
+    cnf = '/etc/ssl/openssl.cnf'
+    if not os.path.exists(cnf):
+        return
+    try:
+        with open(cnf, 'r') as f:
+            content = f.read()
+    except Exception:
+        return
+    if 'string_mask = utf8only' not in content:
+        return
+    patched = content.replace('string_mask = utf8only', 'string_mask = nombstr')
+    try:
+        with open(cnf, 'w') as f:
+            f.write(patched)
+    except PermissionError:
+        tmp = '/tmp/_openssl_cnf_patch.txt'
+        with open(tmp, 'w') as f:
+            f.write(patched)
+        subprocess.run(['sudo', 'cp', tmp, cnf], capture_output=True, timeout=10)
+        os.remove(tmp)
+    if log_fn:
+        log_fn("✓ Patched OpenSSL config: string_mask = nombstr (PrintableString for TAK client compatibility)")
+
+
 def _get_webadmin_defaults(settings):
     """Default CloudTAK bootstrap TAK user creds."""
     return 'webadmin', (settings.get('webadmin_password') or '').strip()
@@ -13616,6 +13648,8 @@ def takserver_rotate_intca():
             run(f'cp {cert_dir}/root-ca-trusted.pem {cert_dir}/ca-trusted.pem')
             log("✓ Root CA files restored")
 
+            _patch_openssl_string_mask()
+
             log("")
             log(f"Step 2/7: Creating new Intermediate CA: {new_ca_name}...")
             run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null')
@@ -13866,6 +13900,8 @@ def takserver_rotate_rootca():
             run('chown -R tak:tak /opt/tak/certs/')
             log("✓ Old cert files cleared")
 
+            _patch_openssl_string_mask()
+
             log("")
             log(f"Step 2/8: Creating new Root CA: {new_root_name}...")
             run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null')
@@ -14014,6 +14050,7 @@ def takserver_create_client_cert():
     groups_out = data.get('groups_out', [])
 
     try:
+        _patch_openssl_string_mask()
         subprocess.run('chmod +r /opt/tak/certs/cert-metadata.sh 2>/dev/null', shell=True, capture_output=True)
         r = subprocess.run(
             f'sudo -u tak bash -c "cd /opt/tak/certs && ./makeCert.sh client {cert_name}" 2>&1',
@@ -14763,6 +14800,9 @@ def run_takserver_deploy(config):
         for var, val in subs:
             if val:
                 run_cmd(f'''sed -i 's/^{var}=.*/{var}={val}/' /opt/tak/certs/cert-metadata.sh''', check=False)
+
+        _patch_openssl_string_mask(log_step)
+
         run_cmd('chown -R tak:tak /opt/tak/certs/')
         log_step(f"Creating Root CA: {root_ca}...")
         run_cmd(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1', quiet=True)
