@@ -13125,15 +13125,20 @@ def takserver_connect_ldap():
             diag.append('App policies: LDAP open to all authenticated users')
     except Exception as e:
         diag.append(f'App policies: {str(e)[:60]}')
+    # Resync LDAP credential BEFORE bind test so drifted password can't block the fix
+    changed, resync_msg = _resync_ldap_credential_to_coreconfig()
+    if changed:
+        diag.append(f'Credential resync: {resync_msg}')
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
         if '-w' in (msg or ''):
             msg = 'ldapsearch timed out or failed (check Authentik LDAP outpost logs)'
-        return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
-    diag.append(f'Service account: {msg}')
-    ok, err = _ensure_authentik_webadmin()
-    if not ok:
-        diag.append(f'WebAdmin: {err}')
+        diag.append(f'Service account: LDAP bind failed ({msg}) — continuing with CoreConfig patch')
+    else:
+        diag.append(f'Service account: {msg}')
+    ok_wa, err_wa = _ensure_authentik_webadmin()
+    if not ok_wa:
+        diag.append(f'WebAdmin: {err_wa}')
     else:
         diag.append('WebAdmin: OK')
     ok, msg = _apply_ldap_to_coreconfig()
