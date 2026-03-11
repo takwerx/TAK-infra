@@ -3117,13 +3117,16 @@ def _get_mediamtx_upstream(settings):
 
 
 def _get_mediamtx_hls_upstream(settings):
-    """Return MediaMTX HLS upstream for Caddy (127.0.0.1:8888 or remote_host:8888)."""
+    """Return (upstream, hls_encrypted) for MediaMTX HLS in Caddy."""
+    mtx_domain = _get_service_domain(settings, 'mediamtx') if settings.get('fqdn') else ''
+    cert_base = '/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory'
+    hls_encrypted = bool(mtx_domain and os.path.exists(f'{cert_base}/{mtx_domain}/{mtx_domain}.crt'))
     cfg = _get_module_deployment_config(settings, 'mediamtx_deployment')
     if cfg.get('target_mode') == 'remote':
         host = (cfg.get('remote', {}).get('host') or '').strip()
         if host:
-            return f'{host}:8888'
-    return '127.0.0.1:8888'
+            return f'{host}:8888', hls_encrypted
+    return '127.0.0.1:8888', hls_encrypted
 
 
 def _get_takportal_upstream(settings):
@@ -3869,11 +3872,18 @@ def generate_caddyfile(settings=None):
     if mtx.get('installed'):
         mtx_host = sd['mediamtx']
         mtx_up = _get_mediamtx_upstream(settings)
-        mtx_hls = _get_mediamtx_hls_upstream(settings)
+        mtx_hls, hls_enc = _get_mediamtx_hls_upstream(settings)
         lines.append(f"# MediaMTX Web Console")
         lines.append(f"{mtx_host} {{")
         lines.append(f"    handle_path /hls-proxy/* {{")
-        lines.append(f"        reverse_proxy {mtx_hls}")
+        if hls_enc:
+            lines.append(f"        reverse_proxy https://{mtx_hls} {{")
+            lines.append(f"            transport http {{")
+            lines.append(f"                tls_server_name {mtx_host}")
+            lines.append(f"            }}")
+            lines.append(f"        }}")
+        else:
+            lines.append(f"        reverse_proxy {mtx_hls}")
         lines.append(f"    }}")
         if ak.get('installed'):
             lines.append(f"    route /watch/* {{")
