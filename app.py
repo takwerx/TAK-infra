@@ -8731,19 +8731,36 @@ def nodered_uninstall():
         auth = load_auth()
         if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
             return jsonify({'error': 'Invalid admin password'}), 403
-        nr_dir = os.path.expanduser('~/node-red')
-        compose = os.path.join(nr_dir, 'docker-compose.yml')
-        if os.path.exists(compose):
-            subprocess.run(f'docker compose -f "{compose}" down -v 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
-        if os.path.exists(nr_dir):
-            subprocess.run(f'rm -rf "{nr_dir}"', shell=True, capture_output=True, timeout=10)
+        settings = load_settings()
+        deploy_cfg = _get_module_deployment_config(settings, 'nodered_deployment')
+        steps = []
+        if deploy_cfg.get('target_mode') == 'remote' and (deploy_cfg.get('remote', {}).get('host') or '').strip():
+            remote = deploy_cfg.get('remote', {})
+            ok, out = _ssh_probe(remote, 'cd ~/node-red && docker compose down -v 2>&1; rm -rf ~/node-red 2>/dev/null; true', timeout=90)
+            if not ok:
+                return jsonify({'error': f'Remote uninstall failed: {(out or "unknown error")[:200]}'}), 500
+            steps.append('Stopped and removed Node-RED on remote host')
+            deploy_cfg['deployed'] = False
+            settings['nodered_deployment'] = _normalize_module_deployment_config(deploy_cfg)
+            save_settings(settings)
+        else:
+            nr_dir = os.path.expanduser('~/node-red')
+            compose = os.path.join(nr_dir, 'docker-compose.yml')
+            if os.path.exists(compose):
+                subprocess.run(f'docker compose -f "{compose}" down -v 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+            if os.path.exists(nr_dir):
+                subprocess.run(f'rm -rf "{nr_dir}"', shell=True, capture_output=True, timeout=10)
+            steps.append('Node-RED container and data removed')
+            deploy_cfg['deployed'] = False
+            settings['nodered_deployment'] = _normalize_module_deployment_config(deploy_cfg)
+            save_settings(settings)
         nodered_deploy_log.clear()
         nodered_deploy_status.update({'running': False, 'complete': False, 'error': False})
-        settings = load_settings()
         if settings.get('fqdn'):
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
-        return jsonify({'success': True, 'steps': ['Node-RED container and data removed', 'Caddyfile updated']})
+            steps.append('Caddyfile updated')
+        return jsonify({'success': True, 'steps': steps})
     except Exception as e:
         return jsonify({'error': f'Uninstall failed: {str(e)}'}), 500
 
