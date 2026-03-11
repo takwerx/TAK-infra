@@ -9042,6 +9042,35 @@ def _sync_authentik_provider_external_hosts(ak_url, ak_headers, fqdn, correct_au
         _log(f"  ⚠ Sync Authentik provider URLs: {str(e)[:80]}")
 
 
+def _authentik_enable_show_password(ak_url, ak_headers, plog=None):
+    """Enable the show-password (eyeball) toggle on all Password stages so users can reveal password on login.
+    Uses Authentik API: PATCH stages/password/{pk}/ with allow_show_password=true. Idempotent."""
+    import urllib.request as _req
+    import urllib.error
+    _log = plog or (lambda m: None)
+    try:
+        r = _req.Request(f'{ak_url}/api/v3/stages/password/', headers=ak_headers)
+        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
+        updated = 0
+        for stage in data.get('results', []):
+            pk = stage.get('pk')
+            if not pk:
+                continue
+            if stage.get('allow_show_password'):
+                continue
+            try:
+                _req.urlopen(_req.Request(f'{ak_url}/api/v3/stages/password/{pk}/',
+                    data=json.dumps({'allow_show_password': True}).encode(),
+                    headers=ak_headers, method='PATCH'), timeout=10)
+                updated += 1
+            except urllib.error.HTTPError:
+                pass
+        if updated:
+            _log(f"  ✓ Show password (eyeball) enabled on {updated} password stage(s)")
+    except Exception as e:
+        _log(f"  ⚠ Enable show password: {str(e)[:80]}")
+
+
 def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
     """Restrict infra-TAK, Node-RED (and LDAP) to authentik Admins. TAK Portal and MediaMTX open to all authenticated users.
     Creates a 'Group membership: authentik Admins' policy and binds it only to admin-only apps. No binding on TAK Portal/MediaMTX = everyone sees them.
@@ -12785,6 +12814,8 @@ def run_authentik_deploy(reconfigure=False):
                         _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog)
                         plog("  Configuring application access policies...")
                         _ensure_app_access_policies(ak_url, ak_headers, plog)
+                        plog("  Enabling show password on login...")
+                        _authentik_enable_show_password(ak_url, ak_headers, plog)
                         # Sync Authentik home URL from Caddy/Domains (so changing domain in Caddy then reconfiguring updates Authentik)
                         ak_host = _get_authentik_host(settings)
                         ak_base = _get_authentik_base_url(settings)
@@ -13985,6 +14016,9 @@ entries:
                     plog("")
                     plog("  Configuring application access policies...")
                     _ensure_app_access_policies(ak_url, ak_headers, plog)
+                    # Enable show-password (eyeball) on login so users can reveal password in the form
+                    plog("  Enabling show password on login...")
+                    _authentik_enable_show_password(ak_url, ak_headers, plog)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
