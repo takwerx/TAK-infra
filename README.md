@@ -33,9 +33,7 @@ chmod +x start.sh
 sudo ./start.sh
 ```
 
-If you explicitly want the development branch, use:
-
-`git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git`
+**Branches:** Default clone uses **main** (stable; tagged releases). For latest features and fixes before they’re merged to main, use the **dev** branch: `git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git`. The README and changelog here reflect main; dev may include remote deployment, UI tweaks, and fixes not yet in a release.
 
 The script will:
 1. Detect your OS (**Ubuntu 22.04 only** for now; goal is a universal installer)
@@ -85,6 +83,18 @@ Deploy services in this order — each step auto-configures the next:
 ```
 
 **Connect LDAP** runs after TAK Server deploy and wires LDAP auth to CoreConfig. 8446 webadmin login and QR enrollment work immediately after. **For MediaMTX-only (or standalone Authentik):** Deploy Authentik without TAK Server — it skips CoreConfig and webadmin; add TAK Server later and use Connect LDAP.
+
+## Remote deployment and firewalls
+
+Authentik, CloudTAK, and MediaMTX can be deployed to a **remote host** (separate from the infra-TAK console). You configure the target in each module’s “Deployment target” (e.g. “On another server via SSH”) and deploy from the console; the console SSHs to the remote and runs Docker/scripts there.
+
+**Firewall:** Depending on how you deploy, the infra-TAK host and remote host may need to reach each other for the automation to work. For example:
+
+- **SSH:** The console must reach the remote on port 22 (or your SSH port) to run deploy and management commands.
+- **Authentik remote:** After containers start, the console calls the remote Authentik API on port **9090** (e.g. `http://<remote>:9090`) to inject the LDAP outpost token. If the infra-TAK server and the remote are in different networks or behind firewalls, open port **9090** from the infra-TAK host to the remote so the token step can succeed; otherwise you’ll see “Connection refused” in the deploy log and the LDAP container may stay unhealthy (403 token errors).
+- **Two-server TAK:** Server Two (core) must reach Server One (database) on the **PostgreSQL port** (default 5432); open that port on Server One’s firewall for Server Two’s IP.
+
+If a remote deploy fails at “token” or “API” steps, or a service reports unhealthy, check that the hosts can reach the required ports (SSH, 9000 for Authentik, 5432 for two-server DB, etc.).
 
 ## What Gets Automated
 
@@ -157,6 +167,20 @@ start.sh                    ← One CLI command to launch everything
 ---
 
 ## Changelog
+
+### v0.1.10-alpha (dev) — 2026-03-11
+
+**Remote Authentik — LDAP token fix**
+- When Authentik is deployed to a remote host, the console now injects the LDAP outpost token and recreates the LDAP container (Step 6b) so the outpost no longer gets 403 (token invalid/expired). Redeploy remote Authentik to pick up the fix.
+
+**Console and module version display**
+- TAK Server version is shown again on the Console card and on the TAK Server page header; version is read from `takserver`, `takserver-core`, or `takserver-database` so two-server setups show the correct version.
+- CloudTAK page shows the CloudTAK version in the header (e.g. “CloudTAK · v12.93.0”).
+
+**Docs**
+- README: “Branches” (main vs dev) and “Remote deployment and firewalls” — SSH, Authentik API (9000), two-server PostgreSQL (5432); note that firewall tweaks may be needed so the console and remotes can talk.
+
+---
 
 ### v0.1.9-alpha — 2026-03-04
 

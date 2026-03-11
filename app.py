@@ -11619,6 +11619,147 @@ def authentik_error_log():
         return send_file(error_log_path, as_attachment=True, download_name='authentik_error.log', mimetype='text/plain')
     return jsonify({'error': 'No error log found'}), 404
 
+# Script run on remote host to fix LDAP outpost token (reads .env, calls localhost:9090, patches compose, restarts ldap)
+_AUTHENTIK_FIX_LDAP_REMOTE_SCRIPT = r'''
+import os, sys, json, urllib.request, subprocess
+os.chdir(os.path.expanduser("~/authentik"))
+token = None
+if os.path.isfile(".env"):
+    with open(".env") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("AUTHENTIK_BOOTSTRAP_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+            if line.startswith("AUTHENTIK_TOKEN=") and token is None:
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+if not token:
+    print("ERROR: No AUTHENTIK_BOOTSTRAP_TOKEN or AUTHENTIK_TOKEN in .env", file=sys.stderr)
+    sys.exit(1)
+url = "http://localhost:9090"
+headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+try:
+    req = urllib.request.Request(url + "/api/v3/outposts/instances/?search=LDAP", headers=headers)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        results = json.loads(r.read().decode()).get("results", [])
+except Exception as e:
+    print("ERROR: API outposts: " + str(e), file=sys.stderr)
+    sys.exit(2)
+outpost = next((o for o in results if o.get("name") == "LDAP" and o.get("type") == "ldap"), None)
+if not outpost:
+    print("ERROR: LDAP outpost not found", file=sys.stderr)
+    sys.exit(3)
+tid = outpost.get("token_identifier") or outpost.get("token")
+if not tid:
+    req2 = urllib.request.Request(url + "/api/v3/outposts/instances/" + str(outpost["pk"]) + "/", headers=headers)
+    with urllib.request.urlopen(req2, timeout=10) as r2:
+        detail = json.loads(r2.read().decode())
+    tid = detail.get("token_identifier") or detail.get("token")
+if not tid:
+    print("ERROR: No token_identifier on outpost", file=sys.stderr)
+    sys.exit(4)
+req3 = urllib.request.Request(url + "/api/v3/core/tokens/" + str(tid) + "/view_key/", headers=headers, method="GET")
+with urllib.request.urlopen(req3, timeout=10) as r3:
+    key = json.loads(r3.read().decode()).get("key", "")
+if not key:
+    print("ERROR: No key in view_key response", file=sys.stderr)
+    sys.exit(5)
+with open("docker-compose.yml") as f:
+    content = f.read()
+if "AUTHENTIK_TOKEN: placeholder" not in content:
+    print("ERROR: docker-compose.yml has no placeholder or already patched", file=sys.stderr)
+    sys.exit(6)
+safe = key.replace("'", "''")
+content = content.replace("AUTHENTIK_TOKEN: placeholder", "AUTHENTIK_TOKEN: '" + safe + "'")
+with open("docker-compose.yml", "w") as f:
+    f.write(content)
+subprocess.run("docker compose stop ldap 2>/dev/null; docker compose rm -f ldap 2>/dev/null; docker compose up -d ldap", shell=True, timeout=90, cwd=os.path.expanduser("~/authentik"))
+print("OK")
+'''
+
+@app.route('/api/authentik/fix-ldap-token', methods=['POST'])
+@login_required
+def authentik_fix_ldap_token():
+    """Emergency: inject LDAP outpost token and recreate LDAP container (remote: run script on host; local: call API and patch)."""
+    settings = load_settings()
+    deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if not deploy_cfg.get('deployed'):
+        return jsonify({'success': False, 'error': 'Authentik is not deployed'}), 400
+    if deploy_cfg.get('target_mode') == 'remote':
+        host = (deploy_cfg.get('remote', {}).get('host') or '').strip()
+        if not host:
+            return jsonify({'success': False, 'error': 'Remote host not configured'}), 400
+        try:
+            with open('/tmp/authentik_fix_ldap_token.py', 'w') as f:
+                f.write(_AUTHENTIK_FIX_LDAP_REMOTE_SCRIPT)
+            ok, out = _module_copy(deploy_cfg, '/tmp/authentik_fix_ldap_token.py', '/tmp/fix_ldap_token.py')
+            if not ok:
+                return jsonify({'success': False, 'error': 'Could not copy script to remote'}), 500
+            ok, out = _module_run(deploy_cfg, 'python3 /tmp/fix_ldap_token.py 2>&1; rm -f /tmp/fix_ldap_token.py', timeout=120)
+            try:
+                os.remove('/tmp/authentik_fix_ldap_token.py')
+            except Exception:
+                pass
+            if not ok:
+                return jsonify({'success': False, 'error': (out or 'Script failed').strip()[:500]}), 500
+            if 'OK' not in (out or ''):
+                return jsonify({'success': False, 'error': (out or 'No OK from script').strip()[:500]}), 500
+            return jsonify({'success': True, 'message': 'LDAP token injected and container recreated. LDAP may take 30–60s to show healthy.'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)[:300]}), 500
+    # Local: same logic as deploy token injection
+    ak_dir = os.path.expanduser('~/authentik')
+    compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+    if not os.path.isfile(compose_path):
+        return jsonify({'success': False, 'error': 'docker-compose.yml not found'}), 400
+    ak_url = 'http://127.0.0.1:9090'
+    try:
+        env_path = os.path.join(ak_dir, '.env')
+        bootstrap_token = None
+        if os.path.isfile(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                        bootstrap_token = line.strip().split('=', 1)[1].strip().strip('"').strip("'")
+                        break
+                    if line.strip().startswith('AUTHENTIK_TOKEN=') and bootstrap_token is None:
+                        bootstrap_token = line.strip().split('=', 1)[1].strip().strip('"').strip("'")
+        if not bootstrap_token:
+            return jsonify({'success': False, 'error': 'No AUTHENTIK_BOOTSTRAP_TOKEN in .env'}), 400
+        headers = {'Authorization': f'Bearer {bootstrap_token}', 'Content-Type': 'application/json'}
+        req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/?search=LDAP', headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            results = json.loads(resp.read().decode()).get('results', [])
+        ldap_outpost = next((o for o in results if o.get('name') == 'LDAP' and o.get('type') == 'ldap'), None)
+        if not ldap_outpost:
+            return jsonify({'success': False, 'error': 'LDAP outpost not found'}), 400
+        outpost_token_id = ldap_outpost.get('token_identifier') or ldap_outpost.get('token')
+        if not outpost_token_id:
+            req2 = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{ldap_outpost["pk"]}/', headers=headers)
+            with urllib.request.urlopen(req2, timeout=10) as r2:
+                detail = json.loads(r2.read().decode())
+            outpost_token_id = detail.get('token_identifier') or detail.get('token')
+        if not outpost_token_id:
+            return jsonify({'success': False, 'error': 'No token_identifier on outpost'}), 400
+        req3 = urllib.request.Request(f'{ak_url}/api/v3/core/tokens/{outpost_token_id}/view_key/', headers=headers, method='GET')
+        with urllib.request.urlopen(req3, timeout=10) as r3:
+            ldap_token_key = json.loads(r3.read().decode()).get('key', '')
+        if not ldap_token_key:
+            return jsonify({'success': False, 'error': 'No key from view_key'}), 400
+        with open(compose_path, 'r') as f:
+            compose_text = f.read()
+        if 'AUTHENTIK_TOKEN: placeholder' not in compose_text:
+            return jsonify({'success': False, 'error': 'Compose already has token or no placeholder'}), 400
+        compose_text = compose_text.replace('AUTHENTIK_TOKEN: placeholder', f'AUTHENTIK_TOKEN: {ldap_token_key}')
+        with open(compose_path, 'w') as f:
+            f.write(compose_text)
+        subprocess.run('cd {} && docker compose stop ldap 2>/dev/null; docker compose rm -f ldap 2>/dev/null; docker compose up -d ldap'.format(ak_dir), shell=True, capture_output=True, timeout=90)
+        return jsonify({'success': True, 'message': 'LDAP token injected and container recreated. LDAP may take 30–60s to show healthy.'})
+    except urllib.error.HTTPError as e:
+        return jsonify({'success': False, 'error': 'API {}: {}'.format(e.code, e.read().decode()[:200])}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:300]}), 500
+
 @app.route('/api/authentik/uninstall', methods=['POST'])
 @login_required
 def authentik_uninstall():
@@ -12074,7 +12215,8 @@ volumes:
     plog("━━━ Step 6b/8: LDAP Outpost Token (remote) ━━━")
     plog("  Waiting for blueprint to create LDAP outpost...")
     time.sleep(15)
-    ak_url_remote = f"http://{host}:9000"
+    # Remote compose exposes Authentik on host port 9090 (COMPOSE_PORT_HTTP=9090), not 9000
+    ak_url_remote = f"http://{host}:9090"
     ak_headers_remote = {'Authorization': f'Bearer {bootstrap_token}', 'Content-Type': 'application/json'}
     ldap_token_key = None
     try:
@@ -13642,9 +13784,11 @@ body{display:flex;min-height:100vh}
 .nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
 .nav-icon{font-size:15px;width:18px;text-align:center}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
+.page-header{margin-bottom:20px}.page-header h1{font-size:22px;font-weight:700;display:flex;align-items:center;gap:8px}.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
 </style></head><body>
 {{ sidebar_html }}
 <div class="main">
+<div class="page-header"><h1><img src="{{ authentik_logo_url }}" alt="" style="height:28px;width:auto;object-fit:contain">Authentik{% if ak_version_info and ak_version_info.version %} <span style="font-weight:500;color:var(--text-dim);font-size:16px">· v{{ ak_version_info.version }}</span>{% endif %}</h1><p>Identity provider — SSO, LDAP, user management</p></div>
 <div class="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">Authentik installation in progress</div></div></div>
@@ -13722,13 +13866,15 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
-<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>{% if authentik_deploy_cfg.target_mode == 'remote' and ak.installed %}
+<button class="control-btn" onclick="fixAkLdapToken(this)" style="margin-right:12px" title="Emergency: inject LDAP outpost token and recreate LDAP container">🔑 Fix LDAP token</button>{% endif %}
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% elif ak.installed %}
 <div style="margin-top:24px;text-align:center">
 <button class="control-btn btn-start" onclick="akControl('start')" style="margin-right:12px">▶ Start</button>
-<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
+<button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>{% if authentik_deploy_cfg.target_mode == 'remote' %}
+<button class="control-btn" onclick="fixAkLdapToken(this)" style="margin-right:12px" title="Emergency: inject LDAP outpost token and recreate LDAP container">🔑 Fix LDAP token</button>{% endif %}
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% else %}
@@ -13897,6 +14043,20 @@ async function reconfigureAk(){
         if(d.success)window.location.href='/authentik';
         else alert('Error: '+(d.error||'Reconfigure failed'));
     }catch(e){alert('Error: '+e.message)}
+}
+async function fixAkLdapToken(btn){
+    if(!btn)return;
+    var orig=btn.textContent;
+    btn.disabled=true;
+    btn.textContent='… Fixing…';
+    try{
+        var r=await fetch('/api/authentik/fix-ldap-token',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.success){alert(d.message||'LDAP token fixed.');if(typeof loadContainerLogs==='function')loadContainerLogs();}
+        else alert('Error: '+(d.error||'Fix failed'));
+    }catch(e){alert('Error: '+e.message)}
+    btn.disabled=false;
+    btn.textContent=orig;
 }
 
 var logIndex=0;
