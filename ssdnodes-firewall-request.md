@@ -1,68 +1,32 @@
-# Firewall Port Request — SSD Nodes VPS
+**Subject:** Firewall add-on — rule for TCP 8443 not taking effect
 
-## Account / Server Info
+---
 
-- **Account**: [your account email]
-- **Server**: [your VPS hostname or IP, e.g. ssdnodes-66871ef1e08d7]
-- **Server IP**: [your VPS public IP]
+Hi,
 
-## Issue
+I purchased the firewall add-on and set up an inbound rule so my remote server can reach this one on port 8443, but connections still time out. I'd like to confirm the rule is active and whether anything else could be blocking the traffic.
 
-I am running a self-hosted application stack on my VPS that requires several ports to be reachable from the public internet. I have configured UFW on the server and the ports are open at the OS level, but inbound connections are being blocked at the provider/network level before they reach the server.
+**Setup:**
 
-I have confirmed that UFW is active and the rules are correct:
+- **Firewall group:** TAK-TEST7 (Inbound)
+- **Rule:** IPv4, Custom TCP, Port 8443, Source IP 199.241.139.5 (also tried "All"), Target: Accept
+- **Linked server:** ssdnodes-66871ef1e08d7 (public IP 63.250.55.132)
+- I have clicked **Apply Rules** after creating the rule and linking the group.
 
-```
-ufw status
-Status: active
+**What I'm seeing:**
 
-To                         Action      From
---                         ------      ----
-22/tcp                     ALLOW       Anywhere
-5001/tcp                   ALLOW       Anywhere
-80/tcp                     ALLOW       Anywhere
-443/tcp                    ALLOW       Anywhere
-8089/tcp                   ALLOW       Anywhere
-8443/tcp                   ALLOW       Anywhere
-8446/tcp                   ALLOW       Anywhere
-9090/tcp                   ALLOW       Anywhere
-9443/tcp                   ALLOW       Anywhere
-389/tcp                    ALLOW       Anywhere
-636/tcp                    ALLOW       Anywhere
-8888/tcp                   ALLOW       Anywhere
-8554/tcp                   ALLOW       Anywhere
-8322/tcp                   ALLOW       Anywhere
-8189/udp                   ALLOW       Anywhere
-8890/tcp                   ALLOW       Anywhere
-```
+- From my other server (199.241.139.5), `nc -zv 63.250.55.132 8443` times out.
+- On 63.250.55.132 I ran `tcpdump -i any -n port 8443` while running that `nc` from 199.241.139.5. No packets from 199.241.139.5 appear, so the traffic does not seem to reach the VM.
+- On 63.250.55.132, UFW allows 8443 and the service is listening; local connections to 8443 work.
 
-External connections to these ports time out, while SSH (port 22) works fine. This indicates a firewall or security group at the infrastructure/network level is filtering traffic before it reaches the VPS.
+So it looks like the traffic is being dropped before it reaches the VM, and I'm not sure if the firewall rule is actually applied at the hypervisor/network layer or if something else is filtering port 8443.
 
-## Ports Requested
+**Can you please:**
 
-Please open the following ports on the network/provider-level firewall for my VPS:
+1. Confirm that the TAK-TEST7 inbound rule (TCP 8443, Accept) is active for ssdnodes-66871ef1e08d7 (63.250.55.132), and
+2. Check whether anything else in your network could be filtering inbound TCP 8443 to this server?
 
-| Port | Protocol | Service |
-|------|----------|---------|
-| 80 | TCP | HTTP (Caddy web server / Let's Encrypt) |
-| 443 | TCP | HTTPS (Caddy TLS reverse proxy) |
-| 5001 | TCP | Admin console (HTTPS) |
-| 8089 | TCP | TAK Server (TLS client connections) |
-| 8443 | TCP | TAK Server (HTTPS federation) |
-| 8446 | TCP | TAK Server (WebAdmin HTTPS) |
-| 9090 | TCP | Authentik identity provider (HTTP) |
-| 9443 | TCP | Authentik identity provider (HTTPS) |
-| 389 | TCP | LDAP (Authentik outpost) |
-| 636 | TCP | LDAPS (Authentik outpost) |
-| 8554 | TCP | RTSP video streaming |
-| 8888 | TCP | HLS video streaming |
-| 8322 | TCP | SRT video streaming |
-| 8890 | TCP | RTMP video streaming |
-| 8189 | UDP | WebRTC video streaming |
-| 5000 | TCP | Web application (HTTP) |
+I can provide screenshots of the firewall group, rule, and linked server if that would help.
 
-## Summary
-
-All of these services are legitimate self-hosted applications running on the VPS. I need the provider-level firewall updated to allow inbound traffic on these ports so they are reachable from the internet. UFW on the server itself handles the OS-level filtering.
-
-Thank you.
+Thanks,
+Andreas
