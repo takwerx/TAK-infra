@@ -2520,9 +2520,11 @@ def cloudtak_page():
                     parts = line.split('|||')
                     containers.append({'name': parts[0], 'status': parts[1] if len(parts) > 1 else ''})
         container_info['containers'] = containers
+    ct_version = _get_cloudtak_version_info().get('version', '') if cloudtak.get('installed') else ''
     return render_template_string(CLOUDTAK_TEMPLATE,
         settings=settings, cloudtak=cloudtak,
         version=VERSION,
+        cloudtak_version=ct_version,
         cloudtak_icon=CLOUDTAK_ICON,
         cloudtak_cfg=cloudtak_cfg,
         cloudtak_tak_suggest=cloudtak_tak_suggest,
@@ -4350,14 +4352,14 @@ def _get_takserver_version_info():
     out = {'version': '', 'update_available': False, 'latest': None}
     if not os.path.exists('/opt/tak') or not os.path.exists('/opt/tak/CoreConfig.xml'):
         return out
-    r = subprocess.run("dpkg -s takserver 2>/dev/null | grep ^Version:", shell=True, capture_output=True, text=True, timeout=5)
-    if r.returncode == 0 and r.stdout.strip():
-        # "Version: 5.6-RELEASE-6" or "Version: 5.6-RELEASE-6-HEAD"
-        out['version'] = r.stdout.strip().replace('Version:', '').strip()
-        return out
+    # Try dpkg: takserver (single-server) or takserver-core / takserver-database (two-server)
+    for pkg in ('takserver', 'takserver-core', 'takserver-database'):
+        r = subprocess.run(f"dpkg -s {pkg} 2>/dev/null | grep ^Version:", shell=True, capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            out['version'] = r.stdout.strip().replace('Version:', '').strip()
+            return out
     r = subprocess.run("rpm -q takserver 2>/dev/null", shell=True, capture_output=True, text=True, timeout=5)
     if r.returncode == 0 and r.stdout.strip():
-        # noarch package: takserver-5.6-RELEASE-6.noarch
         ver = r.stdout.strip()
         if ver.startswith('takserver-'):
             ver = ver.split('-', 1)[1]
@@ -10267,7 +10269,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 {{ sidebar_html }}
 <div class="main">
   <div class="page-header">
-    <h1><img src="{{ cloudtak_icon }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px">CloudTAK</h1>
+    <h1><img src="{{ cloudtak_icon }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px">CloudTAK{% if cloudtak_version %} <span style="font-weight:500;color:var(--text-dim);font-size:16px">· v{{ cloudtak_version }}</span>{% endif %}</h1>
     <p>Browser-based TAK client — in-browser map and situational awareness via TAK Server</p>
   </div>
 
@@ -17735,7 +17737,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </style></head><body data-tak-deploying="{{ 'true' if deploying or deploy_done or deploy_error else 'false' }}" data-tak-upgrading="{{ 'true' if upgrading else 'false' }}">
 {{ sidebar_html }}
 <div class="main">
-  <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server</h1><p>Team Awareness Kit Server</p></div>
+  <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server{% if tak_version %} <span style="font-weight:500;color:var(--text-dim);font-size:16px">· {{ tak_version }}</span>{% endif %}</h1><p>Team Awareness Kit Server</p></div>
 <div class="status-banner" id="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
