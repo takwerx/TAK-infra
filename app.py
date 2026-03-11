@@ -3116,6 +3116,16 @@ def _get_mediamtx_upstream(settings):
     return '127.0.0.1:5080'
 
 
+def _get_mediamtx_hls_upstream(settings):
+    """Return MediaMTX HLS upstream for Caddy (127.0.0.1:8888 or remote_host:8888)."""
+    cfg = _get_module_deployment_config(settings, 'mediamtx_deployment')
+    if cfg.get('target_mode') == 'remote':
+        host = (cfg.get('remote', {}).get('host') or '').strip()
+        if host:
+            return f'{host}:8888'
+    return '127.0.0.1:8888'
+
+
 def _get_takportal_upstream(settings):
     """Return TAK Portal upstream for Caddy (host:port)."""
     cfg = _get_module_deployment_config(settings, 'takportal_deployment')
@@ -3859,13 +3869,14 @@ def generate_caddyfile(settings=None):
     if mtx.get('installed'):
         mtx_host = sd['mediamtx']
         mtx_up = _get_mediamtx_upstream(settings)
+        mtx_hls = _get_mediamtx_hls_upstream(settings)
         lines.append(f"# MediaMTX Web Console")
         lines.append(f"{mtx_host} {{")
+        lines.append(f"    handle_path /hls-proxy/* {{")
+        lines.append(f"        reverse_proxy {mtx_hls}")
+        lines.append(f"    }}")
         if ak.get('installed'):
             lines.append(f"    route /watch/* {{")
-            lines.append(f"        reverse_proxy {mtx_up}")
-            lines.append(f"    }}")
-            lines.append(f"    route /hls-proxy/* {{")
             lines.append(f"        reverse_proxy {mtx_up}")
             lines.append(f"    }}")
             lines.append(f"    route /shared/* {{")
@@ -5312,6 +5323,38 @@ authInternalUsers:
   ips: []
   permissions:
   - action: read
+- user: any
+  pass: ''
+  ips: []
+  permissions:
+  - action: read
+    path: teststream
+authHTTPAddress:
+authHTTPExclude:
+- action: api
+- action: metrics
+- action: pprof
+
+rtspServerKey:
+rtspServerCert:
+rtspAuthMethods: [basic]
+rtspEncryption: "no"
+rtmpEncryption: "no"
+rtmpsAddress: :1936
+rtmpServerKey:
+rtmpServerCert:
+hlsEncryption: no
+hlsServerKey:
+hlsServerCert:
+hlsAlwaysRemux: no
+hlsVariant: mpegts
+hlsSegmentCount: 3
+hlsSegmentDuration: 500ms
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsDirectory: ''
+hlsMuxerCloseAfter: 60s
+
 paths:
   teststream: {{}}
   all_others: {{}}
@@ -5357,6 +5400,33 @@ paths:
     if ok:
         _module_run(deploy_cfg, 'cp /tmp/mediamtx_editor_clone/config-editor/mediamtx_config_editor.py /opt/mediamtx-webeditor/ 2>/dev/null; rm -rf /tmp/mediamtx_editor_clone', timeout=15)
         _module_run(deploy_cfg, "sed -i 's/port=5000/port=5080/' /opt/mediamtx-webeditor/mediamtx_config_editor.py 2>/dev/null; sed -i 's/9997/9898/g' /opt/mediamtx-webeditor/mediamtx_config_editor.py 2>/dev/null", timeout=10)
+        # Patch HLS URLs to go through Caddy /hls-proxy/ instead of direct port 8888 (avoids mixed content)
+        hls_patch_script = (
+            "import re, sys\n"
+            "f = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'\n"
+            "with open(f) as fh: s = fh.read()\n"
+            "# Active streams API: hls_url\n"
+            "s = re.sub(r\"stream_info\\['hls_url'\\] = f\\\"\\{hls_protocol\\}://\\{hls_domain\\}:8888/\\{path_name\\}/index\\.m3u8\\\"\",\n"
+            "           \"stream_info['hls_url'] = f\\\"/hls-proxy/{path_name}/index.m3u8\\\"\", s)\n"
+            "# Shared viewer hls_base\n"
+            "s = re.sub(r'hls_base = f\"\\{streaming\\[.protocol.\\]\\}://\\{streaming\\[.domain.\\]\\}:8888\"',\n"
+            "           'hls_base = \"/hls-proxy\"', s)\n"
+            "s = re.sub(r'hls_base = f\"http://\\{request\\.host\\.split.*?:8888\"',\n"
+            "           'hls_base = \"/hls-proxy\"', s)\n"
+            "# Test stream URLs\n"
+            "s = re.sub(r\"'hls': f'\\{protocol\\}://\\{domain\\}:8888/teststream/index\\.m3u8'\",\n"
+            "           \"'hls': '/hls-proxy/teststream/index.m3u8'\", s)\n"
+            "with open(f, 'w') as fh: fh.write(s)\n"
+        )
+        with open('/tmp/mtx_hls_patcher.py', 'w') as pf:
+            pf.write(hls_patch_script)
+        _module_copy(deploy_cfg, '/tmp/mtx_hls_patcher.py', '/tmp/mtx_hls_patcher.py', log_fn=plog)
+        _module_run(deploy_cfg, 'python3 /tmp/mtx_hls_patcher.py && rm -f /tmp/mtx_hls_patcher.py', timeout=15)
+        try:
+            os.remove('/tmp/mtx_hls_patcher.py')
+        except Exception:
+            pass
+        plog("✓ HLS URLs patched for HTTPS proxy")
     # LDAP overlay: when Authentik is present locally, patch remote editor for header auth
     ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
     ldap_env_lines = ''
@@ -5822,6 +5892,29 @@ WantedBy=multi-user.target
                 subprocess.run(f"sed -i 's|//video\\.|//stream.|g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
                 plog("  Stream URL host set to stream.*")
             plog("✓ Web editor installed (port 5080, API 9898)")
+
+            # Patch HLS URLs to go through Caddy /hls-proxy/ instead of direct port 8888 (avoids mixed content)
+            import re as _hls_re
+            try:
+                with open(editor_path, 'r') as f:
+                    esrc = f.read()
+                esrc = _hls_re.sub(
+                    r"stream_info\['hls_url'\] = f\"\{hls_protocol\}://\{hls_domain\}:8888/\{path_name\}/index\.m3u8\"",
+                    "stream_info['hls_url'] = f\"/hls-proxy/{path_name}/index.m3u8\"", esrc)
+                esrc = _hls_re.sub(
+                    r'hls_base = f"\{streaming\[.protocol.\]\}://\{streaming\[.domain.\]\}:8888"',
+                    'hls_base = "/hls-proxy"', esrc)
+                esrc = _hls_re.sub(
+                    r'hls_base = f"http://\{request\.host\.split.*?:8888"',
+                    'hls_base = "/hls-proxy"', esrc)
+                esrc = _hls_re.sub(
+                    r"'hls': f'\{protocol\}://\{domain\}:8888/teststream/index\.m3u8'",
+                    "'hls': '/hls-proxy/teststream/index.m3u8'", esrc)
+                with open(editor_path, 'w') as f:
+                    f.write(esrc)
+                plog("✓ HLS URLs patched for HTTPS proxy")
+            except Exception:
+                plog("⚠ HLS URL patch failed — watch page may have mixed content warnings")
 
             # LDAP overlay: when Authentik is present, patch editor for header auth + Stream Access page
             if ldap_available:
