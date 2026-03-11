@@ -135,7 +135,31 @@ async function loadServices(){
         el.innerHTML=h;
     }catch(e){el.textContent='Failed to load services'}
 }
+async function loadTakRemoteMetrics(){
+    var bar=document.getElementById('tak-remote-metrics-bar');
+    if(!bar)return;
+    try{
+        var r=await fetch('/api/takserver/remote-metrics');
+        if(!r.ok){
+            var cpu=document.getElementById('tak-remote-cpu-value');if(cpu)cpu.textContent='—';
+            var ram=document.getElementById('tak-remote-ram-value');if(ram)ram.textContent='—';
+            var ramD=document.getElementById('tak-remote-ram-detail');if(ramD)ramD.textContent='';
+            var disk=document.getElementById('tak-remote-disk-value');if(disk)disk.textContent='—';
+            var diskD=document.getElementById('tak-remote-disk-detail');if(diskD)diskD.textContent='';
+            var uptime=document.getElementById('tak-remote-uptime-value');if(uptime)uptime.textContent='—';
+            return;
+        }
+        var d=await r.json();
+        var cpu=document.getElementById('tak-remote-cpu-value');if(cpu)cpu.textContent=(d.cpu_percent!=null?d.cpu_percent:'—')+'%';
+        var ram=document.getElementById('tak-remote-ram-value');if(ram)ram.textContent=(d.ram_percent!=null?d.ram_percent:'—')+'%';
+        var ramD=document.getElementById('tak-remote-ram-detail');if(ramD)ramD.textContent=(d.ram_used_gb!=null&&d.ram_total_gb!=null)?(d.ram_used_gb+'GB / '+d.ram_total_gb+'GB'):'';
+        var disk=document.getElementById('tak-remote-disk-value');if(disk)disk.textContent=(d.disk_percent!=null?d.disk_percent:'—')+'%';
+        var diskD=document.getElementById('tak-remote-disk-detail');if(diskD)diskD.textContent=(d.disk_used_gb!=null&&d.disk_total_gb!=null)?(d.disk_used_gb+'GB / '+d.disk_total_gb+'GB'):'';
+        var uptime=document.getElementById('tak-remote-uptime-value');if(uptime)uptime.textContent=d.uptime||'—';
+    }catch(e){}
+}
 if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
+if(document.getElementById('tak-remote-metrics-bar')){loadTakRemoteMetrics();setInterval(loadTakRemoteMetrics,5000);}
 if(document.getElementById('webadmin-superuser-status')){loadWebadminSuperuserStatus();}
 if(document.getElementById('tak-cert-password-inline')){loadTakCertPassword();}
 if(document.getElementById('ldap-drift-banner')){checkLdapDrift();}

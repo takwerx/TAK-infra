@@ -16567,6 +16567,24 @@ def takserver_services():
         services.append({'name': 'Error', 'icon': '❌', 'status': str(e)})
     return jsonify({'services': services, 'count': len([s for s in services if s['status'] == 'running'])})
 
+
+@app.route('/api/takserver/remote-metrics')
+@login_required
+def takserver_remote_metrics():
+    """Return CPU/memory/disk/uptime for Server One when in two-server (remote DB) mode."""
+    settings = load_settings()
+    tak_cfg = _get_tak_deployment_config(settings)
+    if tak_cfg.get('mode') != 'two_server':
+        return jsonify({'error': 'Not two-server'}), 404
+    s1 = tak_cfg.get('server_one', {})
+    if not (s1.get('host') or '').strip():
+        return jsonify({'error': 'No Server One host'}), 404
+    metrics = _get_remote_host_metrics(s1)
+    if metrics is None:
+        return jsonify({'error': 'Could not fetch remote metrics'}), 503
+    return jsonify(metrics)
+
+
 @app.route('/api/takserver/uninstall', methods=['POST'])
 @login_required
 def takserver_uninstall():
@@ -18314,6 +18332,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 .page-header h1{font-size:22px;font-weight:700}
 .page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
 .main{flex:1;min-width:0;overflow-y:auto;padding:32px}
+.metrics-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.metric-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:12px;padding:18px;text-align:center}
+.metric-label{font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-dim);margin-bottom:6px}
+.metric-value{font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:700;color:var(--text-primary)}
+.metric-detail{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px}
 </style></head><body data-tak-deploying="{{ 'true' if deploying or deploy_done or deploy_error else 'false' }}" data-tak-upgrading="{{ 'true' if upgrading else 'false' }}">
 {{ sidebar_html }}
 <div class="main">
@@ -18392,6 +18415,18 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div id="services-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading services...</div>
 </div>
+{% if two_server_mode and s1_host %}
+<div style="margin-bottom:24px">
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:8px"><span style="color:var(--text-secondary)">Remote host:</span> <span style="color:var(--cyan)" id="tak-remote-host-ip">{{ s1_host }}</span></div>
+<div class="section-title" style="margin-top:12px;margin-bottom:8px">REMOTE HOST HEALTH</div>
+<div class="metrics-bar" id="tak-remote-metrics-bar">
+<div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value" id="tak-remote-cpu-value">—</div></div>
+<div class="metric-card"><div class="metric-label">MEMORY</div><div class="metric-value" id="tak-remote-ram-value">—</div><div class="metric-detail" id="tak-remote-ram-detail"></div></div>
+<div class="metric-card"><div class="metric-label">DISK</div><div class="metric-value" id="tak-remote-disk-value">—</div><div class="metric-detail" id="tak-remote-disk-detail"></div></div>
+<div class="metric-card"><div class="metric-label">UPTIME</div><div class="metric-value" id="tak-remote-uptime-value" style="font-size:18px">—</div></div>
+</div>
+</div>
+{% endif %}
 {% if tak.installed and 'ubuntu' in settings.get('os_type', '') %}
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px">
 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:16px 24px;cursor:pointer" onclick="takToggleUpdate()" id="tak-update-header">
