@@ -4785,8 +4785,6 @@ def takportal_control():
             subprocess.run('docker restart tak-portal', shell=True, capture_output=True, text=True, timeout=30)
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)[:300]}), 500
-        # Sync Authentik TAK Portal Proxy (external_host + outpost) so direct https://takportal.<fqdn> redirects to login instead of 404
-        _sync_authentik_takportal_provider(settings)
         time.sleep(2)
         r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
         running = 'Up' in (r.stdout or '')
@@ -8966,55 +8964,6 @@ def _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog=None):
         _log("  ✓ Proxy providers cookie_domain set for shared session")
     except Exception as e:
         _log(f"  ⚠ Proxy cookie_domain: {str(e)[:80]}")
-
-
-def _sync_authentik_takportal_provider(settings):
-    """Ensure TAK Portal Proxy in Authentik has correct external_host and is on embedded outpost.
-    Fixes direct visits to https://takportal.<fqdn> returning 404 instead of redirecting to login."""
-    import urllib.request as _req
-    import urllib.error
-    fqdn = (settings.get('fqdn') or '').strip()
-    if not fqdn:
-        return
-    ak_url = _get_authentik_api_url(settings)
-    ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
-    if not ak_token:
-        return
-    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-    base = fqdn.split(':')[0].split('/')[0]
-    desired_host = f'https://takportal.{base}'
-    desired_cookie = f'.{base}'
-    try:
-        r = _req.Request(f'{ak_url}/api/v3/providers/proxy/?search=TAK+Portal+Proxy', headers=ak_headers)
-        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
-        for prov in data.get('results', []):
-            if (prov.get('name') or '').strip() != 'TAK Portal Proxy':
-                continue
-            pk = prov.get('pk')
-            ext = (prov.get('external_host') or '').strip().rstrip('/')
-            cookie = (prov.get('cookie_domain') or '').strip()
-            if not pk:
-                continue
-            patch = {}
-            if ext != desired_host:
-                patch['external_host'] = desired_host
-            if cookie != desired_cookie:
-                patch['cookie_domain'] = desired_cookie
-            if patch:
-                _req.urlopen(_req.Request(f'{ak_url}/api/v3/providers/proxy/{pk}/',
-                    data=json.dumps(patch).encode(), headers=ak_headers, method='PATCH'), timeout=10)
-            # Ensure in embedded outpost
-            r2 = _req.Request(f'{ak_url}/api/v3/outposts/instances/?search=embedded', headers=ak_headers)
-            outposts = json.loads(_req.urlopen(r2, timeout=15).read().decode()).get('results', [])
-            embedded = next((o for o in outposts if 'embed' in (o.get('name') or '').lower() or o.get('type') == 'proxy'), None)
-            if embedded and pk not in (embedded.get('providers') or []):
-                providers = list(embedded.get('providers') or [])
-                providers.append(pk)
-                _req.urlopen(_req.Request(f'{ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
-                    data=json.dumps({'providers': providers}).encode(), headers=ak_headers, method='PATCH'), timeout=10)
-            break
-    except Exception:
-        pass
 
 
 def _sync_authentik_provider_external_hosts(ak_url, ak_headers, fqdn, correct_authentik_base_url, plog=None):
