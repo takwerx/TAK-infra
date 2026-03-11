@@ -5,7 +5,13 @@
 ## Prompt for a new chat (copy and paste this)
 
 ```
-Read docs/HANDOFF-LDAP-AUTHENTIK.md section "0. Current Session State" and the v0.2.0 bullets. We're on v0.2.0. Summary: Authentik "Update config & reconnect" works for both local and remote deploy. Remote reconfigure uses SSH + remote API (no local ~/authentik). We only create Authentik applications for modules that are actually deployed (Node-RED, MediaMTX, TAK Portal); infra-TAK always. Helper _is_module_deployed(settings, key) gates app creation and _repair_embedded_outpost_all_apps. Outpost updates go through _outpost_add_providers_safe so we never remove existing apps. Access policies: admins see infra-TAK + Node-RED (when deployed); all users see MediaMTX + TAK Portal (when deployed). Current struggles: remote Authentik needs console→remote:9090 and token in remote .env; if "authorization flow" not found on remote, flow slugs may differ. Use this handoff as the single source of truth for what's done and what to do next.
+Read docs/HANDOFF-LDAP-AUTHENTIK.md section "0. Current Session State" and the v0.2.0 bullets. We're on v0.2.0.
+
+Summary: Authentik "Update config & reconnect" works for both local and remote deploy; remote reconfigure uses SSH + remote API (no local ~/authentik). We only create Authentik applications for modules that are actually deployed (Node-RED, MediaMTX, TAK Portal); infra-TAK always. Helper _is_module_deployed(settings, key) gates app creation and _repair_embedded_outpost_all_apps. Outpost updates go through _outpost_add_providers_safe so we never remove existing apps. Access policies: admins see infra-TAK + Node-RED (when deployed); all users see MediaMTX + TAK Portal (when deployed).
+
+Node-RED supports remote deploy: Node-RED page has a "Deployment Target" card (local vs remote SSH). When target is remote, run_nodered_deploy branches to _run_nodered_deploy_remote (mkdir ~/node-red, copy settings.js + docker-compose.yml, docker compose up -d, Caddy, optional Authentik app). Caddy uses _get_nodered_upstream(settings); deploy POST sends config; generic routes: /api/nodered/deployment-config (save), /api/nodered/remote/ensure-ssh-key, install-ssh-key, test.
+
+Use docs/HANDOFF-LDAP-AUTHENTIK.md as the single source of truth for what's done and what to do next.
 ```
 
 ---
