@@ -83,7 +83,7 @@ def inject_cloudtak_icon():
     from markupsafe import Markup
     d = {'cloudtak_icon': CLOUDTAK_ICON, 'mediamtx_logo_url': MEDIAMTX_LOGO_URL, 'nodered_logo_url': NODERED_LOGO_URL, 'authentik_logo_url': AUTHENTIK_LOGO_URL, 'caddy_logo_url': CADDY_LOGO_URL, 'tak_logo_url': TAK_LOGO_URL}
     if not request.path.startswith('/api') and not request.path.startswith('/cloudtak/page.js'):
-        d['sidebar_html'] = Markup(render_sidebar(detect_modules(), request.path.strip('/') or 'console'))
+        d['sidebar_html'] = Markup(render_sidebar(detect_modules(), request.path.strip('/') or 'console', takwerx_logo_url=_login_logo_url()))
     return d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -369,9 +369,10 @@ def detect_modules():
         'description': 'Postfix relay — notifications for TAK Portal & MediaMTX', 'icon': '📧', 'route': '/emailrelay', 'priority': 8}
     return dict(sorted(modules.items(), key=lambda x: x[1].get('priority', 99)))
 
-def render_sidebar(modules, active_path):
+def render_sidebar(modules, active_path, takwerx_logo_url=None):
     """Build sidebar nav HTML: Console and Marketplace always; tool links only when installed.
-    active_path is the current path (e.g. 'console', 'nodered') for highlighting."""
+    active_path is the current path (e.g. 'console', 'nodered') for highlighting.
+    If takwerx_logo_url is set, show that logo at the bottom of the sidebar (same as login page)."""
     active = (active_path or '').strip('/') or 'console'
     def link(href, content, title=None):
         path = href.strip('/')
@@ -410,7 +411,14 @@ def render_sidebar(modules, active_path):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
     parts.append(link('/marketplace', '<span class="nav-icon material-symbols-outlined">shopping_cart</span>Marketplace'))
     parts.append(link('/help', '<span class="nav-icon material-symbols-outlined">help</span>Help'))
-    return '<nav class="sidebar">\n  ' + '\n  '.join(parts) + '\n</nav>'
+    if takwerx_logo_url:
+        parts.append(
+            '<div style="margin-top:auto;padding:20px 20px 24px;text-align:center;border-top:1px solid var(--border)">'
+            f'<img src="{html.escape(takwerx_logo_url)}" alt="TAKWERX" style="max-width:100%;height:auto;max-height:56px;object-fit:contain;display:block;margin:0 auto">'
+            '</div>'
+        )
+    nav_style = ' style="display:flex;flex-direction:column"' if takwerx_logo_url else ''
+    return f'<nav class="sidebar"{nav_style}>\n  ' + '\n  '.join(parts) + '\n</nav>'
 
 def get_system_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
