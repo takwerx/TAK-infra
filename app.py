@@ -12008,13 +12008,21 @@ def authentik_deploy():
     threading.Thread(target=run_authentik_deploy, args=(False,), daemon=True).start()
     return jsonify({'success': True})
 
+def _authentik_installed_for_reconfigure():
+    """True if Authentik is present: compose file in ~/authentik or authentik-server container running (so Update config is allowed)."""
+    if os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml')):
+        return True
+    r = subprocess.run('docker ps --filter name=authentik-server --format "{{.Names}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    return bool(r.returncode == 0 and r.stdout and 'authentik' in r.stdout.strip().lower())
+
+
 @app.route('/api/authentik/reconfigure', methods=['POST'])
 @login_required
 def authentik_reconfigure():
     """Re-run LDAP/CoreConfig/forward-auth setup without removing anything. Use when TAK Server was deployed after Authentik."""
     if authentik_deploy_status.get('running'):
         return jsonify({'error': 'Deployment already in progress'}), 409
-    if not os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml')):
+    if not _authentik_installed_for_reconfigure():
         return jsonify({'error': 'Authentik not installed. Deploy Authentik first.'}), 400
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
