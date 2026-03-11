@@ -264,12 +264,19 @@ def detect_modules():
         tak_running = r.stdout.strip() == 'active'
     modules['takserver'] = {'name': 'TAK Server', 'installed': tak_installed, 'running': tak_running,
         'description': 'Team Awareness Kit Server', 'icon': '🗺️', 'icon_url': TAK_LOGO_URL, 'route': '/takserver', 'priority': 1}
-    # Authentik - Identity Provider
-    ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
+    # Authentik - Identity Provider (local or remote deployment)
+    ak_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    ak_installed = False
     ak_running = False
-    if ak_installed:
-        r = subprocess.run('docker ps --filter name=authentik-server --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
-        ak_running = 'Up' in r.stdout
+    if ak_cfg.get('target_mode') == 'remote' and ak_cfg.get('deployed') and (ak_cfg.get('remote', {}).get('host') or '').strip():
+        ak_installed = True
+        ok, out = _ssh_probe(ak_cfg.get('remote', {}), 'docker ps --filter name=authentik-server --format "{{.Status}}"', timeout=12)
+        ak_running = bool(ok and out and 'Up' in out)
+    else:
+        ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
+        if ak_installed:
+            r = subprocess.run('docker ps --filter name=authentik-server --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+            ak_running = 'Up' in r.stdout
     modules['authentik'] = {'name': 'Authentik', 'installed': ak_installed, 'running': ak_running,
         'description': 'Identity provider — SSO, LDAP, user management', 'icon': '🔐', 'icon_url': AUTHENTIK_LOGO_URL, 'route': '/authentik', 'priority': 2}
     # TAK Portal - Docker-based user management (local only; stays with TAK Server)
@@ -3527,6 +3534,16 @@ def _get_authentik_base_url(settings):
     server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
     return f'http://{server_ip}:9090'
 
+
+def _get_authentik_upstream(settings):
+    """Return Authentik upstream for Caddy (127.0.0.1:9090 or remote_host:9090)."""
+    cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if cfg.get('target_mode') == 'remote':
+        host = (cfg.get('remote', {}).get('host') or '').strip()
+        if host:
+            return f'{host}:9090'
+    return '127.0.0.1:9090'
+
 def _tak_deployment_defaults():
     """Default TAK deployment shape (single-server by default, optional two-server fields)."""
     return {
@@ -3707,6 +3724,7 @@ def generate_caddyfile(settings=None):
 
     lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
     sd = _get_all_service_domains(settings)
+    ak_up = _get_authentik_upstream(settings)
 
     ak = modules.get('authentik', {})
     nodered = modules.get('nodered', {})
@@ -3729,8 +3747,8 @@ def generate_caddyfile(settings=None):
         lines.append(f"        }}")
         lines.append(f"    }}")
         lines.append(f"    route {{")
-        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-        lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* {ak_up}")
+        lines.append(f"        forward_auth {ak_up} {{")
         lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
         lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
         lines.append(f"            trusted_proxies private_ranges")
@@ -3762,8 +3780,8 @@ def generate_caddyfile(settings=None):
         lines.append(f"{nodered_host} {{")
         if ak.get('installed'):
             lines.append(f"    route {{")
-            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* {ak_up}")
+            lines.append(f"        forward_auth {ak_up} {{")
             lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
             lines.append(f"            trusted_proxies private_ranges")
             lines.append(f"        }}")
@@ -3795,7 +3813,7 @@ def generate_caddyfile(settings=None):
         ak_host = sd['authentik']
         lines.append(f"# Authentik")
         lines.append(f"{ak_host} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:9090")
+        lines.append(f"    reverse_proxy {ak_up}")
         lines.append(f"}}")
         lines.append("")
         # If default is tak.<fqdn>, also serve Authentik on authentik.<fqdn> so redirects to authentik.* don't break (TLS works)
@@ -3803,7 +3821,7 @@ def generate_caddyfile(settings=None):
         if fqdn_base and ak_host == f'tak.{fqdn_base}':
             lines.append(f"# Authentik (alternate hostname — same backend)")
             lines.append(f"authentik.{fqdn_base} {{")
-            lines.append(f"    reverse_proxy 127.0.0.1:9090")
+            lines.append(f"    reverse_proxy {ak_up}")
             lines.append(f"}}")
             lines.append("")
 
@@ -3815,7 +3833,7 @@ def generate_caddyfile(settings=None):
         lines.append(f"{portal_host} {{")
         if ak.get('installed'):
             lines.append(f"    route {{")
-            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* {ak_up}")
             lines.append(f"")
             lines.append(f"        @public {{")
             lines.append(f"            path /request-access* /lookup* /styles.css /favicon.ico /branding/* /public/*")
@@ -3825,7 +3843,7 @@ def generate_caddyfile(settings=None):
             lines.append(f"            reverse_proxy {portal_up}")
             lines.append(f"        }}")
             lines.append(f"")
-            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"        forward_auth {ak_up} {{")
             lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
             lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Entitlements X-Authentik-Email X-Authentik-Name X-Authentik-Uid X-Authentik-Jwt X-Authentik-Meta-Jwks X-Authentik-Meta-Outpost X-Authentik-Meta-Provider X-Authentik-Meta-App X-Authentik-Meta-Version")
             lines.append(f"            trusted_proxies private_ranges")
@@ -3896,8 +3914,8 @@ def generate_caddyfile(settings=None):
             lines.append(f"        reverse_proxy {mtx_up}")
             lines.append(f"    }}")
             lines.append(f"    route {{")
-            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* {ak_up}")
+            lines.append(f"        forward_auth {ak_up} {{")
             lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
             lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
             lines.append(f"            trusted_proxies private_ranges")
@@ -11440,6 +11458,7 @@ def authentik_page():
     all_healthy = ak.get('installed') and ak.get('running') and all(
         'unhealthy' not in c.get('status', '') for c in container_info.get('containers', [])
     ) and len(container_info.get('containers', [])) > 0
+    authentik_deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
     return render_template_string(AUTHENTIK_TEMPLATE,
         settings=settings, ak=ak, container_info=container_info,
         ak_port=ak_port, authentik_base_url=_get_authentik_base_url(settings),
@@ -11451,12 +11470,34 @@ def authentik_page():
         error_log_exists=os.path.exists(os.path.join(CONFIG_DIR, 'authentik_error.log')),
         all_healthy=all_healthy,
         portal_installed=portal_installed,
-        portal_running=portal_running)
+        portal_running=portal_running,
+        authentik_deploy_cfg=authentik_deploy_cfg)
 
 @app.route('/api/authentik/control', methods=['POST'])
 @login_required
 def authentik_control():
     action = request.json.get('action')
+    settings = load_settings()
+    deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if deploy_cfg.get('target_mode') == 'remote':
+        remote = deploy_cfg.get('remote', {})
+        if not (remote.get('host') or '').strip():
+            return jsonify({'error': 'Remote host not configured'}), 400
+        ak_dir = '~/authentik'
+        if action == 'start':
+            _ssh_probe(remote, f'cd {ak_dir} && docker compose up -d 2>&1', timeout=120)
+        elif action == 'stop':
+            _ssh_probe(remote, f'cd {ak_dir} && docker compose stop 2>&1', timeout=60)
+        elif action == 'restart':
+            _ssh_probe(remote, f'cd {ak_dir} && docker compose restart 2>&1', timeout=120)
+        elif action == 'update':
+            _ssh_probe(remote, f'cd {ak_dir} && docker compose pull 2>&1 && docker compose up -d 2>&1', timeout=300)
+        else:
+            return jsonify({'error': 'Invalid action'}), 400
+        time.sleep(3)
+        ok, out = _ssh_probe(remote, 'docker ps --filter name=authentik-server --format "{{.Status}}"', timeout=10)
+        running = bool(ok and out and 'Up' in out)
+        return jsonify({'success': True, 'running': running, 'action': action})
     ak_dir = os.path.expanduser('~/authentik')
     if action == 'start':
         subprocess.run(f'cd {ak_dir} && docker compose up -d', shell=True, capture_output=True, text=True, timeout=120)
@@ -11478,6 +11519,12 @@ def authentik_control():
 def authentik_deploy():
     if authentik_deploy_status.get('running'):
         return jsonify({'error': 'Deployment already in progress'}), 409
+    data = request.get_json() or {}
+    if data.get('config'):
+        settings = load_settings()
+        cfg = _normalize_module_deployment_config(data['config'])
+        settings['authentik_deployment'] = cfg
+        save_settings(settings)
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': True, 'complete': False, 'error': False})
     threading.Thread(target=run_authentik_deploy, args=(False,), daemon=True).start()
@@ -11509,6 +11556,15 @@ def authentik_deploy_log_api():
 def authentik_container_logs():
     lines = request.args.get('lines', 50, type=int)
     container = request.args.get('container', '').strip()
+    settings = load_settings()
+    deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if deploy_cfg.get('target_mode') == 'remote' and (deploy_cfg.get('remote', {}).get('host') or '').strip():
+        if container:
+            ok, out = _ssh_probe(deploy_cfg['remote'], f'docker logs {container} --tail {lines} 2>&1', timeout=15)
+        else:
+            ok, out = _ssh_probe(deploy_cfg['remote'], f'cd ~/authentik && docker compose logs --tail {lines} 2>&1', timeout=15)
+        entries = [l for l in (out.strip().split('\n') if out and out.strip() else []) if l.strip()] if ok else []
+        return jsonify({'entries': entries})
     if container:
         r = subprocess.run(f'docker logs {container} --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=10)
     else:
@@ -11544,20 +11600,471 @@ def authentik_uninstall():
     auth = load_auth()
     if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
         return jsonify({'error': 'Invalid admin password'}), 403
-    ak_dir = os.path.expanduser('~/authentik')
     steps = []
-    if os.path.exists(ak_dir):
-        r = subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all --remove-orphans 2>&1', shell=True, capture_output=True, text=True, timeout=180)
-        steps.append('Stopped and removed Docker containers/volumes/images')
-        if r.returncode != 0:
-            steps.append(f'(compose reported: {(r.stderr or r.stdout or "").strip()[:200]})')
-        subprocess.run(f'rm -rf {ak_dir}', shell=True, capture_output=True)
-        steps.append('Removed ~/authentik')
+    settings = load_settings()
+    deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if deploy_cfg.get('target_mode') == 'remote':
+        remote = deploy_cfg.get('remote', {})
+        if (remote.get('host') or '').strip():
+            _ssh_probe(remote, 'cd ~/authentik && docker compose down -v 2>&1', timeout=180)
+            _ssh_probe(remote, 'rm -rf ~/authentik', timeout=30)
+            steps.append('Stopped and removed Authentik on remote host')
+        settings['authentik_deployment'] = dict(deploy_cfg)
+        settings['authentik_deployment']['deployed'] = False
+        save_settings(settings)
+        generate_caddyfile(settings)
+        subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+        steps.append('Updated Caddyfile')
     else:
-        steps.append('~/authentik not found (already removed)')
+        ak_dir = os.path.expanduser('~/authentik')
+        if os.path.exists(ak_dir):
+            r = subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all --remove-orphans 2>&1', shell=True, capture_output=True, text=True, timeout=180)
+            steps.append('Stopped and removed Docker containers/volumes/images')
+            if r.returncode != 0:
+                steps.append(f'(compose reported: {(r.stderr or r.stdout or "").strip()[:200]})')
+            subprocess.run(f'rm -rf {ak_dir}', shell=True, capture_output=True)
+            steps.append('Removed ~/authentik')
+        else:
+            steps.append('~/authentik not found (already removed)')
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
+
+
+def _run_authentik_deploy_remote(settings, deploy_cfg, plog):
+    """Deploy Authentik on a remote host via SSH (Docker Compose)."""
+    import secrets as _sec
+    remote = deploy_cfg.get('remote', {})
+    host = (remote.get('host') or '').strip()
+    if not host:
+        plog("✗ Remote host not configured")
+        authentik_deploy_status.update({'running': False, 'error': True})
+        return
+    plog(f"  Deploying Authentik to remote host: {host}")
+
+    # Step 1: Check/install Docker on remote
+    plog("━━━ Step 1/7: Checking Docker (remote) ━━━")
+    ok, out = _module_run(deploy_cfg, 'docker --version 2>&1', timeout=15)
+    if not ok or 'Docker version' not in (out or ''):
+        plog("  Docker not found. Installing...")
+        ok, out = _module_run(deploy_cfg, 'curl -fsSL https://get.docker.com | sh 2>&1', timeout=300, log_fn=plog)
+        if not ok:
+            plog("✗ Failed to install Docker")
+            authentik_deploy_status.update({'running': False, 'error': True})
+            return
+        ok, out = _module_run(deploy_cfg, 'docker --version 2>&1', timeout=15)
+        plog(f"  {(out or '').strip()}")
+    else:
+        plog(f"  {(out or '').strip()}")
+    plog("✓ Docker available on remote")
+
+    # Step 2: Create directory + generate secrets locally
+    plog("")
+    plog("━━━ Step 2/7: Setting Up Directory (remote) ━━━")
+    _module_run(deploy_cfg, 'mkdir -p ~/authentik/blueprints', timeout=10)
+    plog("✓ Directory ready")
+
+    # Step 3: Generate .env and copy to remote
+    plog("")
+    plog("━━━ Step 3/7: Generating Configuration ━━━")
+    pg_pass = subprocess.run('openssl rand -base64 36 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()[:90]
+    secret_key = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+    ldap_svc_pass = subprocess.run('openssl rand -base64 24 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+    bootstrap_pass = subprocess.run('openssl rand -base64 18 | tr -d "\\n"', shell=True, capture_output=True, text=True).stdout.strip()
+    bootstrap_token = subprocess.run('openssl rand -hex 32', shell=True, capture_output=True, text=True).stdout.strip()
+
+    ak_base = _get_authentik_base_url(settings)
+    fqdn = settings.get('fqdn', '')
+    cookie_line = f"\nAUTHENTIK_COOKIE_DOMAIN=.{fqdn.split(':')[0]}" if fqdn else ""
+
+    env_content = f"""PG_DB=authentik
+PG_USER=authentik
+PG_PASS={pg_pass}
+AUTHENTIK_SECRET_KEY={secret_key}
+COMPOSE_PORT_HTTP=9090
+COMPOSE_PORT_HTTPS=9443
+AUTHENTIK_ERROR_REPORTING__ENABLED=false
+AUTHENTIK_BOOTSTRAP_PASSWORD={bootstrap_pass}
+AUTHENTIK_BOOTSTRAP_TOKEN={bootstrap_token}
+AUTHENTIK_BOOTSTRAP_EMAIL=admin@takwerx.local
+AUTHENTIK_BOOTSTRAP_LDAPSERVICE_USERNAME=adm_ldapservice
+AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD={ldap_svc_pass}
+AUTHENTIK_BOOTSTRAP_LDAP_BASEDN=DC=takldap
+AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST=http://authentik-server-1:9000/
+AUTHENTIK_HOST={ak_base}
+AUTHENTIK_TOKEN={bootstrap_token}{cookie_line}
+"""
+
+    with open('/tmp/authentik_remote.env', 'w') as f:
+        f.write(env_content)
+    ok, _ = _module_copy(deploy_cfg, '/tmp/authentik_remote.env', '/tmp/authentik.env', log_fn=plog)
+    _module_run(deploy_cfg, 'mv /tmp/authentik.env ~/authentik/.env', timeout=10)
+    try:
+        os.remove('/tmp/authentik_remote.env')
+    except Exception:
+        pass
+    plog("✓ .env created")
+
+    # Step 4: Generate LDAP blueprint and copy
+    plog("")
+    plog("━━━ Step 4/7: Installing LDAP Blueprint ━━━")
+    bp_content = """version: 1
+metadata:
+  name: LDAP Setup for TAK
+  labels:
+    blueprints.goauthentik.io/description: |
+      Configures LDAP service account, provider, and outpost for TAK Server.
+    blueprints.goauthentik.io/depends-on: "default-flows,default-stages"
+context:
+  username: !Env [AUTHENTIK_BOOTSTRAP_LDAPSERVICE_USERNAME, 'adm_ldapservice']
+  password: !Env [AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD, null]
+  basedn: !Env [AUTHENTIK_BOOTSTRAP_LDAP_BASEDN, 'DC=takldap']
+  authentik_host: !Env [AUTHENTIK_BOOTSTRAP_LDAP_AUTHENTIK_HOST, 'http://localhost:9000/']
+entries:
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        name: Default - Invalidation flow
+      required: true
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        name: Default - Password change flow
+      required: true
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        name: Default - Authentication flow
+      required: true
+  - model: authentik_core.user
+    state: created
+    id: ldap-service-account
+    identifiers:
+      username: !Context username
+    attrs:
+      name: LDAP Service account
+      type: service_account
+      path: users
+  - attrs:
+      authentication: none
+      denied_action: message_continue
+      designation: authentication
+      layout: stacked
+      name: ldap-authentication-flow
+      policy_engine_mode: any
+      title: ldap-authentication-flow
+    identifiers:
+      slug: ldap-authentication-flow
+    model: authentik_flows.flow
+    state: present
+    id: ldap-authentication-flow
+  - attrs:
+      authentication: none
+      denied_action: message_continue
+      designation: authorization
+      layout: stacked
+      name: ldap-authorization-flow
+      policy_engine_mode: any
+      title: ldap-authorization-flow
+    identifiers:
+      slug: ldap-authorization-flow
+    model: authentik_flows.flow
+    state: present
+    id: ldap-authorization-flow
+  - attrs:
+      backends:
+      - authentik.core.auth.InbuiltBackend
+      - authentik.core.auth.TokenBackend
+      failed_attempts_before_cancel: 5
+    identifiers:
+      name: ldap-authentication-password
+    model: authentik_stages_password.passwordstage
+    state: present
+    id: ldap-authentication-password
+  - attrs:
+      case_insensitive_matching: true
+      pretend_user_exists: true
+      show_matched_user: true
+      user_fields:
+      - username
+    identifiers:
+      name: ldap-identification-stage
+    model: authentik_stages_identification.identificationstage
+    state: present
+    id: ldap-identification-stage
+  - attrs:
+      geoip_binding: bind_continent
+      network_binding: bind_asn
+      remember_me_offset: seconds=0
+      session_duration: seconds=0
+    identifiers:
+      name: ldap-authentication-login
+    model: authentik_stages_user_login.userloginstage
+    state: present
+    id: ldap-authentication-login
+  - attrs:
+      evaluate_on_plan: true
+      invalid_response_action: retry
+      policy_engine_mode: any
+      re_evaluate_policies: true
+    identifiers:
+      order: 10
+      stage: !KeyOf ldap-identification-stage
+      target: !KeyOf ldap-authentication-flow
+    model: authentik_flows.flowstagebinding
+    state: present
+    id: ldap-identification-stage-flow-binding
+  - attrs:
+      evaluate_on_plan: true
+      invalid_response_action: retry
+      policy_engine_mode: any
+      re_evaluate_policies: true
+    identifiers:
+      order: 15
+      stage: !KeyOf ldap-authentication-password
+      target: !KeyOf ldap-authentication-flow
+    model: authentik_flows.flowstagebinding
+    state: present
+    id: ldap-authentication-password-binding
+  - attrs:
+      evaluate_on_plan: true
+      invalid_response_action: retry
+      policy_engine_mode: any
+      re_evaluate_policies: true
+    identifiers:
+      order: 20
+      stage: !KeyOf ldap-authentication-login
+      target: !KeyOf ldap-authentication-flow
+    model: authentik_flows.flowstagebinding
+    state: present
+    id: ldap-authentication-login-binding
+  - model: authentik_providers_ldap.ldapprovider
+    id: provider
+    state: present
+    identifiers:
+      name: LDAP
+    attrs:
+      authentication_flow: !KeyOf ldap-authentication-flow
+      authorization_flow: !KeyOf ldap-authentication-flow
+      base_dn: !Context basedn
+      bind_mode: cached
+      gid_start_number: 4000
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+      mfa_support: false
+      name: Provider for LDAP
+      search_mode: cached
+      uid_start_number: 2000
+    permissions:
+      - permission: authentik_providers_ldap.search_full_directory
+        user: !KeyOf ldap-service-account
+  - model: authentik_core.application
+    id: app
+    state: present
+    identifiers:
+      slug: ldap
+    attrs:
+      name: LDAP
+      policy_engine_mode: any
+      provider: !KeyOf provider
+  - model: authentik_outposts.outpost
+    id: outpost
+    state: present
+    identifiers:
+      name: LDAP
+    attrs:
+      config:
+        authentik_host: !Context authentik_host
+      providers:
+      - !KeyOf provider
+      type: ldap
+"""
+    with open('/tmp/authentik_remote_bp.yaml', 'w') as f:
+        f.write(bp_content)
+    ok, _ = _module_copy(deploy_cfg, '/tmp/authentik_remote_bp.yaml', '/tmp/tak-ldap-setup.yaml', log_fn=plog)
+    _module_run(deploy_cfg, 'mv /tmp/tak-ldap-setup.yaml ~/authentik/blueprints/tak-ldap-setup.yaml', timeout=10)
+
+    bp_embedded_content = f"""version: 1
+metadata:
+  name: TAK Embedded Outpost Config
+  labels:
+    blueprints.goauthentik.io/description: Sets authentik_host for embedded outpost
+entries:
+  - model: authentik_outposts.outpost
+    state: present
+    identifiers:
+      managed: goauthentik.io/outposts/embedded
+    attrs:
+      config:
+        authentik_host: {ak_base}
+        authentik_host_insecure: false
+"""
+    with open('/tmp/authentik_remote_bp_embedded.yaml', 'w') as f:
+        f.write(bp_embedded_content)
+    ok, _ = _module_copy(deploy_cfg, '/tmp/authentik_remote_bp_embedded.yaml', '/tmp/tak-embedded-outpost.yaml', log_fn=plog)
+    _module_run(deploy_cfg, 'mv /tmp/tak-embedded-outpost.yaml ~/authentik/blueprints/tak-embedded-outpost.yaml', timeout=10)
+
+    try:
+        os.remove('/tmp/authentik_remote_bp.yaml')
+        os.remove('/tmp/authentik_remote_bp_embedded.yaml')
+    except Exception:
+        pass
+    plog("✓ Blueprints installed")
+
+    # Step 5: Generate docker-compose.yml and copy
+    plog("")
+    plog("━━━ Step 5/7: Creating Docker Compose ━━━")
+    compose_content = """services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - database:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:?database password required}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_DB: ${PG_DB:-authentik}
+      POSTGRES_MAX_CONNECTIONS: "200"
+  redis:
+    image: docker.io/library/redis:alpine
+    command: --save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    volumes:
+      - redis:/data
+  server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.2.0}
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+    volumes:
+      - ./media:/media
+      - ./custom-templates:/templates
+      - ./blueprints:/blueprints/custom
+    env_file:
+      - .env
+    ports:
+      - "${COMPOSE_PORT_HTTP:-9000}:9000"
+      - "${COMPOSE_PORT_HTTPS:-9443}:9443"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.2.0}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./media:/media
+      - ./certs:/certs
+      - ./custom-templates:/templates
+      - ./blueprints:/blueprints/custom
+    env_file:
+      - .env
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  ldap:
+    image: ghcr.io/goauthentik/ldap:${AUTHENTIK_TAG:-2026.2.0}
+    ports:
+      - 389:3389
+      - 636:6636
+    environment:
+      AUTHENTIK_HOST: http://authentik-server-1:9000
+      AUTHENTIK_INSECURE: "true"
+      AUTHENTIK_TOKEN: placeholder
+    restart: unless-stopped
+volumes:
+  database:
+    driver: local
+  redis:
+    driver: local
+"""
+    with open('/tmp/authentik_remote_compose.yml', 'w') as f:
+        f.write(compose_content)
+    ok, _ = _module_copy(deploy_cfg, '/tmp/authentik_remote_compose.yml', '/tmp/docker-compose.yml', log_fn=plog)
+    _module_run(deploy_cfg, 'mv /tmp/docker-compose.yml ~/authentik/docker-compose.yml', timeout=10)
+    try:
+        os.remove('/tmp/authentik_remote_compose.yml')
+    except Exception:
+        pass
+    plog("✓ docker-compose.yml created")
+
+    # Step 6: Docker Compose up
+    plog("")
+    plog("━━━ Step 6/7: Starting Authentik (remote) ━━━")
+    plog("  Running docker compose up (this may take 2-5 minutes)...")
+    ok, out = _module_run(deploy_cfg, 'cd ~/authentik && docker compose pull 2>&1', timeout=600, log_fn=plog)
+    if not ok:
+        plog(f"  ⚠ Pull had issues: {(out or '').strip()[:200]}")
+    ok, out = _module_run(deploy_cfg, 'cd ~/authentik && docker compose up -d 2>&1', timeout=300, log_fn=plog)
+    if not ok:
+        plog(f"✗ Docker Compose failed")
+        authentik_deploy_status.update({'running': False, 'error': True})
+        return
+    plog("✓ Containers started")
+
+    plog("  Waiting for Authentik to become healthy...")
+    for attempt in range(60):
+        ok, out = _module_run(deploy_cfg, 'docker ps --filter name=authentik-server --format "{{.Status}}" 2>/dev/null', timeout=10)
+        if ok and 'healthy' in (out or '').lower():
+            plog("✓ Authentik is healthy!")
+            break
+        if attempt % 6 == 0 and attempt > 0:
+            plog(f"  ⏳ {attempt * 5}s...")
+        time.sleep(5)
+    else:
+        plog("⚠ Authentik not healthy after 5 minutes — may still be starting")
+
+    # Step 7: Caddy integration + save settings
+    plog("")
+    plog("━━━ Step 7/7: Caddy Integration ━━━")
+    cfg = _normalize_module_deployment_config(deploy_cfg)
+    cfg['deployed'] = True
+    settings['authentik_deployment'] = cfg
+    save_settings(settings)
+    generate_caddyfile(settings)
+    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
+    plog("✓ Caddyfile updated")
+
+    _module_run(deploy_cfg, 'ufw allow 9090/tcp 2>/dev/null; ufw allow 9443/tcp 2>/dev/null; ufw allow 389/tcp 2>/dev/null; ufw allow 636/tcp 2>/dev/null; true', timeout=15)
+    plog("✓ Firewall ports opened")
+
+    plog("")
+    plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    plog(f"🎉 Authentik deployed on remote host {host}!")
+    if fqdn:
+        plog(f"   URL: {ak_base}")
+    plog(f"   Admin: akadmin / {bootstrap_pass}")
+    plog(f"   API Token: {bootstrap_token}")
+    plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    authentik_deploy_status.update({'running': False, 'complete': True, 'error': False})
 
 
 def run_authentik_deploy(reconfigure=False):
@@ -11572,6 +12079,11 @@ def run_authentik_deploy(reconfigure=False):
         env_path = os.path.join(ak_dir, '.env')
         compose_path = os.path.join(ak_dir, 'docker-compose.yml')
         ldap_svc_pass = None
+
+        deploy_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+        if deploy_cfg.get('target_mode') == 'remote' and not reconfigure:
+            _run_authentik_deploy_remote(settings, deploy_cfg, plog)
+            return
 
         if reconfigure:
             if not os.path.exists(ak_dir) or not os.path.exists(env_path) or not os.path.exists(compose_path):
@@ -13077,6 +13589,65 @@ It provides centralized user authentication and management for all your services
 <span style="color:var(--text-dim)">Recommended: 2+ CPU cores, 2+ GB RAM</span>
 </div>
 </div>
+
+<!-- Deployment Target -->
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+  <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="authentikToggleSection('authentik-target')">
+    <span class="section-title" style="margin-bottom:0">Deployment Target</span>
+    <span id="authentik-target-toggle-icon" style="font-size:18px;color:var(--text-dim);transition:transform 0.2s ease">&#9662;</span>
+  </div>
+  <div id="authentik-target-body" style="display:none;padding-top:12px;border-top:1px solid var(--border);margin-top:12px">
+    <div class="form-group" style="margin-bottom:12px">
+      <label class="form-label">Where should Authentik run?</label>
+      <select id="authentik-target-mode" class="form-input" style="max-width:340px">
+        <option value="local" {% if authentik_deploy_cfg.target_mode != 'remote' %}selected{% endif %}>On this infra-TAK host</option>
+        <option value="remote" {% if authentik_deploy_cfg.target_mode == 'remote' %}selected{% endif %}>On a remote host (SSH)</option>
+      </select>
+    </div>
+    <div id="authentik-remote-fields" style="display:{% if authentik_deploy_cfg.target_mode == 'remote' %}block{% else %}none{% endif %}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">Remote Host/IP</label>
+          <input id="authentik-remote-host" class="form-input" type="text" placeholder="10.0.0.15" value="{{ authentik_deploy_cfg.remote.host or '' }}">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">SSH Port</label>
+          <input id="authentik-remote-port" class="form-input" type="number" min="1" max="65535" value="{{ authentik_deploy_cfg.remote.port or 22 }}">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">SSH Username</label>
+          <input id="authentik-remote-user" class="form-input" type="text" placeholder="root" value="{{ authentik_deploy_cfg.remote.username or 'root' }}">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">SSH Key Path</label>
+          <input id="authentik-remote-key" class="form-input" type="text" placeholder="~/.ssh/infra-tak-authentik" value="{{ authentik_deploy_cfg.remote.ssh_key_path or '' }}">
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label class="form-label">One-time remote password (for key copy only)</label>
+        <input id="authentik-remote-password" class="form-input" type="password" placeholder="Used only for Install SSH Key">
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Password is never stored. Used only for <code>ssh-copy-id</code>.</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-ghost" type="button" onclick="ensureAuthentikSshKey()">Generate SSH key</button>
+        <button class="btn btn-ghost" type="button" onclick="installAuthentikSshKey()">Install SSH key</button>
+        <button class="btn btn-ghost" type="button" onclick="testAuthentikRemoteSsh()">Test SSH</button>
+      </div>
+      <div id="authentik-ssh-status" style="margin-bottom:12px;font-size:12px;color:var(--text-dim)"></div>
+      <div class="form-group" style="margin-bottom:0">
+        <label class="form-label">Public key (manual copy fallback)</label>
+        <textarea id="authentik-public-key" class="form-input" rows="3" readonly placeholder="Click Generate SSH key to show"></textarea>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+      <button class="btn btn-ghost" type="button" onclick="saveAuthentikTarget()">Save target settings</button>
+      <span id="authentik-target-save-msg" style="font-size:12px;color:var(--text-dim)"></span>
+    </div>
+  </div>
+</div>
+
 <button class="deploy-btn" id="deploy-btn" onclick="deployAk()">🚀 Deploy Authentik</button>
 {% if not settings.fqdn %}
 <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:16px 20px;margin-top:16px;font-size:13px;color:#f87171">
@@ -13148,8 +13719,9 @@ async function deployAk(){
     var btn=document.getElementById('deploy-btn');
     btn.disabled=true;btn.textContent='Deploying...';btn.style.opacity='0.7';btn.style.cursor='wait';
     document.getElementById('deploy-log').style.display='block';
+    var config=typeof collectAuthentikDeployConfig==='function'?collectAuthentikDeployConfig():{};
     try{
-        var r=await fetch('/api/authentik/deploy',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var r=await fetch('/api/authentik/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:config})});
         var d=await r.json();
         if(d.success)pollDeployLog();
         else{var lg=document.getElementById('deploy-log');if(lg)lg.textContent='Error: '+d.error;var card=lg?lg.closest('.card'):null;if(card&&!document.getElementById('deploy-fail-banner')){var b=document.createElement('div');b.id='deploy-fail-banner';b.style.cssText='background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:var(--red)';b.innerHTML='<strong>\u2717 Deployment failed.</strong> Uninstall (if partial) and retry, or click Retry below.';card.insertBefore(b,card.firstChild);}btn.disabled=false;btn.textContent='\u2717 Deployment failed \u2014 Retry';btn.style.background='var(--red)';btn.style.opacity='1';btn.style.cursor='pointer';btn.onclick=function(){btn.textContent='Deploy Authentik';btn.style.background='';deployAk();};}
@@ -13286,6 +13858,85 @@ async function doUninstallAk(){
         cancelBtn.disabled=false;
     }
 }
+
+function collectAuthentikDeployConfig() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  var mode = modeEl ? modeEl.value : 'local';
+  var cfg = { target_mode: mode };
+  if (mode === 'remote') {
+    var host = (document.getElementById('authentik-remote-host') || {}).value || '';
+    var user = (document.getElementById('authentik-remote-user') || {}).value || 'root';
+    var key = (document.getElementById('authentik-remote-key') || {}).value || '';
+    var portVal = (document.getElementById('authentik-remote-port') || {}).value || '22';
+    var p = parseInt(portVal, 10);
+    cfg.remote = { host: host.trim(), ssh_user: (user || 'root').trim(), ssh_port: isNaN(p) ? 22 : p, ssh_key_path: key.trim() };
+  }
+  return cfg;
+}
+function toggleAuthentikTargetFields() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  var remoteBox = document.getElementById('authentik-remote-fields');
+  if (modeEl && remoteBox) remoteBox.style.display = modeEl.value === 'remote' ? 'block' : 'none';
+}
+function authentikToggleSection(id) {
+  var body = document.getElementById(id + '-body');
+  var icon = document.getElementById(id + '-toggle-icon');
+  if (!body) return;
+  var show = body.style.display === 'none';
+  body.style.display = show ? 'block' : 'none';
+  if (icon) icon.style.transform = show ? 'rotate(180deg)' : '';
+}
+function saveAuthentikTarget() {
+  var msg = document.getElementById('authentik-target-save-msg');
+  if (msg) msg.textContent = 'Saving...';
+  fetch('/api/authentik/deployment-config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ config: collectAuthentikDeployConfig() }), credentials: 'same-origin' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && (d.target_mode !== undefined || d.remote)) { if (msg) msg.textContent = 'Saved'; setTimeout(function() { if (msg) msg.textContent = ''; }, 1600); }
+      else if (msg) msg.textContent = (d && d.error) ? d.error : 'Save failed';
+    }).catch(function(e) { if (msg) msg.textContent = 'Save failed: ' + (e && e.message ? e.message : String(e)); });
+}
+function _authentikSshStatus(msg, isError, isSuccess) {
+  var el = document.getElementById('authentik-ssh-status');
+  if (el) { el.style.color = isError ? 'var(--red)' : isSuccess ? 'var(--green)' : 'var(--text-dim)'; el.textContent = msg || ''; }
+}
+function ensureAuthentikSshKey() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  if (modeEl && modeEl.value !== 'remote') { modeEl.value = 'remote'; toggleAuthentikTargetFields(); }
+  _authentikSshStatus('Generating SSH key...', false);
+  fetch('/api/authentik/remote/ensure-ssh-key', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ config: collectAuthentikDeployConfig() }), credentials: 'same-origin' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (!d || !d.success) { _authentikSshStatus((d && d.error) ? d.error : 'Key generation failed', true); return; }
+      var keyEl = document.getElementById('authentik-remote-key'); if (d.key_path && keyEl) keyEl.value = d.key_path;
+      var pk = document.getElementById('authentik-public-key'); if (pk) pk.value = d.public_key || '';
+      _authentikSshStatus('\u2713 ' + (d.message || 'SSH key ready') + (d.fingerprint ? ' | ' + d.fingerprint : ''), false, true);
+    }).catch(function(e) { _authentikSshStatus('Key generation failed: ' + (e && e.message ? e.message : String(e)), true); });
+}
+function installAuthentikSshKey() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  if (modeEl && modeEl.value !== 'remote') { modeEl.value = 'remote'; toggleAuthentikTargetFields(); }
+  var pw = (document.getElementById('authentik-remote-password') || {}).value || '';
+  if (!pw) { _authentikSshStatus('Enter password for ssh-copy-id', true); return; }
+  _authentikSshStatus('Installing key...', false);
+  fetch('/api/authentik/remote/install-ssh-key', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ password: pw, config: collectAuthentikDeployConfig() }), credentials: 'same-origin' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.success) { _authentikSshStatus('\u2713 SSH key installed', false, true); }
+      else { _authentikSshStatus((d && d.error) ? d.error : 'Install failed', true); }
+    }).catch(function(e) { _authentikSshStatus('Install failed: ' + (e && e.message ? e.message : String(e)), true); });
+}
+function testAuthentikRemoteSsh() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  if (modeEl && modeEl.value !== 'remote') { modeEl.value = 'remote'; toggleAuthentikTargetFields(); }
+  _authentikSshStatus('Testing SSH...', false);
+  fetch('/api/authentik/remote/test', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ config: collectAuthentikDeployConfig() }), credentials: 'same-origin' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d && d.success) { _authentikSshStatus('\u2713 Test passed', false, true); }
+      else { _authentikSshStatus((d && d.error) ? d.error : (d && d.output) || 'Test failed', true); }
+    }).catch(function(e) { _authentikSshStatus('Test failed: ' + (e && e.message ? e.message : String(e)), true); });
+}
+document.addEventListener('DOMContentLoaded', function() {
+  var modeEl = document.getElementById('authentik-target-mode');
+  if (modeEl) modeEl.addEventListener('change', toggleAuthentikTargetFields);
+});
 
 {% if deploying %}pollDeployLog();{% endif %}
 </script>
@@ -15688,7 +16339,7 @@ def run_takserver_deploy(config):
                 ('ORGANIZATIONAL_UNIT', config['cert_ou'])]
         for var, val in subs:
             if val:
-                run_cmd(f'''sed -i 's/^{var}=.*/{var}={val}/' /opt/tak/certs/cert-metadata.sh''', check=False)
+                run_cmd(f'''sed -i 's/^{var}=.*/{var}="{val}"/' /opt/tak/certs/cert-metadata.sh''', check=False)
 
         _patch_openssl_string_mask(log_step)
 
