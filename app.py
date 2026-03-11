@@ -4785,6 +4785,8 @@ def takportal_control():
             subprocess.run('docker restart tak-portal', shell=True, capture_output=True, text=True, timeout=30)
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)[:300]}), 500
+        # Fix Authentik TAK Portal Proxy URL only (external_host + cookie_domain), do not touch outpost
+        _sync_authentik_takportal_provider_url(settings)
         time.sleep(2)
         r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
         running = 'Up' in (r.stdout or '')
@@ -8964,6 +8966,45 @@ def _ensure_proxy_providers_cookie_domain(ak_url, ak_headers, fqdn, plog=None):
         _log("  ✓ Proxy providers cookie_domain set for shared session")
     except Exception as e:
         _log(f"  ⚠ Proxy cookie_domain: {str(e)[:80]}")
+
+
+def _sync_authentik_takportal_provider_url(settings):
+    """Set TAK Portal Proxy provider external_host and cookie_domain only. Does not touch outpost."""
+    import urllib.request as _req
+    import urllib.error
+    fqdn = (settings.get('fqdn') or '').strip()
+    if not fqdn:
+        return
+    ak_url = _get_authentik_api_url(settings)
+    ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
+    if not ak_token:
+        return
+    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    base = fqdn.split(':')[0].split('/')[0]
+    desired_host = f'https://takportal.{base}'
+    desired_cookie = f'.{base}'
+    try:
+        r = _req.Request(f'{ak_url}/api/v3/providers/proxy/?page_size=100', headers=ak_headers)
+        data = json.loads(_req.urlopen(r, timeout=15).read().decode())
+        for prov in data.get('results', []):
+            if (prov.get('name') or '').strip() != 'TAK Portal Proxy':
+                continue
+            pk = prov.get('pk')
+            if not pk:
+                continue
+            ext = (prov.get('external_host') or '').strip().rstrip('/')
+            cookie = (prov.get('cookie_domain') or '').strip()
+            patch = {}
+            if ext != desired_host:
+                patch['external_host'] = desired_host
+            if cookie != desired_cookie:
+                patch['cookie_domain'] = desired_cookie
+            if patch:
+                _req.urlopen(_req.Request(f'{ak_url}/api/v3/providers/proxy/{pk}/',
+                    data=json.dumps(patch).encode(), headers=ak_headers, method='PATCH'), timeout=10)
+            break
+    except Exception:
+        pass
 
 
 def _sync_authentik_provider_external_hosts(ak_url, ak_headers, fqdn, correct_authentik_base_url, plog=None):
