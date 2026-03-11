@@ -12865,6 +12865,40 @@ volumes:
     authentik_deploy_status.update({'running': False, 'complete': True, 'error': False})
 
 
+def _find_authentik_install_dir():
+    """Return (ak_dir, env_path, compose_path) if found, else (None, None, None). Tries ~/authentik, /opt/authentik, then docker compose project dir."""
+    for candidate in [os.path.expanduser('~/authentik'), '/opt/authentik']:
+        if not candidate:
+            continue
+        env_path = os.path.join(candidate, '.env')
+        compose_path = os.path.join(candidate, 'docker-compose.yml')
+        if os.path.exists(env_path) and os.path.exists(compose_path):
+            return (candidate, env_path, compose_path)
+    try:
+        r = subprocess.run(
+            ['docker', 'ps', '-q', '-f', 'name=authentik-server'],
+            capture_output=True, text=True, timeout=5
+        )
+        if not (r.returncode == 0 and r.stdout and r.stdout.strip()):
+            return (None, None, None)
+        cid = r.stdout.strip().split('\n')[0].strip()
+        if not cid:
+            return (None, None, None)
+        r2 = subprocess.run(
+            ['docker', 'inspect', cid, '--format', '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'],
+            capture_output=True, text=True, timeout=5
+        )
+        if r2.returncode == 0 and r2.stdout and r2.stdout.strip():
+            candidate = r2.stdout.strip()
+            env_path = os.path.join(candidate, '.env')
+            compose_path = os.path.join(candidate, 'docker-compose.yml')
+            if os.path.exists(env_path) and os.path.exists(compose_path):
+                return (candidate, env_path, compose_path)
+    except Exception:
+        pass
+    return (None, None, None)
+
+
 def run_authentik_deploy(reconfigure=False):
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
@@ -12885,7 +12919,10 @@ def run_authentik_deploy(reconfigure=False):
 
         if reconfigure:
             if not os.path.exists(ak_dir) or not os.path.exists(env_path) or not os.path.exists(compose_path):
+                ak_dir, env_path, compose_path = _find_authentik_install_dir()
+            if not ak_dir or not os.path.exists(env_path) or not os.path.exists(compose_path):
                 plog("\u2717 Authentik not fully installed. Run a full Deploy first.")
+                plog("  (Config dir with .env and docker-compose.yml not found in ~/authentik, /opt/authentik, or container labels.)")
                 authentik_deploy_status.update({'running': False, 'error': True})
                 return
             with open(env_path) as f:
