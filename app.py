@@ -4149,9 +4149,11 @@ def generate_caddyfile(settings=None):
         ct_tiles = sd['cloudtak_tiles']
         ct_video = sd['cloudtak_video']
         ct_up = _get_cloudtak_upstreams(settings)
-        lines.append(f"# CloudTAK Web UI")
+        lines.append(f"# CloudTAK Web UI (flush for SSE channels / WebSocket)")
         lines.append(f"{ct_map} {{")
-        lines.append(f"    reverse_proxy {ct_up['map']}")
+        lines.append(f"    reverse_proxy {ct_up['map']} {{")
+        lines.append(f"        flush_interval -1")
+        lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
         lines.append(f"# CloudTAK Tile Server (CORS for map origin)")
@@ -5063,6 +5065,7 @@ def takportal_uninstall():
         steps.append('Removed ~/TAK-Portal')
     takportal_deploy_log.clear()
     takportal_deploy_status.update({'running': False, 'complete': False, 'error': False})
+    _update_boot_stagger_service()
     return jsonify({'success': True, 'steps': steps})
 
 def _portal_email_settings(settings):
@@ -5498,6 +5501,7 @@ def run_takportal_deploy():
             if remaining % 30 == 0:
                 plog(f"  ⏳ {remaining} seconds remaining...")
         plog("  ✓ Sync complete — TAK Portal is ready")
+        _update_boot_stagger_service()
         takportal_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
         plog(f"\u2717 FATAL ERROR: {str(e)}")
@@ -7283,6 +7287,7 @@ def cloudtak_uninstall():
             cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
             generate_caddyfile()
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
+            _update_boot_stagger_service()
             cloudtak_uninstall_status.update({'running': False, 'done': True, 'error': None})
         except subprocess.TimeoutExpired:
             cloudtak_uninstall_status.update({'running': False, 'done': True, 'error': 'Uninstall timed out'})
@@ -7836,6 +7841,7 @@ def run_cloudtak_deploy(cfg=None):
         cfg['deployed'] = True
         settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
         save_settings(settings)
+        _update_boot_stagger_service()
         cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
 
     except Exception as e:
@@ -8736,6 +8742,62 @@ print("OK_RESTARTED")
     if log_fn and 'OK_ALREADY' in out:
         log_fn("✓ Docker log limits already set on remote.")
     return True, False
+
+
+def _update_boot_stagger_service():
+    """Create/update a systemd service that staggers Docker container startup on boot.
+    Called after any module deploy or uninstall so it always reflects current state.
+    Startup order: Authentik DB -> Authentik -> TAK Portal -> CloudTAK."""
+    try:
+        BOOT_ORDER = [
+            ('Authentik DB', ['authentik-postgresql-1'], 5),
+            ('Authentik', ['authentik-server-1', 'authentik-worker-1'], 10),
+            ('Authentik LDAP', ['authentik-ldap-1'], 5),
+            ('TAK Portal', ['tak-portal'], 5),
+            ('CloudTAK DB', ['cloudtak-postgis-1'], 5),
+            ('CloudTAK', ['cloudtak-api-1', 'cloudtak-tiles-1', 'cloudtak-events-1', 'cloudtak-store-1', 'cloudtak-media-1'], 0),
+        ]
+        existing = set()
+        r = subprocess.run('docker ps -a --format "{{.Names}}"', shell=True, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            existing = {name.strip() for name in r.stdout.strip().split('\n') if name.strip()}
+        steps = []
+        for label, containers, sleep_after in BOOT_ORDER:
+            present = [c for c in containers if c in existing]
+            if present:
+                steps.append(f'echo "Starting {label}..." && docker start {" ".join(present)}')
+                if sleep_after > 0:
+                    steps.append(f'sleep {sleep_after}')
+        if not steps:
+            svc = '/etc/systemd/system/docker-stagger.service'
+            if os.path.exists(svc):
+                subprocess.run('systemctl disable docker-stagger 2>/dev/null; rm -f /etc/systemd/system/docker-stagger.service; systemctl daemon-reload',
+                               shell=True, capture_output=True, timeout=10)
+            return
+        all_containers = []
+        for _, containers, _ in BOOT_ORDER:
+            all_containers.extend(c for c in containers if c in existing)
+        stop_cmd = f'docker stop {" ".join(all_containers)} 2>/dev/null; true'
+        steps.append('echo "All containers started"')
+        exec_cmd = ' && \\\n  '.join(steps)
+        unit = (
+            '[Unit]\n'
+            'Description=Stagger Docker container startup on boot\n'
+            'After=docker.service\n'
+            'Requires=docker.service\n\n'
+            '[Service]\n'
+            'Type=oneshot\n'
+            'RemainAfterExit=yes\n'
+            f"ExecStart=/bin/bash -c '\\\n  {stop_cmd} && \\\n  {exec_cmd}'\n\n"
+            '[Install]\n'
+            'WantedBy=multi-user.target\n'
+        )
+        with open('/etc/systemd/system/docker-stagger.service', 'w') as f:
+            f.write(unit)
+        subprocess.run('systemctl daemon-reload && systemctl enable docker-stagger 2>/dev/null',
+                       shell=True, capture_output=True, timeout=10)
+    except Exception:
+        pass
 
 
 def _ensure_docker_log_limits(log_fn=None):
@@ -12751,6 +12813,7 @@ def authentik_uninstall():
             steps.append('~/authentik not found (already removed)')
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
+    _update_boot_stagger_service()
     return jsonify({'success': True, 'steps': steps})
 
 
@@ -14777,6 +14840,7 @@ entries:
             plog("  2. SMTP and password recovery are already configured (Email Relay was set up).")
         plog("=" * 50)
         plog("  ✓ Deploy complete.")
+        _update_boot_stagger_service()
         authentik_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
         plog(f"\u2717 FATAL ERROR: {str(e)}")
@@ -18374,6 +18438,7 @@ def run_full_uninstall():
         plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         plog("All deployed services removed. Console remains. Use Marketplace to deploy again.")
         plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        _update_boot_stagger_service()
         full_uninstall_status.update({'running': False, 'done': True, 'error': None})
     except subprocess.TimeoutExpired:
         full_uninstall_status.update({'running': False, 'done': True, 'error': 'Uninstall timed out'})
