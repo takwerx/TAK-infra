@@ -119,6 +119,10 @@ This has happened before; the cause and fix are the same whether Authentik is on
 
 **Same-host vs remote (TAK Portal + Authentik):** When Authentik is on the same host, the TAK Portal container reaches it via **network_mode: host (127.0.0.1:9090 = host)** (deploy adds `extra_hosts` so that hostname resolves and sets **AUTHENTIK_URL** in the container environment so it overrides the repo’s `.env` if that had 127.0.0.1:9090). When Authentik is remote, TAK Portal uses the remote host:9090. After pulling new console code, **redeploy TAK Portal once** so the compose patch and env take effect; then ECONNREFUSED 127.0.0.1:9090 from the container should stop. Changes for remote must not break same-host.
 
+**One-time fix if TAK Portal still gets ECONNREFUSED 127.0.0.1:9090 (same-host):** On the VPS run:
+`cd ~/TAK-Portal && sed -i '/restart: unless-stopped/a\    network_mode: host' docker-compose.yml && docker compose up -d --force-recreate`
+Then check: `docker inspect tak-portal --format '{{.HostConfig.NetworkMode}}'` should print `host`.
+
 ---
 
 ## Two-server TAK deploy (split DB + Core)

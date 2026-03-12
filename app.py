@@ -5192,11 +5192,13 @@ def run_takportal_deploy():
             if same_host_authentik and 'network_mode' not in compose_content:
                 # Same-host: use host network so 127.0.0.1:9090 in container = host's Authentik (no URL hacks)
                 before_len = len(compose_content)
+                # Match "  restart: unless-stopped" or "    restart: ..." and add network_mode with same indent
                 compose_content = re.sub(
-                    r'(\s*restart:\s*unless-stopped)',
-                    r'\1\n network_mode: host',
+                    r'^(\s*)restart:\s*unless-stopped\s*$',
+                    r'\1restart: unless-stopped\n\1network_mode: host',
                     compose_content,
-                    count=1
+                    count=1,
+                    flags=re.MULTILINE
                 )
                 if len(compose_content) > before_len:
                     needs_write = True
