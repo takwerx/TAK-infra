@@ -42,6 +42,27 @@ async function syncWebadmin(){
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.style.opacity='1';}}
 }
+async function setWebadminPassword(){
+    var pwEl=document.getElementById('set-webadmin-pw');
+    var confirmEl=document.getElementById('set-webadmin-pw-confirm');
+    var msgEl=document.getElementById('set-webadmin-pw-msg');
+    var btn=document.getElementById('set-webadmin-pw-btn');
+    if(!pwEl||!confirmEl||!msgEl)return;
+    var pw=(pwEl.value||'').trim();
+    var confirmVal=(confirmEl.value||'').trim();
+    if(!pw){msgEl.textContent='Enter a password';msgEl.style.color='var(--red)';return;}
+    if(pw!==confirmVal){msgEl.textContent='Passwords do not match';msgEl.style.color='var(--red)';return;}
+    if(pw.length<15){msgEl.textContent='Use at least 15 characters (upper, lower, number, special)';msgEl.style.color='var(--red)';return;}
+    if(btn)btn.disabled=true;
+    msgEl.textContent='Saving...';msgEl.style.color='var(--text-dim)';
+    try{
+        var r=await fetch('/api/takserver/webadmin-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+        var d=await r.json();
+        if(d.success){msgEl.textContent='Saved. Click Sync webadmin to Authentik to push to 8446.';msgEl.style.color='var(--green)';pwEl.value='';confirmEl.value='';}
+        else{msgEl.textContent=d.error||d.message||'Save failed';msgEl.style.color='var(--red)';}
+    }catch(e){msgEl.textContent='Error: '+e.message;msgEl.style.color='var(--red)';}
+    if(btn)btn.disabled=false;
+}
 
 async function saveTakCertPassword(){
     var input=document.getElementById('tak-cert-password-input');

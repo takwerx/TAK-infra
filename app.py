@@ -3766,6 +3766,33 @@ def _get_authentik_api_url(settings):
     return f'http://{upstream}'
 
 
+def _check_authentik_api_reachable(settings):
+    """Verify we can reach the Authentik API (for remote: ensures firewall allows console -> Authentik:9090).
+    Returns (True, None) if reachable, (False, error_msg) otherwise."""
+    import urllib.request as _req
+    import urllib.error
+    url = _get_authentik_api_url(settings)
+    token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
+    if not token:
+        return False, 'Authentik .env not found (no token)'
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    try:
+        r = _req.Request(f'{url}/api/v3/flows/instances/?page_size=1', headers=headers)
+        _req.urlopen(r, timeout=15)
+        return True, None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f'Authentik API rejected token ({e.code}). Check AUTHENTIK_BOOTSTRAP_TOKEN or AUTHENTIK_TOKEN in Authentik .env.'
+        return False, f'Authentik API returned {e.code}'
+    except OSError as e:
+        err = str(e).lower()
+        if 'timed out' in err or 'timeout' in err:
+            return False, f'Cannot reach Authentik at {url} (timeout). For remote Authentik, open port 9090 from this host to the Authentik server.'
+        if 'refused' in err or 'connection' in err:
+            return False, f'Cannot reach Authentik at {url} (connection refused). For remote Authentik, ensure Authentik is running and port 9090 is open from this host.'
+        return False, f'Authentik unreachable: {str(e)[:120]}'
+
+
 def _get_authentik_env_content(settings):
     """Return raw content of Authentik .env (local file or fetched via SSH when remote). None if unavailable."""
     cfg = _get_module_deployment_config(settings, 'authentik_deployment')
@@ -15903,6 +15930,11 @@ def takserver_sync_webadmin():
     settings = load_settings()
     if not _get_authentik_env_content(settings):
         return jsonify({'success': False, 'message': 'Authentik not installed'}), 400
+    ak_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
+    if ak_cfg.get('target_mode') == 'remote' and (ak_cfg.get('remote', {}).get('host') or '').strip():
+        ok_api, err_api = _check_authentik_api_reachable(settings)
+        if not ok_api:
+            return jsonify({'success': False, 'message': err_api or 'Cannot reach Authentik API'}), 400
     ok, err = _ensure_authentik_webadmin()
     if ok:
         return jsonify({'success': True, 'message': 'Webadmin user synced to Authentik. Use the same password you set at TAK Server deploy to log in to 8446.'})
@@ -16007,6 +16039,11 @@ def takserver_connect_ldap():
     settings = load_settings()
     ak_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
     is_remote_ak = ak_cfg.get('target_mode') == 'remote' and (ak_cfg.get('remote', {}).get('host') or '').strip()
+    # For remote Authentik, verify API reachability first (console must reach Authentik host:9090)
+    if is_remote_ak:
+        ok_api, err_api = _check_authentik_api_reachable(settings)
+        if not ok_api:
+            return jsonify({'success': False, 'message': err_api or 'Authentik API unreachable'}), 400
     # Fix LDAP blueprint if it has the broken password_stage (causes "invalid credentials" / recursion on user bind). Same fix for local or remote.
     if is_remote_ak:
         ok_bp, out = _module_run(ak_cfg, "grep -q 'password_stage: !KeyOf ldap-authentication-password' ~/authentik/blueprints/tak-ldap-setup.yaml 2>/dev/null && sed -i '/password_stage: !KeyOf ldap-authentication-password/d' ~/authentik/blueprints/tak-ldap-setup.yaml && cd ~/authentik && docker compose restart worker 2>&1; echo BP_DONE", timeout=120)
@@ -16035,8 +16072,11 @@ def takserver_connect_ldap():
     ok_flow, err_flow = _ensure_ldap_flow_authentication_none()
     if not ok_flow:
         diag.append(f'Flow fix: {err_flow}')
-    else:
-        diag.append('Flow: OK')
+        msg = ' | '.join(diag)
+        if is_remote_ak:
+            msg += '. For remote Authentik ensure this host can reach the Authentik server on port 9090 (firewall).'
+        return jsonify({'success': False, 'message': msg}), 400
+    diag.append('Flow: OK')
     # Ensure LDAP app has no restrictive policy (blocks QR registration for non-admin users)
     try:
         settings = load_settings()
@@ -18990,7 +19030,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <span id="sync-webadmin-msg" style="font-size:12px;color:var(--text-dim)"></span><span id="resync-ldap-msg" style="font-size:12px;color:var(--text-dim)"></span>
 </div>
 <p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:4px"><strong>Resync LDAP</strong> — Re-runs the full flow (fix blueprint if needed, restart Authentik worker, ensure service account &amp; webadmin, sync CoreConfig). Use after pulling console updates or if QR/login fails.</p>
-<p style="font-size:11px;color:var(--text-dim);margin-top:0;margin-bottom:0"><strong>Sync webadmin</strong> — Only pushes the 8446 password from settings into Authentik. Does not restart anything.</p>
+<p style="font-size:11px;color:var(--text-dim);margin-top:0;margin-bottom:4px"><strong>Sync webadmin</strong> — Only pushes the 8446 password from settings into Authentik. Does not restart anything.</p>
+<div style="margin-top:14px;padding:12px 14px;background:rgba(59,130,246,.06);border:1px solid var(--border);border-radius:8px">
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"><strong>Set webadmin password</strong> (for 8446 login)</div>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+<input type="password" id="set-webadmin-pw" placeholder="New password" style="max-width:180px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px">
+<input type="password" id="set-webadmin-pw-confirm" placeholder="Confirm" style="max-width:180px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px">
+<button type="button" id="set-webadmin-pw-btn" onclick="setWebadminPassword()" style="padding:8px 16px;background:rgba(59,130,246,.25);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer">Save password</button>
+<span id="set-webadmin-pw-msg" style="font-size:12px;color:var(--text-dim)"></span>
+</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px">After saving, click <strong>Sync webadmin to Authentik</strong> so 8446 login uses this password.</div>
+</div>
 <div id="resync-notice" style="display:none;margin-top:8px;padding:10px 14px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.35);border-radius:8px;font-size:12px;color:var(--yellow)">TAK Portal user list may take a short moment to repopulate.</div>
 </div>
 {% endif %}
