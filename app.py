@@ -15876,10 +15876,14 @@ def _ensure_authentik_webadmin():
         # Restart LDAP outpost to clear bind cache (password change would otherwise be ignored until cache expires)
         ak_cfg = _get_module_deployment_config(settings, 'authentik_deployment')
         if ak_cfg.get('target_mode') == 'remote' and (ak_cfg.get('remote', {}).get('host') or '').strip():
-            _module_run(ak_cfg, 'cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null', timeout=90)
+            ok_ldap, _ = _module_run(ak_cfg, 'cd ~/authentik && docker compose up -d --force-recreate ldap 2>&1', timeout=90)
+            if not ok_ldap:
+                return False, 'Password set in Authentik but LDAP outpost restart failed on remote host. SSH to the Authentik server and run: cd ~/authentik && docker compose up -d --force-recreate ldap'
         elif os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml')):
-            subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
-                shell=True, capture_output=True, timeout=90)
+            r = subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>&1',
+                shell=True, capture_output=True, text=True, timeout=90)
+            if r.returncode != 0:
+                return False, 'Password set but LDAP restart failed: ' + (r.stderr or r.stdout or '')[:120]
         return True, None
     except urllib.error.HTTPError as e:
         try:
