@@ -5137,16 +5137,29 @@ def run_takportal_deploy():
                 return
         plog("\u2713 Repository ready")
 
-        # Step 3: Create .env if missing
+        # Step 3: Create .env if missing and set AUTHENTIK_URL so container reaches host (not 127.0.0.1)
         plog("")
         plog("\u2501\u2501\u2501 Step 3/6: Configuring \u2501\u2501\u2501")
         env_path = os.path.join(portal_dir, '.env')
-        if not os.path.exists(env_path):
-            plog("  Creating default .env...")
-            with open(env_path, 'w') as f:
-                f.write("WEB_UI_PORT=3000\n")
-            plog("\u2713 Default .env created (port 3000)")
+        env_existed = os.path.exists(env_path)
+        auth_url = _takportal_build_settings_dict(settings).get('AUTHENTIK_URL', '')
+        env_lines = []
+        if env_existed:
+            with open(env_path, 'r') as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_URL='):
+                        continue  # drop old value, we set below
+                    env_lines.append(line.rstrip('\n'))
         else:
+            plog("  Creating default .env...")
+            env_lines.append("WEB_UI_PORT=3000")
+            plog("\u2713 Default .env created (port 3000)")
+        if auth_url:
+            env_lines.append(f'AUTHENTIK_URL={auth_url}')
+            plog("  ✓ AUTHENTIK_URL set in .env (container will use this)")
+        with open(env_path, 'w') as f:
+            f.write('\n'.join(env_lines) + '\n')
+        if not auth_url and env_existed:
             plog("\u2713 .env already exists")
 
         # Step 4: Build and start
@@ -5186,16 +5199,16 @@ def run_takportal_deploy():
             auth_url = _takportal_build_settings_dict(settings).get('AUTHENTIK_URL', '')
             if auth_url:
                 if 'AUTHENTIK_URL' not in compose_content:
-                    # Upstream TAK-Portal: env_file:\n - .env
+                    # Upstream TAK-Portal uses 1-space indent: " env_file:\n - .env"
                     if re.search(r'env_file:\s*\n\s*-\s*\.env', compose_content):
                         compose_content = re.sub(
                             r'(env_file:\s*\n\s*-\s*\.env)',
-                            r'\1\n    environment:\n      AUTHENTIK_URL: "' + auth_url + '"',
+                            r'\1\n environment:\n  AUTHENTIK_URL: "' + auth_url + '"',
                             compose_content,
                             count=1
                         )
                         needs_write = True
-                        plog("  ✓ AUTHENTIK_URL set in container environment (overrides .env)")
+                        plog("  ✓ AUTHENTIK_URL in compose (backup to .env)")
                 else:
                     compose_content = re.sub(
                         r'AUTHENTIK_URL:\s*["\']?[^"\'\n]+["\']?',
@@ -5208,8 +5221,10 @@ def run_takportal_deploy():
                 with open(compose_path, 'w') as f:
                     f.write(compose_content)
 
+        # Force recreate so container picks up new .env (AUTHENTIK_URL)
+        force_recreate = '--force-recreate' if auth_url else ''
         plog("  Building image (this may take a minute)...")
-        r = subprocess.run(f'cd {portal_dir} && docker compose up -d --build 2>&1', shell=True, capture_output=True, text=True, timeout=900)
+        r = subprocess.run(f'cd {portal_dir} && docker compose up -d --build {force_recreate} 2>&1'.strip(), shell=True, capture_output=True, text=True, timeout=900)
         for line in r.stdout.strip().split('\n'):
             if line.strip() and 'NEEDRESTART' not in line:
                 takportal_deploy_log.append(f"  {line.strip()}")
