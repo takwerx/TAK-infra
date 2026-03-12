@@ -5342,6 +5342,7 @@ def run_takportal_deploy():
         plog("")
         plog("\u2501\u2501\u2501 Step 6/6: Auto-configuring TAK Portal Settings \u2501\u2501\u2501")
         settings = load_settings()
+        server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
         portal_settings = _takportal_build_settings_dict(settings)
         settings_json = _takportal_merged_settings_json(settings)
         with open('/tmp/tak-portal-settings.json', 'w') as f:
