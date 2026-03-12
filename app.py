@@ -4883,8 +4883,11 @@ def _takportal_build_settings_dict(settings):
     cloudtak_host = _get_service_domain(settings, 'cloudtak_map')
     cert_pass = _get_tak_cert_password(settings)
     ak_upstream = _get_authentik_upstream(settings)
+    # TAK Portal runs in Docker; 127.0.0.1 inside container is the container itself. Use host.docker.internal so container can reach host's Authentik.
+    auth_url_host = 'host.docker.internal' if ak_upstream == '127.0.0.1:9090' else ak_upstream.split(':')[0]
+    auth_url_port = '9090' if ak_upstream == '127.0.0.1:9090' else (ak_upstream.split(':')[1] if ':' in ak_upstream else '9090')
     return {
-        "AUTHENTIK_URL": f"http://{ak_upstream}",
+        "AUTHENTIK_URL": f"http://{auth_url_host}:{auth_url_port}",
         "AUTHENTIK_TOKEN": ak_token or "",
         "USERS_HIDDEN_PREFIXES": "ak-,adm_,nodered-,ma-",
         "GROUPS_HIDDEN_PREFIXES": "authentik, MA -, vid_, tak_ROLE_",
@@ -5097,6 +5100,7 @@ def run_takportal_deploy():
     try:
         portal_dir = os.path.expanduser('~/TAK-Portal')
         settings = load_settings()
+        ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
         if settings.get('pkg_mgr', 'apt') == 'apt':
             wait_for_apt_lock(plog, takportal_deploy_log)
         # Step 1: Check Docker
@@ -5148,13 +5152,13 @@ def run_takportal_deploy():
         # Step 4: Build and start
         plog("")
         plog("\u2501\u2501\u2501 Step 4/6: Building & Starting Docker Container \u2501\u2501\u2501")
-        # Patch docker-compose.yml with healthcheck if not already present
+        # Patch docker-compose.yml: healthcheck + extra_hosts so container can reach host (Authentik on 9090)
         compose_path = os.path.join(portal_dir, 'docker-compose.yml')
         if os.path.exists(compose_path):
             with open(compose_path, 'r') as f:
                 compose_content = f.read()
+            needs_write = False
             if 'healthcheck' not in compose_content:
-                # Insert healthcheck after 'restart: unless-stopped' inside the service block
                 healthcheck = (
                     "    healthcheck:\n"
                     "      test: [\"CMD-SHELL\", \"wget -qO- http://localhost:3000 2>&1 | grep -q setup-my-device && exit 0 || exit 1\"]\n"
@@ -5167,9 +5171,20 @@ def run_takportal_deploy():
                     'restart: unless-stopped',
                     'restart: unless-stopped\n' + healthcheck.rstrip('\n')
                 )
+                needs_write = True
+                plog("  ✓ Healthcheck added to docker-compose.yml")
+            if 'host.docker.internal' not in compose_content and 'extra_hosts' not in compose_content:
+                # So TAK Portal container can reach Authentik on host (AUTHENTIK_URL=http://host.docker.internal:9090)
+                extra_hosts = '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
+                compose_content = compose_content.replace(
+                    'restart: unless-stopped',
+                    'restart: unless-stopped\n' + extra_hosts.rstrip('\n')
+                )
+                needs_write = True
+                plog("  ✓ extra_hosts (host.docker.internal) added for Authentik API access")
+            if needs_write:
                 with open(compose_path, 'w') as f:
                     f.write(compose_content)
-                plog("  ✓ Healthcheck added to docker-compose.yml")
 
         plog("  Building image (this may take a minute)...")
         r = subprocess.run(f'cd {portal_dir} && docker compose up -d --build 2>&1', shell=True, capture_output=True, text=True, timeout=900)
@@ -5275,7 +5290,6 @@ def run_takportal_deploy():
         plog("")
         plog("\u2501\u2501\u2501 Step 6/6: Auto-configuring TAK Portal Settings \u2501\u2501\u2501")
         settings = load_settings()
-        ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
         portal_settings = _takportal_build_settings_dict(settings)
         settings_json = _takportal_merged_settings_json(settings)
         with open('/tmp/tak-portal-settings.json', 'w') as f:
