@@ -5165,7 +5165,9 @@ def run_takportal_deploy():
         # Step 4: Build and start
         plog("")
         plog("\u2501\u2501\u2501 Step 4/6: Building & Starting Docker Container \u2501\u2501\u2501")
-        # Patch docker-compose.yml: healthcheck + extra_hosts so container can reach host (Authentik on 9090)
+        ak_upstream = _get_authentik_upstream(settings)
+        same_host_authentik = (ak_upstream == '127.0.0.1:9090')
+        # Patch docker-compose.yml: healthcheck + network_mode (same-host) or extra_hosts (remote)
         compose_path = os.path.join(portal_dir, 'docker-compose.yml')
         if os.path.exists(compose_path):
             with open(compose_path, 'r') as f:
@@ -5186,16 +5188,21 @@ def run_takportal_deploy():
                 )
                 needs_write = True
                 plog("  ✓ Healthcheck added to docker-compose.yml")
-            ak_upstream = _get_authentik_upstream(settings)
-            same_host_authentik = (ak_upstream == '127.0.0.1:9090')
+            plog(f"  Authentik upstream: {ak_upstream} (same_host={same_host_authentik})")
             if same_host_authentik and 'network_mode' not in compose_content:
                 # Same-host: use host network so 127.0.0.1:9090 in container = host's Authentik (no URL hacks)
-                compose_content = compose_content.replace(
-                    'restart: unless-stopped',
-                    'restart: unless-stopped\n network_mode: host'
+                before_len = len(compose_content)
+                compose_content = re.sub(
+                    r'(\s*restart:\s*unless-stopped)',
+                    r'\1\n network_mode: host',
+                    compose_content,
+                    count=1
                 )
-                needs_write = True
-                plog("  ✓ network_mode: host (same-host Authentik — 127.0.0.1:9090 works)")
+                if len(compose_content) > before_len:
+                    needs_write = True
+                    plog("  ✓ network_mode: host (same-host Authentik — 127.0.0.1:9090 works)")
+                else:
+                    plog("  ⚠ Could not insert network_mode: host (regex had no match)")
             elif not same_host_authentik and 'host.docker.internal' not in compose_content and 'extra_hosts' not in compose_content:
                 # Remote Authentik: keep bridge network, add extra_hosts if ever needed for other host access
                 extra_hosts = '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
@@ -5231,8 +5238,8 @@ def run_takportal_deploy():
                 with open(compose_path, 'w') as f:
                     f.write(compose_content)
 
-        # Force recreate so container picks up new .env (AUTHENTIK_URL)
-        force_recreate = '--force-recreate' if auth_url else ''
+        # Force recreate when same-host so container gets network_mode: host
+        force_recreate = '--force-recreate' if (auth_url or same_host_authentik) else ''
         plog("  Building image (this may take a minute)...")
         r = subprocess.run(f'cd {portal_dir} && docker compose up -d --build {force_recreate} 2>&1'.strip(), shell=True, capture_output=True, text=True, timeout=900)
         for line in r.stdout.strip().split('\n'):
