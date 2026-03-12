@@ -4886,9 +4886,10 @@ def _takportal_build_settings_dict(settings):
     cloudtak_host = _get_service_domain(settings, 'cloudtak_map')
     cert_pass = _get_tak_cert_password(settings)
     ak_upstream = _get_authentik_upstream(settings)
-    # Same-host: use server_ip so container (bridge) can reach host's Authentik. If server_ip missing/localhost use host.docker.internal (add extra_hosts in deploy).
+    # Same-host: use server_ip so container (bridge) can reach host's Authentik.
+    # Loopback addresses (localhost, 127.0.0.1) don't work inside a container — use host.docker.internal (requires extra_hosts in compose).
     if ak_upstream == '127.0.0.1:9090':
-        auth_url_host = server_ip if (server_ip and server_ip != 'localhost') else 'host.docker.internal'
+        auth_url_host = server_ip if (server_ip and server_ip not in ('localhost', '127.0.0.1')) else 'host.docker.internal'
     else:
         auth_url_host = ak_upstream.split(':')[0]
     auth_url_port = '9090' if ak_upstream == '127.0.0.1:9090' else (ak_upstream.split(':')[1] if ':' in ak_upstream else '9090')
@@ -5302,54 +5303,22 @@ def run_takportal_deploy():
         if certs_copied:
             plog("\u2713 Certificates copied to container data volume")
 
-        # Step 6: Auto-configure settings.json (main: inline dict, server_ip and ak_token from settings/file)
+        # Step 6: Auto-configure settings.json — use _takportal_build_settings_dict which handles
+        # localhost/127.0.0.1 -> host.docker.internal, remote Authentik, token lookup, etc.
         plog("")
         plog("\u2501\u2501\u2501 Step 6/6: Auto-configuring TAK Portal Settings \u2501\u2501\u2501")
         settings = load_settings()
         server_ip = (settings.get('server_ip') or '').strip() or 'localhost'
-        # Container must reach Authentik on the host; localhost inside container is the container itself -> ECONNREFUSED.
-        # Use host IP when set, else host.docker.internal (Step 4 adds extra_hosts so this resolves on Linux).
-        auth_url_host = server_ip if (server_ip and server_ip != 'localhost') else 'host.docker.internal'
-        ak_env_path = os.path.expanduser('~/authentik/.env')
-        ak_token = ''
-        if os.path.exists(ak_env_path):
-            with open(ak_env_path) as f:
-                for line in f:
-                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
-                        ak_token = line.strip().split('=', 1)[1].strip()
-                        break
         import json as json_mod
-        cert_pass = _get_tak_cert_password(settings)
-        portal_settings = {
-            "AUTHENTIK_URL": f"http://{auth_url_host}:9090",
-            "AUTHENTIK_TOKEN": ak_token,
-            "USERS_HIDDEN_PREFIXES": "ak-,adm_,nodered-,ma-",
-            "GROUPS_HIDDEN_PREFIXES": "authentik, MA -, vid_, tak_ROLE_",
-            "USERS_ACTIONS_HIDDEN_PREFIXES": "",
-            "GROUPS_ACTIONS_HIDDEN_PREFIXES": "",
-            "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
-            "PORTAL_AUTH_ENABLED": "true" if settings.get('fqdn') else "false",
-            "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
-            "AUTHENTIK_PUBLIC_URL": _get_authentik_base_url(settings),
-            "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings.get('fqdn', '')}" if settings.get('fqdn') else f"http://{server_ip}:3000",
-            "TAK_URL": f"https://{_get_takserver_host(settings)}:8443/Marti" if _get_takserver_host(settings) else f"https://{server_ip}:8443/Marti",
-            "TAK_API_P12_PATH": "data/certs/tak-client.p12",
-            "TAK_API_P12_PASSPHRASE": cert_pass,
-            "TAK_CA_PATH": "data/certs/tak-ca.pem",
-            "TAK_REVOKE_ON_DISABLE": "true",
-            "TAK_DEBUG": "false",
-            "TAK_BYPASS_ENABLED": "false",
-            "CLOUDTAK_URL": f"https://cloudtak.{settings.get('fqdn', '')}" if settings.get('fqdn') else "",
-            **_portal_email_settings(settings),
-            "BRAND_THEME": "dark",
-            "BRAND_LOGO_URL": ""
-        }
+        portal_settings = _takportal_build_settings_dict(settings)
+        ak_token = portal_settings.get('AUTHENTIK_TOKEN', '')
         settings_json = json_mod.dumps(portal_settings, indent=2)
         with open('/tmp/tak-portal-settings.json', 'w') as f:
             f.write(settings_json)
         subprocess.run('docker cp /tmp/tak-portal-settings.json tak-portal:/usr/src/app/data/settings.json', shell=True, capture_output=True, text=True)
         os.remove('/tmp/tak-portal-settings.json')
-        plog(f"  Authentik URL: {portal_settings['AUTHENTIK_PUBLIC_URL']}")
+        plog(f"  AUTHENTIK_URL (internal): {portal_settings['AUTHENTIK_URL']}")
+        plog(f"  AUTHENTIK_PUBLIC_URL: {portal_settings.get('AUTHENTIK_PUBLIC_URL', '')}")
         plog(f"  TAK Server URL: {portal_settings['TAK_URL']}")
         plog(f"  Portal Auth: {portal_settings['PORTAL_AUTH_ENABLED']}")
         if portal_settings.get('EMAIL_ENABLED') == 'true':
