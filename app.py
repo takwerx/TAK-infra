@@ -5382,124 +5382,127 @@ def run_takportal_deploy():
                     if line.strip().startswith('WEB_UI_PORT='):
                         port = line.strip().split('=', 1)[1].strip() or '3000'
 
-        # Configure Authentik forward auth for TAK Portal (use settings from Step 6 so ak_token is in scope)
-        fqdn = settings.get('fqdn', '')
-        ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
-        if fqdn and ak_token:
-            plog("")
-            plog("\u2501\u2501\u2501 Configuring Authentik Forward Auth \u2501\u2501\u2501")
-            try:
-                import urllib.request as _urlreq
-                _ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-                _ak_url = 'http://127.0.0.1:9090'
-
-                # Update brand domain
+        # Configure Authentik forward auth for TAK Portal (wrapped so deploy still succeeds if this step fails)
+        try:
+            fqdn = settings.get('fqdn', '')
+            ak_token = _get_authentik_env_value(settings, 'AUTHENTIK_BOOTSTRAP_TOKEN') or _get_authentik_env_value(settings, 'AUTHENTIK_TOKEN')
+            if fqdn and ak_token:
+                plog("")
+                plog("\u2501\u2501\u2501 Configuring Authentik Forward Auth \u2501\u2501\u2501")
                 try:
-                    req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/', headers=_ak_headers)
-                    resp = _urlreq.urlopen(req, timeout=10)
-                    brands = json_mod.loads(resp.read().decode())['results']
-                    if brands:
-                        brand_id = brands[0]['brand_uuid']
-                        ak_host = _get_authentik_host(settings)
-                        if ak_host:
-                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
-                                data=json_mod.dumps({'domain': ak_host}).encode(),
-                                headers=_ak_headers, method='PATCH')
-                            _urlreq.urlopen(req, timeout=10)
-                            plog(f"  \u2713 Brand domain set to {ak_host}")
-                except Exception as e:
-                    plog(f"  \u26a0 Brand update: {str(e)[:80]}")
+                    import urllib.request as _urlreq
+                    _ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+                    _ak_url = 'http://127.0.0.1:9090'
 
-                # Wait forever for authorization flow
-                flow_pk = None
-                attempt = 0
-                while True:
+                    # Update brand domain
                     try:
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/', headers=_ak_headers)
                         resp = _urlreq.urlopen(req, timeout=10)
-                        flows = json_mod.loads(resp.read().decode())['results']
-                        for fl in flows:
-                            if 'implicit' in fl.get('slug', ''):
-                                flow_pk = fl['pk']
-                                break
-                        if not flow_pk and flows:
-                            flow_pk = flows[0]['pk']
-                        if flow_pk:
-                            break
-                    except Exception:
-                        pass
-                    if attempt % 6 == 0:
-                        plog(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
-                    else:
-                        authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
-                    time.sleep(5)
-                    attempt += 1
-                plog(f"  ✓ Got authorization flow")
-
-                # Wait forever for invalidation flow
-                inv_flow_pk = None
-                attempt = 0
-                while True:
-                    try:
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
-                        resp = _urlreq.urlopen(req, timeout=10)
-                        inv_flows = json_mod.loads(resp.read().decode())['results']
-                        inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
-                        if inv_flow_pk:
-                            break
-                    except Exception:
-                        pass
-                    if attempt % 6 == 0:
-                        plog(f"  ⏳ Waiting for invalidation flow... ({attempt * 5}s)")
-                    else:
-                        authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
-                    time.sleep(5)
-                    attempt += 1
-                plog(f"  ✓ Got invalidation flow")
-
-                # Create proxy provider
-                provider_pk = None
-                if flow_pk and inv_flow_pk:
-                    try:
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
-                            data=json_mod.dumps({'name': 'TAK Portal Proxy', 'authorization_flow': flow_pk,
-                                'invalidation_flow': inv_flow_pk,
-                                'external_host': f'https://takportal.{fqdn}', 'mode': 'forward_single',
-                                'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
-                            headers=_ak_headers, method='POST')
-                        resp = _urlreq.urlopen(req, timeout=10)
-                        provider_pk = json_mod.loads(resp.read().decode())['pk']
-                        plog(f"  \u2713 Proxy provider created")
+                        brands = json_mod.loads(resp.read().decode())['results']
+                        if brands:
+                            brand_id = brands[0]['brand_uuid']
+                            ak_host = _get_authentik_host(settings)
+                            if ak_host:
+                                req = _urlreq.Request(f'{_ak_url}/api/v3/core/brands/{brand_id}/',
+                                    data=json_mod.dumps({'domain': ak_host}).encode(),
+                                    headers=_ak_headers, method='PATCH')
+                                _urlreq.urlopen(req, timeout=10)
+                                plog(f"  \u2713 Brand domain set to {ak_host}")
                     except Exception as e:
-                        if hasattr(e, 'code') and e.code == 400:
-                            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=TAK+Portal', headers=_ak_headers)
+                        plog(f"  \u26a0 Brand update: {str(e)[:80]}")
+
+                    # Wait forever for authorization flow
+                    flow_pk = None
+                    attempt = 0
+                    while True:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
                             resp = _urlreq.urlopen(req, timeout=10)
-                            results = json_mod.loads(resp.read().decode())['results']
-                            if results:
-                                provider_pk = results[0]['pk']
-                            plog(f"  \u2713 Proxy provider already exists")
+                            flows = json_mod.loads(resp.read().decode())['results']
+                            for fl in flows:
+                                if 'implicit' in fl.get('slug', ''):
+                                    flow_pk = fl['pk']
+                                    break
+                            if not flow_pk and flows:
+                                flow_pk = flows[0]['pk']
+                            if flow_pk:
+                                break
+                        except Exception:
+                            pass
+                        if attempt % 6 == 0:
+                            plog(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
                         else:
-                            plog(f"  \u26a0 Proxy provider error: {str(e)[:100]}")
+                            authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
+                        time.sleep(5)
+                        attempt += 1
+                    plog(f"  ✓ Got authorization flow")
 
-                # Create application
-                if provider_pk:
-                    try:
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
-                            data=json_mod.dumps({'name': 'TAK Portal', 'slug': 'tak-portal',
-                                'provider': provider_pk}).encode(),
-                            headers=_ak_headers, method='POST')
-                        _urlreq.urlopen(req, timeout=10)
-                        plog(f"  \u2713 Application 'TAK Portal' created")
-                    except Exception as e:
-                        if hasattr(e, 'code') and e.code == 400:
-                            plog(f"  \u2713 Application 'TAK Portal' already exists")
+                    # Wait forever for invalidation flow
+                    inv_flow_pk = None
+                    attempt = 0
+                    while True:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                            resp = _urlreq.urlopen(req, timeout=10)
+                            inv_flows = json_mod.loads(resp.read().decode())['results']
+                            inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
+                            if inv_flow_pk:
+                                break
+                        except Exception:
+                            pass
+                        if attempt % 6 == 0:
+                            plog(f"  ⏳ Waiting for invalidation flow... ({attempt * 5}s)")
                         else:
-                            plog(f"  \u26a0 Application error: {str(e)[:80]}")
+                            authentik_deploy_log.append(f"  ⏳ {attempt * 5 // 60:02d}:{attempt * 5 % 60:02d}")
+                        time.sleep(5)
+                        attempt += 1
+                    plog(f"  ✓ Got invalidation flow")
 
-                    # Add to embedded outpost (safe: never remove existing providers)
-                    _outpost_add_providers_safe(_ak_url, _ak_headers, [provider_pk], plog=plog)
-            except Exception as e:
-                plog(f"  \u26a0 Forward auth setup error: {str(e)[:100]}")
+                    # Create proxy provider
+                    provider_pk = None
+                    if flow_pk and inv_flow_pk:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                                data=json_mod.dumps({'name': 'TAK Portal Proxy', 'authorization_flow': flow_pk,
+                                    'invalidation_flow': inv_flow_pk,
+                                    'external_host': f'https://takportal.{fqdn}', 'mode': 'forward_single',
+                                    'token_validity': 'hours=24', 'cookie_domain': f'.{fqdn.split(":")[0]}'}).encode(),
+                                headers=_ak_headers, method='POST')
+                            resp = _urlreq.urlopen(req, timeout=10)
+                            provider_pk = json_mod.loads(resp.read().decode())['pk']
+                            plog(f"  \u2713 Proxy provider created")
+                        except Exception as e:
+                            if hasattr(e, 'code') and e.code == 400:
+                                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=TAK+Portal', headers=_ak_headers)
+                                resp = _urlreq.urlopen(req, timeout=10)
+                                results = json_mod.loads(resp.read().decode())['results']
+                                if results:
+                                    provider_pk = results[0]['pk']
+                                plog(f"  \u2713 Proxy provider already exists")
+                            else:
+                                plog(f"  \u26a0 Proxy provider error: {str(e)[:100]}")
+
+                    # Create application
+                    if provider_pk:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                                data=json_mod.dumps({'name': 'TAK Portal', 'slug': 'tak-portal',
+                                    'provider': provider_pk}).encode(),
+                                headers=_ak_headers, method='POST')
+                            _urlreq.urlopen(req, timeout=10)
+                            plog(f"  \u2713 Application 'TAK Portal' created")
+                        except Exception as e:
+                            if hasattr(e, 'code') and e.code == 400:
+                                plog(f"  \u2713 Application 'TAK Portal' already exists")
+                            else:
+                                plog(f"  \u26a0 Application error: {str(e)[:80]}")
+
+                        # Add to embedded outpost (safe: never remove existing providers)
+                        _outpost_add_providers_safe(_ak_url, _ak_headers, [provider_pk], plog=plog)
+                except Exception as e:
+                    plog(f"  \u26a0 Forward auth setup error: {str(e)[:100]}")
+        except Exception as e:
+            plog(f"  \u26a0 Authentik config step failed: {str(e)[:120]}")
 
         plog("")
         plog("=" * 50)
