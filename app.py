@@ -6066,6 +6066,23 @@ paths:
     else:
         plog("  No domain configured — skipping SSL (RTSP unencrypted only)")
 
+    # Register MediaMTX proxy provider + application in Authentik (if running)
+    ak_dir = os.path.expanduser('~/authentik')
+    ak_env_path = os.path.join(ak_dir, '.env')
+    if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')) and os.path.exists(ak_env_path):
+        _ak_token = ''
+        with open(ak_env_path) as _f:
+            for _line in _f:
+                if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                    _ak_token = _line.strip().split('=', 1)[1].strip()
+        if _ak_token and domain:
+            plog("")
+            plog("━━━ Registering MediaMTX in Authentik (proxy provider + application) ━━━")
+            _ak_url = 'http://127.0.0.1:9090'
+            _ak_headers = {'Authorization': f'Bearer {_ak_token}', 'Content-Type': 'application/json'}
+            _ensure_authentik_console_app(domain, _ak_token, plog)
+            _repair_embedded_outpost_all_apps(_ak_url, _ak_headers, settings, plog)
+
     plog("")
     plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     plog(f"🎉 MediaMTX v{version} deployed on remote host {host}!")
@@ -6664,6 +6681,11 @@ WantedBy=multi-user.target
                         except Exception as ex:
                             plog(f"  ⚠ Could not create {group_name}: {str(ex)[:60]}")
                     plog("  Assign users to vid_* groups in MediaMTX stream-access page or Authentik (they do not show in TAK clients).")
+
+                    plog("")
+                    plog("━━━ Registering MediaMTX in Authentik (proxy provider + application) ━━━")
+                    _ensure_authentik_console_app(domain, ak_token, plog)
+                    _repair_embedded_outpost_all_apps(ak_url, ak_headers, settings, plog)
 
             plog("")
             plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
