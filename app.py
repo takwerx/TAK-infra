@@ -4692,23 +4692,55 @@ def _get_caddy_version_info():
     return out
 
 
+_authentik_release_cache = {'tag': None, 'ts': 0}
+
+def _get_authentik_latest_release_tag(use_cache=True):
+    """Fetch the latest stable Authentik release tag from GitHub (e.g. '2026.2.1').
+    Cached for 4 hours to avoid hitting GitHub API on every page load."""
+    import time as _time
+    if use_cache and _authentik_release_cache['tag'] and (_time.time() - _authentik_release_cache['ts'] < 14400):
+        return _authentik_release_cache['tag']
+    try:
+        import urllib.request as _ur
+        req = _ur.Request('https://api.github.com/repos/goauthentik/authentik/releases/latest',
+                          headers={'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'infra-TAK'})
+        resp = _ur.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode())
+        tag = (data.get('tag_name') or '').strip().lstrip('vV') or None
+        if tag:
+            _authentik_release_cache['tag'] = tag
+            _authentik_release_cache['ts'] = _time.time()
+        return tag
+    except Exception:
+        return _authentik_release_cache.get('tag')
+
+
 def _get_authentik_version_info():
-    """Return {version: str, update_available: bool} for Authentik from image tag or docker."""
-    out = {'version': '', 'update_available': False}
+    """Return {version: str, update_available: bool, latest: str|None} for Authentik."""
+    out = {'version': '', 'update_available': False, 'latest': None}
     import re
     ak_dir = os.path.expanduser('~/authentik')
     compose_path = os.path.join(ak_dir, 'docker-compose.yml')
-    # Try local compose file first
     if os.path.isfile(compose_path):
         try:
             with open(compose_path) as f:
                 content = f.read()
-            m = re.search(r'image:.*?/server:([^\s\n]+)', content)
+            m = re.search(r'AUTHENTIK_TAG:-([^\s}]+)', content)
             if m:
                 out['version'] = m.group(1).strip()
+            if not out['version']:
+                m = re.search(r'image:.*?/server:([^\s\n]+)', content)
+                if m:
+                    out['version'] = m.group(1).strip()
         except Exception:
             pass
-    # If not found locally, check if deployed remotely (actual image tag from docker)
+    if not out['version']:
+        try:
+            r = subprocess.run('docker images --format "{{.Tag}}" ghcr.io/goauthentik/server 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                out['version'] = r.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
     if not out['version']:
         try:
             settings = load_settings()
@@ -4720,20 +4752,22 @@ def _get_authentik_version_info():
                     out['version'] = remote_out.strip()
                 if not out['version']:
                     ok, remote_out = _ssh_probe(ak_cfg['remote'],
-                        'grep -m1 "AUTHENTIK_TAG\\|server:" ~/authentik/docker-compose.yml 2>/dev/null', timeout=10)
+                        'grep -m1 "AUTHENTIK_TAG" ~/authentik/docker-compose.yml 2>/dev/null', timeout=10)
                     if ok and remote_out:
                         m = re.search(r'AUTHENTIK_TAG:-(\d+\.\d+\.\d+[^\s}\']*)', remote_out)
                         if m:
                             out['version'] = m.group(1).strip()
         except Exception:
             pass
-    if not out['version']:
-        try:
-            r = subprocess.run('docker images --format "{{.Tag}}" ghcr.io/goauthentik/server 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
-            if r.returncode == 0 and r.stdout.strip():
-                out['version'] = r.stdout.strip().split('\n')[0]
-        except Exception:
-            pass
+    # Compare against latest release
+    latest = _get_authentik_latest_release_tag()
+    if latest:
+        out['latest'] = latest
+        if out['version']:
+            installed = re.sub(r'^[vV\$\{AUTHENTIK_TAG:-]*', '', out['version']).rstrip('}').strip()
+            if installed and installed != latest:
+                out['update_available'] = True
+            out['version'] = installed
     return out
 
 
@@ -12707,6 +12741,9 @@ def authentik_control():
         elif action == 'restart':
             _ssh_probe(remote, f'cd {ak_dir} && docker compose restart 2>&1', timeout=120)
         elif action == 'update':
+            latest = _get_authentik_latest_release_tag(use_cache=False)
+            if latest:
+                _ssh_probe(remote, f"cd {ak_dir} && sed -i 's/AUTHENTIK_TAG:-[^}}]*/AUTHENTIK_TAG:-{latest}/g' docker-compose.yml 2>/dev/null", timeout=10)
             _ssh_probe(remote, f'cd {ak_dir} && docker compose pull 2>&1 && docker compose up -d 2>&1', timeout=300)
         else:
             return jsonify({'error': 'Invalid action'}), 400
@@ -12722,12 +12759,24 @@ def authentik_control():
     elif action == 'restart':
         subprocess.run(f'cd {ak_dir} && docker compose down && docker compose up -d', shell=True, capture_output=True, text=True, timeout=120)
     elif action == 'update':
+        import re as _re
+        latest = _get_authentik_latest_release_tag(use_cache=False)
+        if latest:
+            cp = os.path.join(ak_dir, 'docker-compose.yml')
+            if os.path.isfile(cp):
+                with open(cp) as _f:
+                    _cc = _f.read()
+                _new = _re.sub(r'AUTHENTIK_TAG:-[^}]+', f'AUTHENTIK_TAG:-{latest}', _cc)
+                if _new != _cc:
+                    with open(cp, 'w') as _f:
+                        _f.write(_new)
         subprocess.run(f'cd {ak_dir} && docker compose pull && docker compose up -d && docker image prune -f', shell=True, capture_output=True, text=True, timeout=300)
     else:
         return jsonify({'error': 'Invalid action'}), 400
     time.sleep(5)
     r = subprocess.run('docker ps --filter name=authentik-server --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
     running = 'Up' in r.stdout
+    _authentik_release_cache['tag'] = None
     return jsonify({'success': True, 'running': running, 'action': action})
 
 @app.route('/api/authentik/deploy', methods=['POST'])
@@ -13331,6 +13380,8 @@ entries:
     # Step 5: Generate docker-compose.yml and copy
     plog("")
     plog("━━━ Step 5/8: Creating Docker Compose ━━━")
+    _ak_latest = _get_authentik_latest_release_tag(use_cache=False) or '2026.2.1'
+    plog(f"  Authentik version: {_ak_latest}")
     compose_content = """services:
   postgresql:
     image: docker.io/library/postgres:16-alpine
@@ -13424,6 +13475,7 @@ volumes:
   redis:
     driver: local
 """
+    compose_content = compose_content.replace('2026.2.0', _ak_latest)
     with open('/tmp/authentik_remote_compose.yml', 'w') as f:
         f.write(compose_content)
     ok, _ = _module_copy(deploy_cfg, '/tmp/authentik_remote_compose.yml', '/tmp/docker-compose.yml', log_fn=plog)
@@ -14177,17 +14229,14 @@ entries:
                 needs_write = True
                 plog("  Added POSTGRES_MAX_CONNECTIONS to postgresql")
 
-            # Add LDAP outpost container (use same AUTHENTIK_TAG as server so Update pulls both)
-            ak_tag = '2026.2.0'
-            for l in lines:
-                m = re.search(r'goauthentik/server[:\s]+\$\{AUTHENTIK_TAG:-([^}]+)\}', l)
-                if m:
-                    ak_tag = m.group(1)
-                    break
-                m = re.search(r'goauthentik/server:([^\s\n]+)', l)
-                if m and m.group(1).strip() not in ('${AUTHENTIK_TAG}', ''):
-                    ak_tag = m.group(1).strip()
-                    break
+            # Pin AUTHENTIK_TAG to latest stable release
+            ak_tag = _get_authentik_latest_release_tag(use_cache=False) or '2026.2.1'
+            plog(f"  Authentik version: {ak_tag}")
+            for i, l in enumerate(lines):
+                m = re.search(r'AUTHENTIK_TAG:-([^}]+)', l)
+                if m and m.group(1).strip() != ak_tag:
+                    lines[i] = l.replace(f'AUTHENTIK_TAG:-{m.group(1)}', f'AUTHENTIK_TAG:-{ak_tag}')
+                    needs_write = True
             ldap_image = f"ghcr.io/goauthentik/ldap:${{AUTHENTIK_TAG:-{ak_tag}}}"
             if not any('ghcr.io/goauthentik/ldap' in l for l in lines):
                 _ak_host = _get_authentik_host(settings)
@@ -15173,17 +15222,17 @@ body{display:flex;min-height:100vh}
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">Authentik installation in progress</div></div></div>
 {% elif ak.installed and ak.running %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% if ak_version_info.update_available %} <span style="color:var(--cyan);font-size:11px" title="New image available">update</span>{% endif %}{% endif %}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% if ak_version_info.update_available and ak_version_info.latest %} · <span style="color:var(--cyan);font-size:11px">v{{ ak_version_info.latest }} available</span>{% endif %}{% endif %}</div></div></div>
 <div class="controls">
 <button class="control-btn btn-stop" onclick="akControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="akControl('restart')">🔄 Restart</button>
-<button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" onclick="akControl('update')"{% if ak_version_info and ak_version_info.update_available %} style="border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if ak_version_info and ak_version_info.update_available %} <span style="color:var(--cyan)" title="Update available: v{{ ak_version_info.latest }}">●</span>{% endif %}</button>
 </div>
 {% elif ak.installed %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% endif %}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running{% if ak_version_info and ak_version_info.version %} · <span class="os-badge" style="margin-left:4px">v{{ ak_version_info.version }}</span>{% if ak_version_info.update_available and ak_version_info.latest %} · <span style="color:var(--cyan);font-size:11px">v{{ ak_version_info.latest }} available</span>{% endif %}{% endif %}</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="akControl('start')">▶ Start</button>
-<button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
+<button class="control-btn btn-update" onclick="akControl('update')"{% if ak_version_info and ak_version_info.update_available %} style="border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if ak_version_info and ak_version_info.update_available %} <span style="color:var(--cyan)" title="Update available: v{{ ak_version_info.latest }}">●</span>{% endif %}</button>
 </div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy Authentik for identity management & SSO</div></div></div>
