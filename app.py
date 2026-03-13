@@ -56,11 +56,13 @@ if __name__ == '__main__':
 from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory, make_response)
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 from functools import wraps
 import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil, copy, tempfile
 import urllib.request
 import urllib.parse
 from datetime import datetime
+from collections import defaultdict, deque
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -76,6 +78,57 @@ def _set_session_cookie_domain():
     except Exception:
         pass
 _set_session_cookie_domain()
+
+# In-memory rate limiter (per-process). Good baseline protection without extra deps.
+_RATE_LOCK = threading.Lock()
+_RATE_HITS = defaultdict(deque)  # key -> deque[timestamps]
+
+
+def _client_ip():
+    """Best-effort client IP for rate limiting."""
+    xff = (request.headers.get('X-Forwarded-For') or '').strip()
+    if xff:
+        return xff.split(',')[0].strip()
+    return (request.remote_addr or 'unknown').strip()
+
+
+def _is_rate_limited(key, limit, window_seconds):
+    """Return True when key exceeded limit within rolling window."""
+    now = time.time()
+    cutoff = now - window_seconds
+    with _RATE_LOCK:
+        q = _RATE_HITS[key]
+        while q and q[0] < cutoff:
+            q.popleft()
+        if len(q) >= limit:
+            return True
+        q.append(now)
+        return False
+
+
+def _same_origin_ok():
+    """CSRF baseline: allow only same-origin state-changing browser requests.
+    Accepts exact Origin host match, or Referer prefix match when Origin is absent."""
+    host = (request.host or '').strip()
+    if not host:
+        return False
+    origin = (request.headers.get('Origin') or '').strip()
+    if origin:
+        try:
+            po = urllib.parse.urlparse(origin)
+            if po.netloc == host:
+                return True
+        except Exception:
+            return False
+    referer = (request.headers.get('Referer') or '').strip()
+    if referer:
+        try:
+            pr = urllib.parse.urlparse(referer)
+            if pr.netloc == host:
+                return True
+        except Exception:
+            return False
+    return False
 
 @app.context_processor
 def inject_cloudtak_icon():
@@ -145,15 +198,29 @@ def ensure_session_cookie_domain():
     """When access is via IP (backdoor), do not set cookie domain so the cookie is sent. Otherwise use FQDN for cross-subdomain."""
     if _request_host_is_ip():
         app.config['SESSION_COOKIE_DOMAIN'] = False
-        return
-    if app.config.get('SESSION_COOKIE_DOMAIN'):
-        return
-    try:
-        s = load_settings()
-        if s.get('fqdn'):
-            app.config['SESSION_COOKIE_DOMAIN'] = '.' + s['fqdn'].split(':')[0]
-    except Exception:
-        pass
+    elif not app.config.get('SESSION_COOKIE_DOMAIN'):
+        try:
+            s = load_settings()
+            if s.get('fqdn'):
+                app.config['SESSION_COOKIE_DOMAIN'] = '.' + s['fqdn'].split(':')[0]
+        except Exception:
+            pass
+
+    # Baseline rate limiting
+    ip = _client_ip()
+    if request.method == 'POST' and request.path in ('/login', '/'):
+        if _is_rate_limited(f'login:{ip}', limit=12, window_seconds=300):
+            return jsonify({'error': 'Too many login attempts. Please wait a few minutes.'}), 429
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and request.path.startswith('/api/'):
+        if _is_rate_limited(f'apiw:{ip}', limit=240, window_seconds=60):
+            return jsonify({'error': 'Too many requests. Please slow down.'}), 429
+
+    # CSRF baseline for state-changing API calls (same-origin only).
+    # Exempt localhost-only Guard Dog script endpoint (not browser/session driven).
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and request.path.startswith('/api/'):
+        if request.path != '/api/guarddog/send-sms':
+            if not _same_origin_ok():
+                return jsonify({'error': 'CSRF validation failed (same-origin required).'}), 403
 VERSION = "0.2.0-alpha"
 GITHUB_REPO = "takwerx/infra-TAK"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
@@ -214,6 +281,10 @@ def save_auth(auth_dict):
 
 def _apply_authentik_session():
     """If request has Authentik headers (from Caddy forward_auth), set session so we treat user as logged in."""
+    # Trust Authentik headers only when request came from local reverse proxy.
+    # Prevents direct-to-app header spoofing when 5001 is exposed.
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return False
     uname = request.headers.get('X-Authentik-Username')
     if uname:
         session['authenticated'] = True
@@ -7378,7 +7449,10 @@ def cloudtak_control():
 @login_required
 def cloudtak_container_logs():
     lines = request.args.get('lines', 80, type=int)
+    lines = max(1, min(lines if lines is not None else 80, 500))
     container = request.args.get('container', '').strip()
+    if container and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$', container):
+        return jsonify({'entries': ['Invalid container name']}), 400
     settings = load_settings()
     cfg = _get_cloudtak_deployment_config(settings)
     if cfg.get('target_mode') == 'remote':
@@ -7399,7 +7473,8 @@ def cloudtak_container_logs():
     if not os.path.exists(compose_yml):
         compose_yml = os.path.join(cloudtak_dir, 'compose.yaml')
     if container:
-        r = subprocess.run(f'docker logs {container} --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(['docker', 'logs', container, '--tail', str(lines)],
+            capture_output=True, text=True, timeout=15)
     else:
         if os.path.exists(compose_yml):
             r = subprocess.run(f'docker compose -f "{compose_yml}" logs --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15, cwd=cloudtak_dir)
@@ -17792,8 +17867,10 @@ def upload_takserver_package():
     os_type = load_settings().get('os_type', '')
     results = {'packages': [], 'gpg_key': None, 'policy': None}
     for f in files:
-        fn = f.filename
-        if not fn: continue
+        raw_name = f.filename or ''
+        fn = secure_filename(raw_name)
+        if not fn:
+            return jsonify({'error': f'Invalid filename: {raw_name[:64]}'}), 400
         fp = os.path.join(UPLOAD_DIR, fn)
         f.save(fp)
         sz = round(os.path.getsize(fp) / (1024*1024), 1)
