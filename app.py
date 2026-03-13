@@ -414,6 +414,12 @@ def render_sidebar(modules, active_path, takwerx_logo_url=None):
         parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
     parts.append(link('/marketplace', '<span class="nav-icon material-symbols-outlined">shopping_cart</span>Marketplace'))
     parts.append(link('/help', '<span class="nav-icon material-symbols-outlined">help</span>Help'))
+    parts.append(
+        '<button type="button" onclick="toggleTheme()" class="nav-item" id="theme-toggle-btn" '
+        'style="border:none;background:none;width:100%;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;text-align:left">'
+        '<span class="nav-icon material-symbols-outlined" id="theme-icon">light_mode</span>'
+        '<span id="theme-label">Light Mode</span></button>'
+    )
     if takwerx_logo_url:
         parts.append(
             '<div style="padding:20px 20px 24px;text-align:center;border-top:1px solid var(--border)">'
@@ -421,7 +427,46 @@ def render_sidebar(modules, active_path, takwerx_logo_url=None):
             '</div>'
         )
     nav_style = ''
-    return f'<nav class="sidebar"{nav_style}>\n  ' + '\n  '.join(parts) + '\n</nav>'
+    light_mode_block = '''<style>
+body.light-mode{--bg-deep:#f0f2f5;--bg-surface:#e4e7ec;--bg-card:#ffffff;--border:#bfc6d0;--border-hover:#8892a2;--text-primary:#0f172a;--text-secondary:#1e293b;--text-dim:#475569;--accent:#1d4ed8;--accent-glow:rgba(29,78,216,.12);--cyan:#0e7490;--green:#047857;--red:#b91c1c;--yellow:#a16207;--bg-primary:#f0f2f5;--bg-card-hover:#f0f4f8}
+body.light-mode::before{background-image:none!important}
+body.light-mode .sidebar{background:#dde1e8}
+body.light-mode .nav-item:hover{background:rgba(0,0,0,.05)!important}
+body.light-mode .nav-item.active{background:rgba(14,116,144,.1)!important}
+body.light-mode .info-item,body.light-mode .guard-service-row,body.light-mode .proto-item{background:#e8eaef!important}
+body.light-mode .log-box,body.light-mode .deploy-log{background:#e8eaef!important;color:#1e293b!important}
+body.light-mode .form-input,body.light-mode input[type="text"],body.light-mode input[type="password"],body.light-mode input[type="number"],body.light-mode select,body.light-mode textarea{background:#e8eaef!important;color:#0f172a!important;border-color:#bfc6d0!important}
+body.light-mode .btn-ghost{background:rgba(0,0,0,.04)!important;color:#1e293b!important}
+body.light-mode .btn-ghost:hover{background:rgba(0,0,0,.08)!important;color:#0f172a!important}
+body.light-mode .metric-card{background:#fff!important;border-color:#bfc6d0!important}
+body.light-mode .module-card{background:#fff!important;border-color:#bfc6d0!important}
+body.light-mode .module-card:hover{background:#f0f4f8!important;box-shadow:0 8px 24px rgba(0,0,0,.08)!important}
+body.light-mode .modal-overlay{background:rgba(0,0,0,.35)!important}
+body.light-mode .modal{background:#fff!important}
+body.light-mode .upload-area{background:rgba(29,78,216,.04)!important}
+body.light-mode .control-btn{background:#fff!important;color:#1e293b!important;border-color:#bfc6d0!important}
+body.light-mode .control-btn:hover{background:#f0f4f8!important;color:#0f172a!important}
+body.light-mode .status-banner{border-color:#bfc6d0!important}
+body.light-mode .status-banner.running{background:rgba(4,120,87,.1)!important;border-color:rgba(4,120,87,.3)!important}
+body.light-mode .status-banner.stopped{background:rgba(161,98,7,.1)!important;border-color:rgba(161,98,7,.3)!important}
+body.light-mode .status-banner.not-installed{background:rgba(29,78,216,.1)!important;border-color:rgba(29,78,216,.3)!important}
+body.light-mode .card{background:#fff!important;border-color:#bfc6d0!important}
+body.light-mode .os-badge{background:#fff!important;border-color:#bfc6d0!important}
+body.light-mode .cert-btn-secondary{background:rgba(29,78,216,.08)!important}
+body.light-mode [style*="background:#0c0f1a"],body.light-mode [style*="background:#0a0e1a"],body.light-mode [style*="background:#070a12"],body.light-mode [style*="background: #0c0f1a"],body.light-mode [style*="background: #0a0e1a"],body.light-mode [style*="background: #070a12"]{background:#e8eaef!important;color:#1e293b!important}
+body.light-mode [style*="background:rgba(15,23,42"]{background:#e8eaef!important;color:#1e293b!important;border-color:#bfc6d0!important}
+body.light-mode .header{border-bottom-color:#bfc6d0!important}
+body.light-mode .top-bar{background:linear-gradient(90deg,transparent,#1d4ed8,#0e7490,transparent)!important}
+body.light-mode #theme-toggle-btn{color:var(--text-secondary)}
+body.light-mode #theme-toggle-btn:hover{color:var(--text-primary);background:rgba(0,0,0,.05)}
+</style>
+<script>
+(function(){var t=localStorage.getItem('infra-tak-theme');if(t==='light')document.body.classList.add('light-mode')})();
+function toggleTheme(){var b=document.body;b.classList.toggle('light-mode');var l=b.classList.contains('light-mode');localStorage.setItem('infra-tak-theme',l?'light':'dark');_syncThemeUI()}
+function _syncThemeUI(){var l=document.body.classList.contains('light-mode');var ic=document.getElementById('theme-icon');var lb=document.getElementById('theme-label');if(ic)ic.textContent=l?'dark_mode':'light_mode';if(lb)lb.textContent=l?'Dark Mode':'Light Mode'}
+document.addEventListener('DOMContentLoaded',_syncThemeUI);
+</script>'''
+    return light_mode_block + f'<nav class="sidebar"{nav_style}>\n  ' + '\n  '.join(parts) + '\n</nav>'
 
 def get_system_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
