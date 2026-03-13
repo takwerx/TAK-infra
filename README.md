@@ -33,7 +33,7 @@ chmod +x start.sh
 sudo ./start.sh
 ```
 
-**Branches:** Default clone uses **main** (stable; tagged releases). For latest features and fixes before they’re merged to main, use the **dev** branch: `git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git`. The README and changelog here reflect main; dev may include remote deployment, UI tweaks, and fixes not yet in a release.
+**Branches:** Default clone uses **main** (stable; tagged releases). For latest features and fixes before they're merged to main, use the **dev** branch: `git clone --depth 1 -b dev https://github.com/takwerx/infra-TAK.git`. The README and changelog here reflect main; dev may include remote deployment, UI tweaks, and fixes not yet in a release.
 
 The script will:
 1. Detect your OS (**Ubuntu 22.04 only** for now; goal is a universal installer)
@@ -43,15 +43,17 @@ The script will:
 
 Then open your browser to the URL shown and log in.
 
-**Updating:** After `git pull`, restart the console with `sudo systemctl restart takwerx-console`. Your password and config live in the install directory’s `.config/`. If you run `start.sh` from a different clone or path, the service keeps using the original install directory so your password continues to work.
+**Updating:** After `git pull`, restart the console with `sudo systemctl restart takwerx-console`. Your password and config live in the install directory's `.config/`. If you run `start.sh` from a different clone or path, the service keeps using the original install directory so your password continues to work.
+
+**Upgrading from v0.1.x to v0.2.0:** v0.2.0 switches from Flask dev server to gunicorn (production server). The upgrade is automatic — just `git pull` and restart. On first restart, the console installs gunicorn, rewrites the systemd service, and starts the production server transparently. No manual steps needed.
 
 **Password not working after update?** Use the **backdoor**: **https://&lt;VPS_IP&gt;:5001**. If login spins or fails, on the server run (from the directory where you do `git pull`, e.g. `/root/infra-TAK`): **`sudo ./fix-console-after-pull.sh`** — it pins the config path in the systemd unit and prompts you to set a new password so you can log in again. Alternatively run `sudo ./reset-console-password.sh` from that same directory. After pulling, open the Caddy module and re-save your domain once so the Caddyfile (login bypass) is applied.
 
 ## Recovery / backdoor (when Authentik or Caddy is broken)
 
-If Authentik or Caddy is down and you can’t reach **https://infratak.yourdomain.com**:
+If Authentik or Caddy is down and you can't reach **https://infratak.yourdomain.com**:
 
-- **Backdoor:** Open **https://&lt;VPS_IP&gt;:5001** in your browser (use the server’s real IP, not the domain). Log in with the **console password** you set when you ran `start.sh`. That path skips Caddy and Authentik, so you can get back into the console and fix things.
+- **Backdoor:** Open **https://&lt;VPS_IP&gt;:5001** in your browser (use the server's real IP, not the domain). Log in with the **console password** you set when you ran `start.sh`. That path skips Caddy and Authentik, so you can get back into the console and fix things.
 
 The console password is stored as a **hash** in the install directory at `.config/auth.json` (e.g. `/root/infra-TAK/.config/auth.json`). You **cannot** recover the plaintext password from that file. If you forget it:
 
@@ -60,7 +62,7 @@ cd /root/infra-TAK   # or your install path
 sudo ./reset-console-password.sh
 ```
 
-Enter a new password twice; the script updates `.config/auth.json` and restarts the console. Then use **https://&lt;VPS_IP&gt;:5001** with the new password. Store the console password somewhere safe (e.g. password manager); it’s your only way in when the domain or Authentik is broken.
+Enter a new password twice; the script updates `.config/auth.json` and restarts the console. Then use **https://&lt;VPS_IP&gt;:5001** with the new password. Store the console password somewhere safe (e.g. password manager); it's your only way in when the domain or Authentik is broken.
 
 ## Deployment Order
 
@@ -86,15 +88,17 @@ Deploy services in this order — each step auto-configures the next:
 
 ## Remote deployment and firewalls
 
-Authentik, CloudTAK, and MediaMTX can be deployed to a **remote host** (separate from the infra-TAK console). You configure the target in each module’s “Deployment target” (e.g. “On another server via SSH”) and deploy from the console; the console SSHs to the remote and runs Docker/scripts there.
+Authentik, CloudTAK, MediaMTX, and Node-RED can be deployed to a **remote host** (separate from the infra-TAK console). You configure the target in each module's "Deployment target" (e.g. "On another server via SSH") and deploy from the console; the console SSHs to the remote and runs Docker/scripts there.
+
+TAK Server supports a **two-server split**: Server One (PostgreSQL database) and Server Two (TAK Server core) on separate hosts. Configure both hosts in the TAK Server settings and deploy from the console.
 
 **Firewall:** Depending on how you deploy, the infra-TAK host and remote host may need to reach each other for the automation to work. For example:
 
 - **SSH:** The console must reach the remote on port 22 (or your SSH port) to run deploy and management commands.
-- **Authentik remote:** After containers start, the console calls the remote Authentik API on port **9090** (e.g. `http://<remote>:9090`) to inject the LDAP outpost token. If the infra-TAK server and the remote are in different networks or behind firewalls, open port **9090** from the infra-TAK host to the remote so the token step can succeed; otherwise you’ll see “Connection refused” in the deploy log and the LDAP container may stay unhealthy (403 token errors).
-- **Two-server TAK:** Server Two (core) must reach Server One (database) on the **PostgreSQL port** (default 5432); open that port on Server One’s firewall for Server Two’s IP.
+- **Authentik remote:** After containers start, the console calls the remote Authentik API on port **9090** (e.g. `http://<remote>:9090`) to inject the LDAP outpost token. If the infra-TAK server and the remote are in different networks or behind firewalls, open port **9090** from the infra-TAK host to the remote so the token step can succeed; otherwise you'll see "Connection refused" in the deploy log and the LDAP container may stay unhealthy (403 token errors).
+- **Two-server TAK:** Server Two (core) must reach Server One (database) on the **PostgreSQL port** (default 5432); open that port on Server One's firewall for Server Two's IP.
 
-If a remote deploy fails at “token” or “API” steps, or a service reports unhealthy, check that the hosts can reach the required ports (SSH, 9000 for Authentik, 5432 for two-server DB, etc.).
+If a remote deploy fails at "token" or "API" steps, or a service reports unhealthy, check that the hosts can reach the required ports (SSH, 9090 for Authentik, 5432 for two-server DB, etc.).
 
 ## What Gets Automated
 
@@ -111,8 +115,8 @@ After deployment, create users in TAK Portal — they flow through Authentik →
 - **Ubuntu 22.04 LTS** (currently the only supported platform; goal is a universal installer). Fresh installation recommended.
 - **Root access**
 - **RAM:** 8 GB+ recommended for TAK Server; more if you run the full stack (Authentik, TAK Portal, Node-RED, MediaMTX, CloudTAK, Guard Dog).
-- **Disk:** At max deployment (all modules) you can sit around **26 GB** used. Plan for growth: CoT data, logs, and retention. **50 GB+** disk is recommended so you have headroom; TAK Server’s own minimum is 40 GB per the official configuration guide. Apply Docker log limits (Guard Dog → Apply Docker log limits) to avoid containers filling the disk.
-- **CPU:** Enough cores for all processes (TAK Server, PostgreSQL, Authentik, Caddy, Node-RED, etc.). TAK Server’s minimum is 4 cores; more is better for the full stack.
+- **Disk:** At max deployment (all modules) you can sit around **26 GB** used. Plan for growth: CoT data, logs, and retention. **50 GB+** disk is recommended so you have headroom; TAK Server's own minimum is 40 GB per the official configuration guide. Apply Docker log limits (Guard Dog → Apply Docker log limits) to avoid containers filling the disk.
+- **CPU:** Enough cores for all processes (TAK Server, PostgreSQL, Authentik, Caddy, Node-RED, etc.). TAK Server's minimum is 4 cores; more is better for the full stack.
 - **Internet** connection for initial setup.
 - **TAK Server .deb** package from [tak.gov](https://tak.gov).
 
@@ -120,7 +124,7 @@ After deployment, create users in TAK Portal — they flow through Authentik →
 
 ```
 start.sh                    ← One CLI command to launch everything
-├── app.py                  ← Flask web application (HTTPS on :5001)
+├── app.py                  ← Gunicorn web application (HTTPS on :5001)
 ├── uploads/                ← Uploaded .deb packages
 └── .config/                ← Auth + settings (gitignored)
 ```
@@ -162,32 +166,63 @@ start.sh                    ← One CLI command to launch everything
 
 - **[References](docs/REFERENCES.md)** — Canonical links (e.g. [TAK Server API](https://docs.tak.gov/api/takserver)) for development and integration.
 - **[Guard Dog](docs/GUARDDOG.md)** — How Guard Dog works: monitors, 15‑minute boot delay and cooldowns, TAK Server soft start (after PostgreSQL and network), 4GB swap on deploy for memory stability, and restart-loop protection. Apply Docker container log limits from the Guard Dog page without redeploying a module.
-- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal’s open request-access page and Email Relay.
+- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal's open request-access page and Email Relay.
 
 ---
 
 ## Changelog
 
-### v0.2.0-alpha (dev) — 2026-03-11
+### v0.2.0-alpha — 2026-03-12
 
-**Authentik — Update config & reconnect (local and remote)**
-- **Remote reconfigure:** When Authentik is deployed to a **remote** host, “Update config & reconnect” now runs against the remote host only (SSH to ensure containers up, then API steps against `http://<remote_host>:9090`). No local `~/authentik` is required. Token is read from remote .env via SSH.
-- **Local reconfigure** now creates/repairs all four applications (infra-TAK, MediaMTX, Node-RED, TAK Portal) and ensures their providers are on the embedded outpost. If `~/authentik` is missing, the console tries `/opt/authentik` and the Docker Compose project dir from the authentik-server container.
-- **Outpost safety:** All code that adds a provider to the embedded outpost uses a single safe helper that never shortens the provider list, so adding TAK Portal (or any app) no longer removes the others.
-- **Install check:** “Update config & reconnect” is allowed when remote + deployed, or when the compose file exists, or when an authentik-server container is running, or when Authentik HTTP is reachable — so it no longer fails with “Authentik not installed” when the stack is running but the console has no local compose file (e.g. remote deploy).
-- **Deploy log:** Reconfigure now shows a live log (no immediate redirect); the “Update config & reconnect — Log” card appears and streams output.
+**Two-server TAK Server (split core and database)**
+- Deploy TAK Server across two hosts: **Server One** (PostgreSQL database) and **Server Two** (TAK Server core). Server One is configured entirely from the console — installs PostgreSQL, opens remote access, captures the DB password, and configures `pg_hba.conf` for Server Two's IP.
+- SSH key management UI: generate or use an existing key for Server One access, with a button to copy the public key.
+- Per-server health monitoring: separate status dots for core and database, with dedicated **Restart DB** / **Restart Both** buttons.
+- Guard Dog is two-server aware and monitors the remote database host.
+- TAK Server version detection works across both hosts (`takserver-core` on Server Two, `takserver-database` on Server One).
 
-**Current struggles (see docs/HANDOFF-LDAP-AUTHENTIK.md)**
-- Remote Authentik: ensure the console can reach the remote host on port 9090 (API) and that SSH is configured; token must be present in remote `~/authentik/.env`.
-- If only TAK Portal (or a subset of apps) appears in the launcher, run “Update config & reconnect” and check Authentik Admin → Applications and Outposts → embedded outpost; reconfigure should repair all four apps.
+**Remote deployments**
+- Authentik, CloudTAK, MediaMTX, and Node-RED can each be deployed to a **remote host** via SSH. Choose "On another server via SSH" in the Deployment Target section, enter host/user/port, and deploy from the console.
+- Remote module status (running/stopped) is checked via SSH and shown in the sidebar and console cards.
+- Remote health metrics (CPU, RAM, disk) shown on module detail pages.
 
-**Console and module version display**
-- TAK Server version is shown again on the Console card and on the TAK Server page header; version is read from `takserver`, `takserver-core`, or `takserver-database` so two-server setups show the correct version.
-- CloudTAK page shows the CloudTAK version in the header (e.g. “CloudTAK · v12.93.0”).
+**Gunicorn production server (auto-upgrade)**
+- The console now runs on **gunicorn** instead of the Flask dev server. Existing v0.1.x installs auto-upgrade transparently on first restart after pull — no manual steps needed.
 
-**Docs**
-- README: “Branches” (main vs dev) and “Remote deployment and firewalls” — SSH, Authentik API (9090), two-server PostgreSQL (5432).
-- `docs/HANDOFF-LDAP-AUTHENTIK.md`: v0.2.0 session state, current struggles (remote Authentik, applications not loading). `docs/MAIN-VS-DEV-AUTHENTIK.md`: main vs dev reconfigure and outpost behavior.
+**Staggered Docker boot**
+- A systemd `docker-stagger.service` starts Docker containers in dependency order on server reboot: Authentik DB → Authentik → LDAP outpost → TAK Portal → CloudTAK DB → CloudTAK. Prevents OOM crashes and 502s from all containers starting simultaneously on small VPS. Updated automatically on every deploy/uninstall.
+
+**Light / high-contrast mode**
+- Toggle in the sidebar switches between dark mode and a high-contrast light mode designed for outdoor/sunlight use. Preference saved to localStorage and persists across sessions and pages.
+
+**Unified controls UI**
+- All module pages now have a consistent **Controls** section immediately below the status banner, matching the TAK Server page layout. Same `control-btn` styling across every page.
+- **Deployment Target** sections only appear when a module is not yet deployed; once deployed, they disappear.
+- All pages are full-width, flush with the sidebar.
+
+**CloudTAK — stable release pinning and update awareness**
+- Deployments pinned to the **latest stable GitHub release** instead of HEAD. Console card and detail page show **update availability** when a newer stable release exists. One-click **Update** button with glowing indicator.
+
+**Authentik — update awareness and auto-fetch**
+- Deploy automatically fetches the **latest stable Authentik release** from GitHub. Console card and detail page display update availability with glowing **Update** button.
+
+**Authentik — reconfigure improvements (local and remote)**
+- Remote reconfigure runs entirely against the remote host (SSH + API on `http://<remote>:9090`). No local `~/authentik` required.
+- Local reconfigure creates/repairs all four Authentik applications (infra-TAK, MediaMTX, Node-RED, TAK Portal) and ensures all providers are on the embedded outpost.
+- Outpost safety: adding a provider never removes existing ones.
+- Reconfigure shows a live deploy log instead of immediate redirect.
+- Enables the **show password eyeball** on all Authentik login stages (for existing deployments, run "Update config & reconnect").
+
+**Email Relay — Authentik SMTP auto-configuration**
+- Deploying Email Relay automatically configures Authentik's SMTP settings and sets up the password recovery flow.
+
+**Console UI and branding**
+- Version display in the sidebar logo area. **Orbitron** font for "infra-TAK" in the sidebar, matching the login page.
+- TAK Server and CloudTAK versions shown on console cards and detail pages.
+- Module update indicators on dashboard cards.
+
+**LDAP credential auto-resync**
+- Detects when Authentik LDAP credentials have drifted from CoreConfig and auto-resyncs, preventing silent group sync failures.
 
 ---
 

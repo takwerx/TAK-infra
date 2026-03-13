@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""infra-TAK v0.1.8 - TAK Infrastructure Platform"""
+"""infra-TAK v0.2.0 - TAK Infrastructure Platform"""
 
 # === Auto-upgrade: seamlessly switch from Flask dev server to gunicorn ===
 # When the old systemd service runs "python3 app.py", this block installs
@@ -154,7 +154,7 @@ def ensure_session_cookie_domain():
             app.config['SESSION_COOKIE_DOMAIN'] = '.' + s['fqdn'].split(':')[0]
     except Exception:
         pass
-VERSION = "0.1.9-alpha"
+VERSION = "0.2.0-alpha"
 GITHUB_REPO = "takwerx/infra-TAK"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
 # Marker in Caddyfile: content below this line is preserved when infra-TAK regenerates the file (e.g. health.tntak.net for Uptime Robot).
