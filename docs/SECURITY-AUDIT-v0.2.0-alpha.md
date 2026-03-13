@@ -87,6 +87,15 @@ This document prioritizes fixes by risk and implementation effort.
    - Login POSTs (`/` and `/login`): 12 attempts / 5 minutes per client IP.
    - State-changing API calls (`/api/*`): 240 write requests / minute per client IP.
 
+6. **Response security headers baseline**
+   - Added:
+     - `X-Content-Type-Options: nosniff`
+     - `X-Frame-Options: DENY`
+     - `Referrer-Policy: strict-origin-when-cross-origin`
+     - `Permissions-Policy: geolocation=(), microphone=(), camera=()`
+     - `Content-Security-Policy` (compatibility mode for existing inline-heavy templates)
+     - `Strict-Transport-Security` on HTTPS requests
+
 ---
 
 ## Recommended Hardening Roadmap

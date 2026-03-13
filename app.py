@@ -221,6 +221,34 @@ def ensure_session_cookie_domain():
         if request.path != '/api/guarddog/send-sms':
             if not _same_origin_ok():
                 return jsonify({'error': 'CSRF validation failed (same-origin required).'}), 403
+
+
+@app.after_request
+def apply_security_headers(response):
+    """Baseline browser hardening headers with compatibility for current inline-heavy UI."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    # Keep CSP compatible with existing templates (inline script/style, CDN assets, data URLs).
+    # We can tighten this later by removing inline JS/CSS and adding nonces.
+    csp = (
+        "default-src 'self' https: data: blob:; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
+        "style-src 'self' 'unsafe-inline' https:; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data: https:; "
+        "connect-src 'self' https: wss:; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    # HSTS only when request itself is HTTPS (direct or via trusted proxy header).
+    xf_proto = (request.headers.get('X-Forwarded-Proto') or '').lower()
+    if request.is_secure or xf_proto == 'https':
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
 VERSION = "0.2.0-alpha"
 GITHUB_REPO = "takwerx/infra-TAK"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
