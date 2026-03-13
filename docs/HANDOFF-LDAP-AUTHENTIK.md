@@ -16,11 +16,50 @@ Use docs/HANDOFF-LDAP-AUTHENTIK.md as the single source of truth for what's done
 
 ---
 
-## 0. Current Session State (Last Updated: 2026-03-11) — v0.2.0
+## 0. Current Session State (Last Updated: 2026-03-12) — v0.2.0-alpha
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
 
-**Version:** v0.2.0 (not v0.1.10). Changelog and handoff text below reflect v0.2.0.
+**Version:** v0.2.0-alpha (not v0.1.10). Main was updated with selective dev->main release commit `50895d2` and release docs.
+
+### v0.2.0-alpha — 2026-03-12 Session Updates (Release + UI + docs)
+
+**Released / merged updates:**
+- **Release and docs:** `README.md` changelog refreshed for v0.2.0-alpha; `docs/RELEASE-v0.2.0.md` added; `docs/COMMANDS.md` selective merge block updated for v0.2.0-alpha paths/tag examples.
+- **Version bump:** `VERSION` in `app.py` set to `0.2.0-alpha`; sidebar now shows the running version.
+- **Sidebar / branding UI:** Added light mode toggle in sidebar; moved TAKWERX logo to top block (always visible), tightened spacing for 13" screens, and matched `infra-TAK` branding font to login style.
+- **Console update-check fix:** `/api/update/check` now compares semantic version tuples with `>` (newer-only) instead of `!=` so v0.2.0-alpha no longer incorrectly reports an update when latest tag is v0.1.9-alpha.
+- **CloudTAK UX fix:** Access card now renders only when `cloudtak.running` is true (not during deploy / stopped), preventing premature user click-through.
+- **TAK Portal branding preservation note:** Release docs now explicitly state that custom branding fields (e.g. `BRAND_LOGO_URL`) are preserved across **Update**, **Update config**, and reconfigure paths.
+
+### Current operational note — CloudTAK channels/update prompt behavior
+
+- Field observation on two deployments: CloudTAK repeatedly showed channel/update prompts ("channels shit again"). A temporary improvement was seen after **Authentik Update config & reconnect**, but behavior returned.
+- Reproduced with both admin and regular users; anecdotal report from a non-infra-TAK TAK Portal environment suggests this is likely upstream CloudTAK behavior, not infra-TAK specific.
+- Treat as **known upstream issue** for now; keep deployment pinned to stable release and document reproducible steps for CloudTAK maintainers.
+
+### Today's priority (Mac Studio handoff) — MediaMTX token + playback tuning
+
+**Primary focus:** MediaMTX end-user playback stability and token handling simplification.
+
+1. **Token path simplification**
+   - Investigate moving token handling into the upstream/regular MediaMTX path we pull from so infra-TAK skin has less token-specific logic.
+   - Goal: reduce custom skin surface area and remove one failure domain in overlay logic.
+
+2. **Playback freeze feedback from aircraft live stream (RTF from desktop)**
+   - Feedback indicates Chrome native HLS player stalls about every ~35s due to native buffer behavior.
+   - Source artifact reviewed: `/Users/atjohansson/Desktop/video firis feedback from claude..rtf`.
+   - Suggested direction from feedback file: serve a custom **HLS.js player** page (not native Chrome player) and tune:
+     - `liveSyncDurationCount` near segment cadence
+     - `liveMaxLatencyDurationCount` aligned with playlist depth
+     - bounded buffer settings (`maxBufferLength`, `maxMaxBufferLength`)
+   - Working assumption for next session: player-side buffering policy is likely a major factor in aircraft stream freezing, independent of Authentik token flow.
+
+3. **Execution plan for next session**
+   - Validate whether freezes reproduce with HLS.js page under same stream/bitrate/network.
+   - Compare behavior between tokenized URL path vs authenticated header path.
+   - If HLS.js resolves periodic stall, make HLS.js viewer the default for infra-TAK MediaMTX skin and keep Safari fallback to native HLS.
+   - If token logic still causes errors, decide whether to upstream token handling into base MediaMTX integration code and remove duplicate skin code.
 
 ### v0.2.0 — Authentik reconfigure, four apps, remote reconfigure, install check
 

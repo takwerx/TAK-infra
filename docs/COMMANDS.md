@@ -397,13 +397,17 @@ sudo systemctl restart takwerx-console
 
 ## Update Now — "dubious ownership" (git safe.directory)
 
-If **Update Now** in the console fails with `fatal: detected dubious ownership in repository at '...'`, the process running the update (e.g. root) doesn’t own the repo directory (e.g. it was cloned by another user). Git 2.35.2+ blocks this for security. **Fix:** on the server, add the repo as a safe directory for the user that runs the update (usually root):
+If **Update Now** in the console fails with `fatal: detected dubious ownership in repository at '...'`, the process running the update (often root via systemd) doesn’t own the repo directory (e.g. it was cloned by another user like `takadmin`). Git 2.35.2+ blocks this for security (CVE hardening). This can appear even if **you didn’t change permissions** — for example after reinstalling, switching service user, restoring from backup, or cloning as a different user.
+
+**Preferred fix order:**
+1. Use newer infra-TAK (current versions run `git -c safe.directory=<path>` automatically in update flows).
+2. If you still hit it, add the repo as safe for the user running updates (usually root):
 
 ```bash
 sudo git config --global --add safe.directory /path/to/infra-TAK
 ```
 
-Use the path shown in the error (e.g. `/home/tntakazureadmin/infra-TAK`). After that, **Update Now** should work. Newer console versions run `git -c safe.directory=<path>` so this is only needed if you hit the error before updating or on older installs.
+Use the path shown in the error (e.g. `/home/tntakazureadmin/infra-TAK`). After that, **Update Now** should work. This is a Git ownership safety check, not an infra-TAK ACL/permission change.
 
 ---
 
@@ -656,8 +660,39 @@ When you want to release a version but **not** put internal/reference files on `
 
 ```bash
 # 1) Ensure dev has the latest (so the copy to main is current)
+# 1) Ensure dev has the latest (so the copy to main is current)
 git checkout dev
 git pull origin dev
+
+# 2) Switch to main, update it, then copy selected files from dev
+git checkout main
+git pull origin main
+git checkout dev -- \
+  app.py \
+  mediamtx_ldap_overlay.py \
+  start.sh \
+  fix-console-after-pull.sh \
+  reset-console-password.sh \
+  .gitignore \
+  static/ \
+  modules/ \
+  scripts/set-docker-log-limits.sh \
+  scripts/guarddog/ \
+  scripts/fix-mediamtx-stream-redirect.sh \
+  README.md \
+  docs/COMMANDS.md \
+  docs/RELEASE-v0.2.0.md \
+  docs/GUARDDOG.md \
+  docs/DISK-AND-LOGS.md \
+  docs/MEDIAMTX-TAKPORTAL-ACCESS.md \
+  docs/WORKFLOW-8446-WEBADMIN.md \
+  docs/REFERENCES.md \
+  docs/email-template-user-created-without-password.html \
+  docs/TAK_Server_OpenAPI_v0.json
+git add -A && git status
+git commit -m "v0.2.0-alpha"
+git push origin main
+git checkout dev
 
 # 2) Switch to main, update it, then copy selected files from dev
 git checkout main

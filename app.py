@@ -5096,7 +5096,9 @@ def takportal_control():
         running = 'Up' in (r.stdout or '')
         return jsonify({'success': True, 'running': running, 'action': action, 'message': 'Config updated and portal restarted.'})
     elif action == 'update':
-        pull = subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
+        pull = subprocess.run(
+            f'cd {portal_dir} && git -c safe.directory={portal_dir} pull --rebase --autostash',
+            shell=True, capture_output=True, text=True, timeout=60)
         pull_msg = pull.stdout.strip().split('\n')[-1] if pull.stdout.strip() else ''
         build = subprocess.run(f'cd {portal_dir} && docker compose up -d --build', shell=True, capture_output=True, text=True, timeout=180)
         if build.returncode != 0:
@@ -5261,7 +5263,9 @@ def run_takportal_deploy():
         plog("\u2501\u2501\u2501 Step 2/6: Cloning TAK Portal \u2501\u2501\u2501")
         if os.path.exists(portal_dir):
             plog("  TAK-Portal directory already exists, pulling latest...")
-            subprocess.run(f'cd {portal_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(
+                f'cd {portal_dir} && git -c safe.directory={portal_dir} pull --rebase --autostash',
+                shell=True, capture_output=True, text=True, timeout=60)
         else:
             plog("  Cloning from GitHub (shallow, latest only)...")
             r = subprocess.run(f'git clone --depth 1 https://github.com/AdventureSeeker423/TAK-Portal.git {portal_dir}', shell=True, capture_output=True, text=True, timeout=180)
@@ -5585,25 +5589,46 @@ def run_takportal_deploy():
                         else:
                             plog(f"  \u26a0 Application error: {str(e)[:80]}")
 
-                    # Add to embedded outpost (main: direct PATCH)
-                    try:
-                        req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/?search=embedded', headers=_ak_headers)
-                        resp = _urlreq.urlopen(req, timeout=10)
-                        outposts = json_mod.loads(resp.read().decode())['results']
-                        embedded = next((o for o in outposts if 'embed' in o.get('name','').lower() or o.get('type') == 'proxy'), None)
-                        if embedded:
-                            current_providers = embedded.get('providers', [])
-                            if provider_pk not in current_providers:
-                                current_providers.append(provider_pk)
-                            req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
-                                data=json_mod.dumps({'providers': current_providers}).encode(),
-                                headers=_ak_headers, method='PATCH')
-                            _urlreq.urlopen(req, timeout=10)
+                    # Add to embedded outpost (retry-safe; API can still be warming up)
+                    outpost_ok = False
+                    for attempt in range(1, 4):
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/?search=embedded', headers=_ak_headers)
+                            resp = _urlreq.urlopen(req, timeout=15)
+                            outposts = json_mod.loads(resp.read().decode())['results']
+                            embedded = next((o for o in outposts if 'embed' in o.get('name','').lower() or o.get('type') == 'proxy'), None)
+                            if not embedded:
+                                plog(f"  \u26a0 No embedded outpost found")
+                                break
+                            detail_req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/', headers=_ak_headers)
+                            detail = _urlreq.urlopen(detail_req, timeout=15)
+                            full = json_mod.loads(detail.read().decode())
+                            raw = full.get('providers') or []
+                            current_pks = []
+                            for p in raw:
+                                if isinstance(p, int):
+                                    current_pks.append(p)
+                                elif isinstance(p, dict):
+                                    pk = p.get('pk') or p.get('id')
+                                    if pk is not None:
+                                        current_pks.append(pk)
+                            if provider_pk not in current_pks:
+                                current_pks.append(provider_pk)
+                                patch_req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
+                                    data=json_mod.dumps({'providers': current_pks}).encode(),
+                                    headers=_ak_headers, method='PATCH')
+                                _urlreq.urlopen(patch_req, timeout=15)
+                            outpost_ok = True
                             plog(f"  \u2713 TAK Portal added to embedded outpost")
-                        else:
-                            plog(f"  \u26a0 No embedded outpost found")
-                    except Exception as e:
-                        plog(f"  \u26a0 Outpost error: {str(e)[:80]}")
+                            break
+                        except Exception as e:
+                            if attempt < 3:
+                                plog(f"  \u26a0 Outpost error: {str(e)[:80]} (retry {attempt}/2)")
+                                time.sleep(3)
+                            else:
+                                plog(f"  \u26a0 Outpost error: {str(e)[:80]}")
+                    if not outpost_ok:
+                        plog("  \u26a0 Continuing -- outpost attach can self-heal on Authentik reconfigure")
             except Exception as e:
                 plog(f"  \u26a0 Forward auth setup error: {str(e)[:100]}")
 
@@ -7769,10 +7794,14 @@ def run_cloudtak_deploy(cfg=None):
                     shell=True, capture_output=True, text=True, timeout=120)
                 if r.returncode != 0:
                     plog(f"  ⚠ git fetch/checkout warning: {r.stderr.strip()[:100]} — falling back to pull")
-                    subprocess.run(f'cd {cloudtak_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=120)
+                    subprocess.run(
+                        f'cd {cloudtak_dir} && git -c safe.directory={cloudtak_dir} pull --rebase --autostash',
+                        shell=True, capture_output=True, text=True, timeout=120)
             else:
                 plog("  ~/CloudTAK exists — pulling latest (could not fetch release tag)...")
-                r = subprocess.run(f'cd {cloudtak_dir} && git pull --rebase --autostash', shell=True, capture_output=True, text=True, timeout=120)
+                r = subprocess.run(
+                    f'cd {cloudtak_dir} && git -c safe.directory={cloudtak_dir} pull --rebase --autostash',
+                    shell=True, capture_output=True, text=True, timeout=120)
                 if r.returncode != 0:
                     plog(f"  ⚠ git pull warning: {r.stderr.strip()[:100]}")
         else:
