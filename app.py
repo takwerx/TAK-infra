@@ -19476,7 +19476,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <p style="font-size:11px;color:var(--text-dim);margin-top:6px;margin-bottom:4px"><strong>Resync LDAP</strong> — Re-runs the full flow (fix blueprint if needed, restart Authentik worker, ensure service account &amp; webadmin, sync CoreConfig). Use after pulling console updates or if QR/login fails.</p>
 <p style="font-size:11px;color:var(--text-dim);margin-top:0;margin-bottom:4px"><strong>Sync webadmin</strong> — Only pushes the 8446 password from settings into Authentik. Does not restart anything.</p>
 <div style="margin-top:14px;padding:12px 14px;background:rgba(59,130,246,.06);border:1px solid var(--border);border-radius:8px">
-<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"><strong>Set webadmin password</strong> (for 8446 login)</div>
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"><strong>Change webadmin password</strong> (for 8446 login)</div>
 <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
 <input type="password" id="set-webadmin-pw" placeholder="New password" style="max-width:180px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px">
 <input type="password" id="set-webadmin-pw-confirm" placeholder="Confirm" style="max-width:180px;padding:8px 12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px">
