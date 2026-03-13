@@ -382,7 +382,8 @@ def render_sidebar(modules, active_path, takwerx_logo_url=None):
         cls = 'nav-item active' if path == active else 'nav-item'
         t = f' title="{html.escape(title)}"' if title else ''
         return f'<a href="{href}" class="{cls}"{t}>{content}</a>'
-    logo = f'<div class="sidebar-logo"><span>infra-TAK</span><small>Infrastructure Platform</small><small style="display:block;margin-top:2px">built by TAKWERX</small><small style="display:block;margin-top:2px">v{VERSION}</small></div>'
+    tw_logo_img = f'<img src="{html.escape(takwerx_logo_url)}" alt="TAKWERX" style="display:block;margin-top:10px;max-width:130px;height:auto;max-height:40px;object-fit:contain">' if takwerx_logo_url else ''
+    logo = f'<div class="sidebar-logo"><span>infra-TAK</span><small>Infrastructure Platform</small><small style="display:block;margin-top:2px">v{VERSION}</small>{tw_logo_img}</div>'
     parts = [logo]
     parts.append(link('/console', '<span class="nav-icon material-symbols-outlined">dashboard</span>Console'))
     gd = modules.get('guarddog', {})
@@ -420,12 +421,7 @@ def render_sidebar(modules, active_path, takwerx_logo_url=None):
         '<span class="nav-icon material-symbols-outlined" id="theme-icon">light_mode</span>'
         '<span id="theme-label">Light Mode</span></button>'
     )
-    if takwerx_logo_url:
-        parts.append(
-            '<div style="padding:20px 20px 24px;text-align:center;border-top:1px solid var(--border)">'
-            f'<img src="{html.escape(takwerx_logo_url)}" alt="TAKWERX" style="max-width:100%;height:auto;max-height:168px;object-fit:contain;display:block;margin:0 auto">'
-            '</div>'
-        )
+    
     nav_style = ''
     light_mode_block = '''<style>
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&display=swap');
@@ -691,10 +687,16 @@ def help_page():
 def update_check():
     import urllib.request
     now = time.time()
+    def _parse_version_tuple(v):
+        return tuple(int(p) for p in v.replace('-alpha','').replace('-beta','').split('.'))
     # Cache for 1 hour
     if update_cache['latest'] and (now - update_cache['checked']) < 3600:
+        try:
+            cached_newer = _parse_version_tuple(update_cache['latest']) > _parse_version_tuple(VERSION)
+        except (ValueError, IndexError):
+            cached_newer = False
         return jsonify({'current': VERSION, 'latest': update_cache['latest'], 'notes': update_cache['notes'],
-            'update_available': update_cache['latest'] != VERSION})
+            'update_available': cached_newer})
     try:
         req = urllib.request.Request(
             f'https://api.github.com/repos/{GITHUB_REPO}/tags',
@@ -704,7 +706,6 @@ def update_check():
         data = json.loads(resp.read().decode())
         if not data:
             return jsonify({'current': VERSION, 'latest': None, 'error': 'No tags found', 'update_available': False})
-        # Find the latest semver tag (sort by version)
         versions = []
         for tag in data:
             name = tag.get('name', '').lstrip('v').replace('-alpha','').replace('-beta','')
@@ -718,13 +719,16 @@ def update_check():
         versions.sort(key=lambda x: x[0], reverse=True)
         latest_tag = versions[0][1]
         latest = latest_tag.get('name', '').lstrip('v')
-        # Strip -alpha/-beta for comparison
-        latest_cmp = latest.replace('-alpha','').replace('-beta','')
-        current_cmp = VERSION.replace('-alpha','').replace('-beta','')
+        try:
+            latest_tuple = _parse_version_tuple(latest)
+            current_tuple = _parse_version_tuple(VERSION)
+            is_newer = latest_tuple > current_tuple
+        except (ValueError, IndexError):
+            is_newer = False
         notes = f"Version {latest_tag.get('name', '')}"
         update_cache.update({'latest': latest, 'checked': now, 'notes': notes})
         return jsonify({'current': VERSION, 'latest': latest, 'notes': notes, 'body': '',
-            'update_available': latest_cmp != current_cmp})
+            'update_available': is_newer})
     except Exception as e:
         return jsonify({'current': VERSION, 'latest': None, 'error': str(e), 'update_available': False})
 
@@ -11492,6 +11496,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
   </div>
 
+  {% if cloudtak.running %}
   <!-- Access -->
   <div class="card">
     <div class="card-title">Access</div>
@@ -11510,6 +11515,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       <div class="info-item"><div class="info-label">Install Dir</div><div class="info-value">~/CloudTAK</div></div>
     </div>
   </div>
+  {% endif %}
 
   {% if container_info.get('containers') %}
   <div class="card">
