@@ -722,6 +722,68 @@ def _build_uu_hosts(metrics, settings):
     return hosts
 
 
+def _top_processes_local():
+    """Return { cpu_top: [{ name, cpu_pct, mem_pct }], mem_top: [...] } for this host (top 12 by CPU and by RAM)."""
+    try:
+        r = subprocess.run(
+            'ps -eo pcpu,pmem,comm --no-headers 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=5
+        )
+        out = (r.stdout or '').strip()
+        by_name = {}
+        for line in out.split('\n'):
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                cpu = float(parts[0])
+                mem = float(parts[1])
+                name = (parts[2] or '').strip() or '?'
+                if name and name != 'comm':
+                    by_name[name] = by_name.get(name, {'cpu': 0, 'mem': 0})
+                    by_name[name]['cpu'] += cpu
+                    by_name[name]['mem'] += mem
+            except (ValueError, IndexError):
+                continue
+        items = [{'name': n, 'cpu_pct': round(v['cpu'], 1), 'mem_pct': round(v['mem'], 1)} for n, v in by_name.items()]
+        cpu_top = sorted(items, key=lambda x: -x['cpu_pct'])[:12]
+        mem_top = sorted(items, key=lambda x: -x['mem_pct'])[:12]
+        return {'cpu_top': cpu_top, 'mem_top': mem_top}
+    except Exception:
+        return {'cpu_top': [], 'mem_top': []}
+
+
+def _top_processes_remote(remote_cfg):
+    """Return { cpu_top: [...], mem_top: [...] } for remote host via SSH."""
+    if not remote_cfg or not (remote_cfg.get('host') or '').strip():
+        return {'cpu_top': [], 'mem_top': [], 'error': 'no host'}
+    try:
+        ok, out = _ssh_probe(remote_cfg, 'ps -eo pcpu,pmem,comm --no-headers 2>/dev/null', timeout=10)
+        if not ok or not out:
+            return {'cpu_top': [], 'mem_top': [], 'error': (out or 'ssh failed')[:80]}
+        by_name = {}
+        for line in (out or '').strip().split('\n'):
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                cpu = float(parts[0])
+                mem = float(parts[1])
+                name = (parts[2] or '').strip() or '?'
+                if name and name != 'comm':
+                    by_name[name] = by_name.get(name, {'cpu': 0, 'mem': 0})
+                    by_name[name]['cpu'] += cpu
+                    by_name[name]['mem'] += mem
+            except (ValueError, IndexError):
+                continue
+        items = [{'name': n, 'cpu_pct': round(v['cpu'], 1), 'mem_pct': round(v['mem'], 1)} for n, v in by_name.items()]
+        cpu_top = sorted(items, key=lambda x: -x['cpu_pct'])[:12]
+        mem_top = sorted(items, key=lambda x: -x['mem_pct'])[:12]
+        return {'cpu_top': cpu_top, 'mem_top': mem_top}
+    except Exception as e:
+        return {'cpu_top': [], 'mem_top': [], 'error': str(e)[:80]}
+
+
 # === Routes ===
 
 def _login_logo_url():
@@ -19192,6 +19254,23 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 
 # === API Routes ===
 
+@app.route('/api/host-resource-usage')
+@login_required
+def api_host_resource_usage():
+    """Top processes by CPU and RAM for this host or a remote (target=tak_db). Same hosts as UU cards."""
+    target = request.args.get('target', 'this_host')
+    if target == 'tak_db':
+        settings = load_settings()
+        cfg = _get_tak_deployment_config(settings)
+        if cfg.get('mode') != 'two_server':
+            return jsonify({'cpu_top': [], 'mem_top': [], 'error': 'Not two-server'})
+        s1 = cfg.get('server_one', {})
+        if not (s1.get('host') or '').strip():
+            return jsonify({'cpu_top': [], 'mem_top': [], 'error': 'No DB host'})
+        return jsonify(_top_processes_remote(s1))
+    return jsonify(_top_processes_local())
+
+
 @app.route('/api/metrics')
 @login_required
 def api_metrics():
@@ -19831,6 +19910,8 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <span class="uu-spinner" data-target="{{ host.id }}" style="display:none"></span>
 <span class="uu-label" id="uu-label-{{ host.id }}" data-target="{{ host.id }}" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:{% if host.enabled %}var(--green){% else %}var(--text-dim){% endif %}">{% if host.enabled and host.running %}Running...{% elif host.enabled %}Enabled{% else %}Disabled{% endif %}</span>
 </div>
+<button type="button" onclick="event.stopPropagation();toggleResourceBreakdown('{{ host.id }}')" style="margin-top:8px;padding:4px 10px;background:rgba(59,130,246,0.15);color:var(--cyan);border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer">What's using CPU/RAM?</button>
+<div id="resource-breakdown-{{ host.id }}" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);max-height:200px;overflow-y:auto"></div>
 </div>
 {% endfor %}
 </div>
@@ -19885,6 +19966,28 @@ async function toggleUU(cb){
         if(d.success){updateUUHost(target,d);}
         else{cb.checked=!cb.checked;if(lb){lb.textContent=(action==='disable'?'Disable failed':'Error: '+(d.error||'unknown'));lb.style.color='var(--red)';}}
     }catch(e){if(sp)sp.style.display='none';cb.checked=!cb.checked;if(lb){lb.textContent='Error';lb.style.color='var(--red)';}}
+}
+function renderResourceBreakdown(div,cpuTop,memTop,err){
+    if(err){div.innerHTML='<span style="color:var(--red)">'+err+'</span>';return;}
+    var html='';
+    if(cpuTop&&cpuTop.length){html+='<div style="margin-bottom:8px"><strong style="color:var(--cyan)">Top by CPU</strong><ul style="margin:4px 0 0 12px;padding:0;list-style:none">';cpuTop.forEach(function(p){html+='<li>'+escapeHtml(p.name||'')+' <span style="color:var(--green)">'+Number(p.cpu_pct||0).toFixed(1)+'%</span> CPU, '+Number(p.mem_pct||0).toFixed(1)+'% RAM</li>';});html+='</ul></div>';}
+    if(memTop&&memTop.length){html+='<div><strong style="color:var(--cyan)">Top by RAM</strong><ul style="margin:4px 0 0 12px;padding:0;list-style:none">';memTop.forEach(function(p){html+='<li>'+escapeHtml(p.name||'')+' <span style="color:var(--green)">'+Number(p.mem_pct||0).toFixed(1)+'%</span> RAM, '+Number(p.cpu_pct||0).toFixed(1)+'% CPU</li>';});html+='</ul></div>';}
+    if(!html)html='No process data.';
+    div.innerHTML=html;
+}
+function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+async function toggleResourceBreakdown(hostId){
+    var div=document.getElementById('resource-breakdown-'+hostId);if(!div)return;
+    if(div.style.display==='block'){div.style.display='none';return;}
+    if(!div.getAttribute('data-loaded')){
+        div.style.display='block';div.textContent='Loading...';
+        try{
+            var r=await fetch('/api/host-resource-usage?target='+encodeURIComponent(hostId));var d=await r.json();
+            renderResourceBreakdown(div,d.cpu_top,d.mem_top,d.error);div.setAttribute('data-loaded','1');
+        }catch(e){div.innerHTML='<span style="color:var(--red)">Request failed</span>';div.setAttribute('data-loaded','1');}
+        return;
+    }
+    div.style.display='block';
 }
 setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime;if(d.unattended_upgrades_hosts)updateUUHosts(d.unattended_upgrades_hosts);}catch(e){}},5000);
 function refreshModuleCards(){
