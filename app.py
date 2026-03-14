@@ -20351,10 +20351,10 @@ async function toggleUU(cb){
         else{cb.checked=!cb.checked;if(lb){lb.textContent=(action==='disable'?'Disable failed':'Error: '+(d.error||'unknown'));lb.style.color='var(--red)';}}
     }catch(e){if(sp)sp.style.display='none';cb.checked=!cb.checked;if(lb){lb.textContent='Error';lb.style.color='var(--red)';}}
 }
-function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;if(gb>=1)return gb.toFixed(1)+' GB';return (gb*1024).toFixed(0)+' MB';}
-function renderResourceBreakdown(div,data){
+function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;return gb.toFixed(2)+' GB';}
+function renderResourceBreakdown(div,data,hostId){
     var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb,processor=data.processor,diskRead=data.disk_io_read_mbs,diskWrite=data.disk_io_write_mbs,speedRead=data.disk_speed_test_read_mbs,speedWrite=data.disk_speed_test_write_mbs,speedErr=data.disk_speed_test_error;
-    if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>';return;}
+    if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>'+(hostId?' <button type="button" onclick="refreshResourceBreakdown(\''+hostId+'\')" style="margin-left:8px;padding:2px 8px;font-size:10px;background:rgba(59,130,246,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:4px;cursor:pointer">Refresh</button>':'');return;}
     var tbl='width:100%;border-collapse:collapse;font-size:10px;text-align:left', th='padding:2px 8px 2px 0;color:var(--cyan);font-weight:600;border-bottom:1px solid var(--border)', td='padding:2px 8px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06)', r='text-align:right';
     var html='';
     if(processor)html+='<div style="margin-bottom:4px;color:var(--text-dim);font-size:10px">Processor: '+escapeHtml(processor)+'</div>';
@@ -20373,7 +20373,13 @@ function renderResourceBreakdown(div,data){
         html+='</tbody></table></div>';
     }
     if(!html)html='No process data.';
+    if(hostId)html+='<div style="margin-top:8px"><button type="button" onclick="refreshResourceBreakdown(\''+hostId+'\')" style="padding:4px 10px;font-size:10px;background:rgba(59,130,246,0.15);color:var(--cyan);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button></div>';
     div.innerHTML=html;
+}
+async function refreshResourceBreakdown(hostId){
+    var div=document.getElementById('resource-breakdown-'+hostId);if(!div)return;
+    div.removeAttribute('data-loaded');div.style.display='block';div.textContent='Loading… (disk speed test ~5–30s)';
+    try{var r=await fetch('/api/host-resource-usage?target='+encodeURIComponent(hostId));var d=await r.json();renderResourceBreakdown(div,d,hostId);div.setAttribute('data-loaded','1');}catch(e){div.innerHTML='<span style="color:var(--red)">Request failed</span>';div.setAttribute('data-loaded','1');}
 }
 function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 async function toggleResourceBreakdown(hostId){
@@ -20383,7 +20389,7 @@ async function toggleResourceBreakdown(hostId){
         div.style.display='block';div.textContent='Loading… (disk speed test ~5–30s)';
         try{
             var r=await fetch('/api/host-resource-usage?target='+encodeURIComponent(hostId));var d=await r.json();
-            renderResourceBreakdown(div,d);div.setAttribute('data-loaded','1');
+            renderResourceBreakdown(div,d,hostId);div.setAttribute('data-loaded','1');
         }catch(e){div.innerHTML='<span style="color:var(--red)">Request failed</span>';div.setAttribute('data-loaded','1');}
         return;
     }
