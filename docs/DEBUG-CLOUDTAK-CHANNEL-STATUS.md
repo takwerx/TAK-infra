@@ -93,6 +93,45 @@ See **docs/TAK-SERVER-LDAP-BEHAVIOR.md** for the observed pattern and **docs/COM
 
 ---
 
+## 2b. Comparison: TAK Server release 20 vs release 22 (LDAP behavior)
+
+**How we compared:** Watch incoming LDAP traffic on the Authentik host: `cd ~/authentik && docker compose logs -f ldap --tail=0`. Each log line shows `client`, `baseDN` (user), and `timestamp`. Compare interval between bursts and which users are looked up.
+
+| | **Release 20** | **Release 22** |
+|---|---|---|
+| **LDAP interval** | ~30 seconds between bind+search bursts | ~2 seconds between bind+search bursts |
+| **Users polled** | e.g. cn=ASBBFEEDER (and others at similar or longer intervals) | cn=admin, cn=webadmin (constant) |
+| **Pattern** | Bind as adm_ldapservice → Search for user with attributes memberOf, ntUserWorkstations. Repeats on a ~30 s cadence. Matches CoreConfig `updateinterval="30"` (group cache refresh). | Same bind/search pattern but repeats every ~2 seconds for admin and webadmin. No CoreConfig setting documents or configures a 2 s interval. |
+| **UI impact** | No “channels” prompt spam reported. | “Channels” prompt spams when an admin or webadmin is logged into CloudTAK; high takserver CPU (140%+) and LDAP load. |
+| **Conclusion** | Normal group-cache refresh behavior; acceptable load. | Internal TAK Server logic (e.g. subscription cache or admin/connection refresh) is doing LDAP lookups for admin/webadmin on a ~2 s timer. Likely related to RELEASE-20 “Restore periodic updates to subscription cache” / “Add back period updates to subscription cache for non cluster.” |
+
+**Takeaway:** The ~2 second LDAP hammer and “channels” spam are observed on **release 22** (and possibly later). A deployment on **release 20** showed only the expected ~30 s refresh for the users we saw (e.g. ASBBFEEDER). When reporting to upstream, cite this 20 vs 22 comparison and ask whether the subscription-cache or admin refresh path can be throttled or cached so it does not hit LDAP every 2 seconds.
+
+---
+
+## 2c. Narrative: three-server test (two × 5.6R22, one × 5.6R20)
+
+We tested three TAK Servers, all using Authentik LDAP the same way. On each deployment, the test was the same: on the host where Authentik runs, we ran `cd ~/authentik && docker compose logs -f ldap --tail=0` and watched incoming bind/search traffic (client, baseDN, timestamp).
+
+**Servers tested**
+
+- **Server A:** TAK Server 5.6 release 22 (first deployment).
+- **Server B:** TAK Server 5.6 release 22 (second deployment; e.g. ga-responder).
+- **Server C:** TAK Server 5.6 release 20 (e.g. responder).
+
+**Findings**
+
+- **Server A (5.6R22):** LDAP log shows bind + search for **cn=admin** and **cn=webadmin**, attributes memberOf and ntUserWorkstations, from client 172.18.0.1. Bursts repeat every **~2 seconds**. Continues with CloudTAK stopped and no TAK clients connected.
+- **Server B (5.6R22):** Same test on the second release 22 deployment. LDAP log shows bind + search for **cn=admin**, memberOf and ntUserWorkstations, from client 172.18.0.1. Timestamps (e.g. 22:53:54, 22:53:56, 22:53:58, 22:54:00, 22:54:02, 22:54:04, 22:54:06) — **~2 seconds** between bursts. Same pattern as Server A.
+- **Server C (5.6R20):** Same test. LDAP log shows bind + search for **cn=ASBBFEEDER**, memberOf and ntUserWorkstations, from client 172.18.0.1. Timestamps (e.g. 22:44:03, 22:44:35) — **~30 seconds** between bursts. No repeated lookups for admin (or webadmin) every few seconds in the observed window.
+
+**Summary**
+
+- Both 5.6 release 22 servers showed **admin** (and on the first, **webadmin**) queried every **~2 seconds**.
+- The 5.6 release 20 server showed **other users** (e.g. ASBBFEEDER) at **~30 second** intervals and **no** constant admin/webadmin polling in the same test.
+
+---
+
 ## 3. Workarounds to try
 
 - **Resync LDAP** (TAK Server page → LDAP card → “Resync LDAP to TAK Server”). Sometimes reduces the issue temporarily.
