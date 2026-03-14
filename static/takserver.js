@@ -566,7 +566,7 @@ function renderPkgLock(){
         btn.innerHTML='<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">lock</span> Unlock';
         if(label)label.innerHTML='<span style="color:var(--success)">Locked — auto-updates blocked</span>';
     }else{
-        btn.innerHTML='<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">lock_open</span> Lock';
+        btn.innerHTML='<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">lock_open_right</span> Lock';
         if(label)label.innerHTML='<span style="color:var(--text-dim)">Unlocked — auto-updates active</span>';
     }
 }
