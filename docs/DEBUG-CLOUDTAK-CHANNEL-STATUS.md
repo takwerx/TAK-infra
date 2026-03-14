@@ -42,6 +42,14 @@ When you’re done testing, start CloudTAK again from the same page (**▶ Start
 
 ---
 
+## 1c. Findings (observed)
+
+- **CloudTAK stopped:** With CloudTAK containers stopped via the infra-TAK console, the LDAP bind+search traffic (same user, `memberOf` / `ntUserWorkstations`) continued at the same rate from client `172.18.0.1`.
+- **No clients connected:** TAK Server showed no connected clients during that period.
+- **Conclusion:** The LDAP lookups are driven by **TAK Server’s own logic** (e.g. an internal refresh or sync), not by CloudTAK and not by connected TAK clients.
+
+---
+
 ## 2. What this means
 
 - **Direction:** Traffic is **TAK Server → LDAP** (port 389). Authentik/LDAP is not calling TAK Server.

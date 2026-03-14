@@ -12129,8 +12129,12 @@ window.control = function(action) {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({action: action})
   }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      document.getElementById("control-status").textContent = "Error: " + (d.error || "failed");
+      return;
+    }
     document.getElementById("control-status").textContent = d.running ? "Running" : "Stopped";
-    setTimeout(function() { document.getElementById("control-status").textContent = ""; }, 3000);
+    setTimeout(function() { window.location.href = window.location.pathname + "?t=" + Date.now(); }, 1500);
   });
 };
 
