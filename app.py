@@ -933,6 +933,12 @@ def _run_disk_speed_test_remote(remote_cfg):
             write_mbs = round(float(all_speeds[0]), 1)
             read_mbs = round(float(all_speeds[1]), 1)
             return {'disk_speed_test_read_mbs': read_mbs, 'disk_speed_test_write_mbs': write_mbs}
+        # Fallback: "copied, X.XXX s" may be present even if "MB/s" is truncated (e.g. SSH). Speed = 256/time.
+        times = re.findall(r'copied,\s*([\d.]+)\s*s', text)
+        if len(times) >= 2:
+            write_mbs = round(_DISK_SPEED_TEST_SIZE_MB / float(times[0]), 1)
+            read_mbs = round(_DISK_SPEED_TEST_SIZE_MB / float(times[1]), 1)
+            return {'disk_speed_test_read_mbs': read_mbs, 'disk_speed_test_write_mbs': write_mbs}
         return {'disk_speed_test_error': ('parse failed: ' + out.strip()[:80])}
     except Exception as e:
         return {'disk_speed_test_error': str(e)[:80]}
