@@ -4,6 +4,32 @@ When CloudTAK keeps showing the channel-status prompt or “channels thing” re
 
 ---
 
+## 0. Narrative: what’s going on and how we tested
+
+**What’s going on:** TAK Server is making constant LDAP calls (bind + search for `memberOf` and `ntUserWorkstations`) about every 2 seconds for certain users (admin, webadmin). When an admin or webadmin user has CloudTAK open, that same loop shows up in the UI as the repeated “channels” prompt. The calls are coming from TAK Server (client `172.18.0.1` → Authentik LDAP), not from CloudTAK or from end-user clients.
+
+**How we tested:**
+
+1. **LDAP log:** We ran `docker compose logs -f ldap` on the Authentik host and watched bind+search traffic. The pattern is always the same: bind as `adm_ldapservice`, then search for a user (e.g. `cn=admin` or `cn=webadmin`) with attributes `memberOf` and `ntUserWorkstations`, repeating every ~2 seconds.
+
+2. **CloudTAK stopped, no clients:** We stopped CloudTAK completely from the infra-TAK console (containers down). We kept the LDAP log running. The constant bind+search traffic **did not stop**—it continued at the same rate. TAK Server reported no connected clients. So the constant calls are **not** driven by CloudTAK or by anyone being logged in; they are driven by **TAK Server’s own logic** (e.g. an internal refresh or sync for admin/webadmin).
+
+3. **Admin vs normal user:** With CloudTAK running again, we logged in as a normal user (aj2cacor) only. No “channels” spam in that session. The LDAP log still showed continuous polling for **cn=admin** (and webadmin), and only occasional lookups for **cn=aj2cacor** (e.g. at login). When we logged in as admin, the channels prompt spammed again. So the **UI spam** is tied to having an admin (or webadmin) session in CloudTAK; the **LDAP polling** for admin/webadmin is something TAK Server does on a timer regardless of who is actually using CloudTAK.
+
+**What we found:**
+
+- The constant LDAP calls happen **even with CloudTAK shut down and no clients connected** to TAK Server. So it’s TAK Server’s own background behavior.
+- The “channels” prompt in the browser only goes crazy when an **admin or webadmin** is logged into CloudTAK; a normal user (e.g. aj2cacor) does not see that spam.
+- LDAP polling for admin/webadmin runs on a timer in TAK Server regardless of who is using CloudTAK; the UI spam is tied to having an admin or webadmin session open.
+
+**What we ruled out:**
+
+- **CloudTAK** as the source of the constant calls: with CloudTAK stopped, the LDAP traffic continued at the same rate.
+- **Connected clients** as the source: with no clients connected to TAK Server, the LDAP traffic continued.
+- So the constant calls are driven by **TAK Server’s own logic**, not by CloudTAK or by anyone being logged in.
+
+---
+
 ## 1. Confirm the pattern (LDAP traffic)
 
 On the host where **CloudTAK, Authentik, and TAK Server** run (Server Two in two-server mode):
@@ -47,6 +73,7 @@ When you’re done testing, start CloudTAK again from the same page (**▶ Start
 - **CloudTAK stopped:** With CloudTAK containers stopped via the infra-TAK console, the LDAP bind+search traffic (same user, `memberOf` / `ntUserWorkstations`) continued at the same rate from client `172.18.0.1`.
 - **No clients connected:** TAK Server showed no connected clients during that period.
 - **Conclusion:** The LDAP lookups are driven by **TAK Server’s own logic** (e.g. an internal refresh or sync), not by CloudTAK and not by connected TAK clients.
+- **Admin vs normal user:** With only a normal user (e.g. aj2cacor) logged into CloudTAK, the “channels” prompt does not spam; the LDAP log still shows continuous polling for **cn=admin** and **cn=webadmin**. The UI spam is tied to having an admin or webadmin session open.
 
 ---
 
