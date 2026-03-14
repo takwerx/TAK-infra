@@ -554,7 +554,7 @@ async function pinPackages(){
         var r=await fetch('/api/takserver/pin-packages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
         var d=await r.json();
         if(d.success){
-            if(status)status.innerHTML='<span style="color:var(--success)">✓ '+d.message+'</span>';
+            if(status)status.innerHTML='<span style="color:var(--success)">🔒 Core Host &nbsp; 🔒 DB Host (Remote)</span>';
             btn.style.opacity='1';btn.disabled=false;
         }else{
             if(status)status.innerHTML='<span style="color:var(--error)">'+(d.message||'Failed')+'</span>';
@@ -573,15 +573,21 @@ async function checkPinStatus(){
     try{
         var r=await fetch('/api/takserver/pin-packages/status');
         var d=await r.json();
-        if(d.pinned){
-            status.innerHTML='<span style="color:var(--success)">✓ Packages pinned — auto-updates blocked</span>';
-        }else{
+        if(d.results){
             var parts=[];
-            if(d.results){
-                if(d.results.server_two==='not_pinned')parts.push('This host: not pinned');
-                if(d.results.server_one==='not_pinned')parts.push('Server One: not pinned');
+            var s2=d.results.server_two;
+            var s1=d.results.server_one;
+            if(s2==='pinned')parts.push('🔒 This Host');
+            else if(s2==='safe')parts.push('🔒 This Host');
+            else if(s2==='not_pinned')parts.push('🔓 This Host');
+            if(s1==='pinned')parts.push('🔒 Server One / Remote');
+            else if(s1==='safe')parts.push('🔒 Server One / Remote');
+            else if(s1==='not_pinned')parts.push('🔓 Server One / Remote');
+            if(d.pinned){
+                status.innerHTML='<span style="color:var(--success)">'+parts.join(' &nbsp; ')+'</span>';
+            }else{
+                status.innerHTML='<span style="color:var(--warning)">'+parts.join(' &nbsp; ')+'</span>';
             }
-            status.innerHTML='<span style="color:var(--warning)">'+(parts.length?parts.join('; '):'Not pinned — click to protect')+'</span>';
         }
     }catch(e){}
 }

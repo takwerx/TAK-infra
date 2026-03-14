@@ -1843,9 +1843,9 @@ def guarddog_page():
     ]
     if is_two_server and s1_host:
         guarddog_services.append({'id': 'remotedb', 'name': f'Remote Database ({s1_host})', 'monitored': gd.get('installed'), 'monitors': [
-            {'name': 'TCP + SSH', 'id': 'remotedb_tcp', 'interval': '2 min', 'desc': f'Checks port 5432 on {s1_host} is reachable and PostgreSQL cluster is up. Auto-restarts PG via SSH after 3 consecutive failures. Alerts on persistent failure.'},
-            {'name': 'Health Agent', 'id': 'remotedb_agent', 'interval': 'Always', 'desc': f'Lightweight health endpoint on {s1_host}:8080/health — checks PG ready, cot database, disk usage. If red, click "Deploy health agent to Server One" below.'},
-            {'name': 'DB Auth', 'id': 'remotedb_auth', 'interval': '5 min', 'desc': 'Validates martiuser password from CoreConfig.xml against PostgreSQL on Server One. Red means credential drift — use Sync DB Password to fix.'},
+            {'name': 'TCP + SSH', 'id': 'remotedb_tcp', 'interval': '2 min', 'desc': f'Checks port 5432 on Server One / remote server ({s1_host}) is reachable and PostgreSQL cluster is up. Auto-restarts PG via SSH after 3 consecutive failures. Alerts on persistent failure.'},
+            {'name': 'Health Agent', 'id': 'remotedb_agent', 'interval': 'Always', 'desc': f'Lightweight health endpoint on Server One / remote server ({s1_host}:8080/health) — checks PG ready, cot database, disk usage. If red, click "Deploy health agent to Server One / remote server" below.'},
+            {'name': 'DB Auth', 'id': 'remotedb_auth', 'interval': '5 min', 'desc': f'Validates martiuser password from CoreConfig.xml against PostgreSQL on Server One / remote server ({s1_host}). Red means credential drift — Guard Dog auto-resyncs and notifies you.'},
         ]})
     guarddog_services.extend([
         {'id': 'authentik', 'name': 'Authentik', 'monitored': modules.get('authentik', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'id': 'authentik_http', 'interval': '1 min', 'desc': 'Checks Authentik HTTP (9090). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
@@ -2350,10 +2350,26 @@ def _monitor_health_check(monitor_id):
             if tak_cfg.get('mode') != 'two_server':
                 return None
             s1_cfg = tak_cfg.get('server_one', {})
-            db_password = _fetch_db_password_from_server_one(s1_cfg)
-            if not db_password:
+            # Read password from LOCAL CoreConfig.xml (what TAK Server actually uses)
+            local_pw = ''
+            try:
+                r = subprocess.run(['sudo', 'cat', '/opt/tak/CoreConfig.xml'], capture_output=True, text=True, timeout=5)
+                cc = r.stdout or ''
+                for pat in (
+                    r'<connection[^>]*url\s*=\s*["\']jdbc:postgresql://[^"\']+/cot["\'][^>]*password\s*=\s*["\']([^"\']*)["\']',
+                    r'<connection[^>]*username\s*=\s*["\']martiuser["\'][^>]*password\s*=\s*["\']([^"\']*)["\']',
+                    r'<connection[^>]*password\s*=\s*["\']([^"\']*)["\']',
+                ):
+                    m = re.search(pat, cc)
+                    if m and (m.group(1) or '').strip():
+                        local_pw = m.group(1).strip()
+                        break
+            except Exception:
+                pass
+            if not local_pw:
                 return False
-            return _verify_server_one_db_password(s1_cfg, db_password)
+            ok, _ = _verify_server_one_db_password(s1_cfg, local_pw)
+            return ok
         if monitor_id == 'authentik_http':
             settings = load_settings()
             ak_url = _get_authentik_api_url(settings)
@@ -2978,7 +2994,7 @@ def run_guarddog_deploy(alert_email):
 
         # Two-server: deploy health agent to Server One via SSH/SCP
         if is_two_server and s1_host and os.path.exists(ssh_key_path):
-            plog(f"Deploying health agent to Server One ({s1_host})...")
+            plog(f"Deploying health agent to Server One / remote server ({s1_host})...")
             s1_cfg = tak_cfg.get('server_one', {})
             agent_src = os.path.join(scripts_dir, 'tak-db-health-agent.py')
             if os.path.isfile(agent_src):
@@ -10729,8 +10745,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
           </div>
           {% if svc.id == 'remotedb' and m.id == 'remotedb_agent' %}
           <div class="guard-item" style="align-items:center;gap:8px;padding-left:28px;margin-top:-4px;margin-bottom:8px">
-            <span class="guard-item-desc" style="flex:1">Install or reinstall the health agent on Server One (use if the Health Agent check above is red):</span>
-            <button type="button" class="btn btn-ghost gd-deploy-agent-btn" onclick="gdDeployHealthAgent()" style="padding:6px 14px;font-size:12px;flex-shrink:0">Deploy health agent to Server One</button>
+            <span class="guard-item-desc" style="flex:1">Install or reinstall the health agent on the remote database server (use if the Health Agent check above is red):</span>
+            <button type="button" class="btn btn-ghost gd-deploy-agent-btn" onclick="gdDeployHealthAgent()" style="padding:6px 14px;font-size:12px;flex-shrink:0">Deploy health agent to Server One / remote server</button>
             <span class="gd-deploy-agent-msg-inline" style="font-size:12px;min-width:80px"></span>
           </div>
           {% endif %}
@@ -10742,7 +10758,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     </div>
     {% for svc in guarddog_services %}
     {% if svc.id == 'remotedb' %}
-    <p style="margin-top:12px;font-size:12px;color:var(--text-secondary)">If <strong>Health Agent</strong> is red, the agent may not be on Server One. <button type="button" class="btn btn-ghost" id="gd-deploy-agent-btn" onclick="gdDeployHealthAgent()" style="padding:6px 14px;font-size:12px">Deploy health agent to Server One</button> <span id="gd-deploy-agent-msg"></span></p>
+    <p style="margin-top:12px;font-size:12px;color:var(--text-secondary)">If <strong>Health Agent</strong> is red, the agent may not be installed on Server One / remote server. <button type="button" class="btn btn-ghost" id="gd-deploy-agent-btn" onclick="gdDeployHealthAgent()" style="padding:6px 14px;font-size:12px">Deploy health agent to Server One / remote server</button> <span id="gd-deploy-agent-msg"></span></p>
     {% endif %}
     {% endfor %}
     <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint (for Uptime Robot): <code style="color:var(--cyan);word-break:break-all">{{ health_url }}</code></p>
