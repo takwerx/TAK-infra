@@ -2567,6 +2567,32 @@ def guarddog_apply_docker_log_limits():
         'message': 'Docker log limits applied (50 MB × 3 files per container).' + (' Docker was restarted — start other containers from their pages if needed.' if restarted else ' Limits were already set.')
     })
 
+@app.route('/api/guarddog/update', methods=['POST'])
+@login_required
+def guarddog_update():
+    """Re-deploy Guard Dog scripts and reload timers from latest console version."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'success': False, 'error': 'Guard Dog not installed'}), 400
+    try:
+        _auto_update_guarddog()
+        return jsonify({'success': True, 'message': 'Guard Dog scripts updated and timers reloaded.'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:300]}), 500
+
+
+@app.route('/api/guarddog/update', methods=['POST'])
+@login_required
+def guarddog_update():
+    """Re-deploy Guard Dog scripts and timers from latest console version without full deploy."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return jsonify({'success': False, 'error': 'Guard Dog not installed'}), 400
+    try:
+        _auto_update_guarddog()
+        return jsonify({'success': True, 'message': 'Guard Dog scripts updated and timers reloaded.'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:300]}), 500
+
+
 @app.route('/api/guarddog/uninstall', methods=['POST'])
 @login_required
 def guarddog_uninstall():
@@ -10814,7 +10840,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     {% endfor %}
     <p style="margin-top:14px;font-size:12px;color:var(--text-dim)">Health endpoint (for Uptime Robot): <code style="color:var(--cyan);word-break:break-all">{{ health_url }}</code></p>
     <p style="margin-top:10px;font-size:12px;color:var(--text-dim)"><a href="{{ guarddog_docs_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-weight:500">How Guard Dog works</a> (delays, soft start, restart-loop protection) → docs</p>
-    <p style="margin-top:16px"><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button></p>
+    <p style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn btn-ghost" id="gd-update-btn" onclick="gdUpdate()" title="Re-deploy Guard Dog scripts and timers from latest console version">↻ Update Guard Dog</button><button class="btn btn-ghost" style="color:var(--red);border-color:var(--red)" onclick="document.getElementById('gd-uninstall-modal').classList.add('open')">Uninstall Guard Dog</button><span id="gd-update-msg" style="font-size:12px"></span></p>
   </div>
   {% endif %}
 
@@ -20215,6 +20241,70 @@ if _fqdn:
     print(f"FQDN: {_fqdn}")
 print(f"Port: {_port}")
 print("=" * 50)
+
+# === Auto-update Guard Dog scripts on console startup ===
+def _auto_update_guarddog():
+    """If Guard Dog is installed, re-copy scripts and reload timers so updates take effect on console restart."""
+    if not os.path.exists('/opt/tak-guarddog'):
+        return
+    if not os.path.exists('/opt/tak'):
+        return
+    scripts_dir = os.path.join(BASE_DIR, 'scripts', 'guarddog')
+    if not os.path.isdir(scripts_dir):
+        return
+    try:
+        settings = load_settings()
+        tak_cfg = _get_tak_deployment_config(settings)
+        is_two_server = tak_cfg.get('mode') == 'two_server'
+        s1_host = (tak_cfg.get('server_one', {}).get('host') or '').strip() if is_two_server else ''
+        s1_user = (tak_cfg.get('server_one', {}).get('user') or 'root').strip() if is_two_server else ''
+        ssh_key_path = (tak_cfg.get('server_one', {}).get('ssh_key_path') or '').strip() if is_two_server else ''
+        db_port = str(tak_cfg.get('database', {}).get('port') or 5432) if is_two_server else '5432'
+        alert_email = (settings.get('guarddog_alert_email') or '').strip()
+        cert_pass = _get_tak_cert_password(settings)
+        script_files = [f for f in os.listdir(scripts_dir) if f.endswith(('.sh', '.py'))]
+        updated = 0
+        for name in script_files:
+            src = os.path.join(scripts_dir, name)
+            if not os.path.isfile(src):
+                continue
+            if not is_two_server and 'remotedb' in name:
+                continue
+            if is_two_server and name in ('tak-db-watch.sh', 'tak-cotdb-watch.sh'):
+                continue
+            with open(src) as f:
+                content = f.read()
+            content = (content
+                .replace('ALERT_EMAIL_PLACEHOLDER', alert_email)
+                .replace('ALERT_SMS_PLACEHOLDER', '')
+                .replace('CERT_PASS_PLACEHOLDER', cert_pass))
+            if is_two_server and name in ('tak-remotedb-watch.sh', 'tak-remotedb-auth-watch.sh'):
+                content = content.replace('DB_HOST_PLACEHOLDER', s1_host)
+                content = content.replace('DB_PORT_PLACEHOLDER', db_port)
+                content = content.replace('SSH_KEY_PLACEHOLDER', ssh_key_path)
+                content = content.replace('SSH_USER_PLACEHOLDER', s1_user)
+            dest = os.path.join('/opt/tak-guarddog', name)
+            try:
+                with open(dest) as f:
+                    existing = f.read()
+                if existing == content:
+                    continue
+            except Exception:
+                pass
+            with open(dest, 'w') as f:
+                f.write(content)
+            os.chmod(dest, 0o755)
+            updated += 1
+        if updated > 0:
+            subprocess.run('systemctl daemon-reload', shell=True, capture_output=True, timeout=10)
+            subprocess.run('systemctl restart takremotedbauthguard.timer 2>/dev/null; true', shell=True, capture_output=True, timeout=10)
+            print(f"Guard Dog: {updated} script(s) updated on console startup.")
+        else:
+            print("Guard Dog: scripts up to date.")
+    except Exception as e:
+        print(f"Guard Dog auto-update skipped: {e}")
+
+_auto_update_guarddog()
 
 # === Main Entry Point (fallback for direct python3 app.py) ===
 if __name__ == '__main__':
