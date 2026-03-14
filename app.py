@@ -667,11 +667,17 @@ def _get_unattended_upgrades_status():
         pass
     running = False
     try:
-        proc = subprocess.run('ps aux | grep -E "unattended-upgrade|unattended-upgr" | grep -v shutdown | grep -v grep',
-            shell=True, capture_output=True, text=True, timeout=5)
-        running = bool(proc.stdout.strip())
+        # pgrep matches full command line (unattended-upgrade script or binary)
+        proc = subprocess.run('pgrep -f "unattended-upgrade" >/dev/null 2>&1', shell=True, timeout=5)
+        running = proc.returncode == 0
     except Exception:
         pass
+    if not running and enabled:
+        # When the script runs apt/dpkg, the main CPU may show as "apt"; the lock file indicates UU is active
+        try:
+            running = os.path.exists('/var/run/unattended-upgrades.lock')
+        except Exception:
+            pass
     # Only show "running" when auto-updates are enabled; otherwise timer/cron can run the binary and confuse the UI
     if not enabled:
         running = False
@@ -684,7 +690,8 @@ def _get_unattended_upgrades_status_remote(remote_cfg):
         return {'error': 'no host'}
     cmd = (
         'e=$(systemctl is-enabled unattended-upgrades 2>/dev/null); '
-        'r=0; pgrep -f "/usr/bin/unattended-upgrade" >/dev/null 2>&1 || r=1; '
+        'r=1; pgrep -f "unattended-upgrade" >/dev/null 2>&1 && r=0; '
+        '[ -f /var/run/unattended-upgrades.lock ] && r=0; '
         'echo "ENABLED=$e"; echo "RUNNING=$r"'
     )
     try:
