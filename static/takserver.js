@@ -544,11 +544,14 @@ async function syncTakDbPassword(){
     }catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'});}
 }
 
+function _setHeapBtnsDisabled(disabled){
+    var b1=document.getElementById('set-heap-btn'),b2=document.getElementById('set-heap-apply-btn');
+    if(b1)b1.disabled=disabled;
+    if(b2)b2.disabled=disabled;
+}
 async function setTakHeap(){
-    var btn=document.getElementById('set-heap-btn');
     var msgEl=document.getElementById('set-heap-msg');
-    if(!btn)return;
-    btn.disabled=true;
+    _setHeapBtnsDisabled(true);
     if(msgEl)msgEl.textContent='Setting…';
     try{
         var r=await fetch('/api/takserver/set-heap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
@@ -558,11 +561,34 @@ async function setTakHeap(){
             setTimeout(function(){window.location.reload();},3000);
         }else{
             if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent=d.error||'Failed';}
-            btn.disabled=false;
+            _setHeapBtnsDisabled(false);
         }
     }catch(e){
         if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent='Error: '+e.message;}
-        btn.disabled=false;
+        _setHeapBtnsDisabled(false);
+    }
+}
+async function setTakHeapCustom(){
+    var input=document.getElementById('heap-custom-gb');
+    var msgEl=document.getElementById('set-heap-msg');
+    if(!input){return;}
+    var gb=parseInt(input.value,10);
+    if(isNaN(gb)||gb<2||gb>32){if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent='Enter a value between 2 and 32 GB';}return;}
+    _setHeapBtnsDisabled(true);
+    if(msgEl)msgEl.textContent='Setting '+gb+' GB…';
+    try{
+        var r=await fetch('/api/takserver/set-heap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({heap_gb:gb})});
+        var d=await r.json();
+        if(d.success){
+            if(msgEl){msgEl.style.color='var(--green)';msgEl.textContent=d.message||'Heap set; TAK Server restarting.';}
+            setTimeout(function(){window.location.reload();},3000);
+        }else{
+            if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent=d.error||'Failed';}
+            _setHeapBtnsDisabled(false);
+        }
+    }catch(e){
+        if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent='Error: '+e.message;}
+        _setHeapBtnsDisabled(false);
     }
 }
 

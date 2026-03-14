@@ -1086,6 +1086,7 @@ def takserver_page():
     _s1_host = (_tak_cfg.get('server_one', {}).get('host') or '').strip() if _is_two_server else ''
     _total_ram = _get_total_ram_gb_local() if tak.get('installed') else None
     _recommended_heap = _recommended_takserver_heap_gb(_total_ram) if _total_ram is not None else 4
+    _current_heap = _get_current_takserver_heap_gb() if tak.get('installed') else None
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=_settings, modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
@@ -1096,7 +1097,7 @@ def takserver_page():
         upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
         upgrade_error=upgrade_status.get('error', False),
         two_server_mode=_is_two_server, s1_host=_s1_host,
-        total_ram_gb=_total_ram, recommended_heap_gb=_recommended_heap)
+        total_ram_gb=_total_ram, recommended_heap_gb=_recommended_heap, current_heap_gb=_current_heap)
 
 @app.route('/api/takserver/deployment-config', methods=['GET'])
 @login_required
@@ -1998,13 +1999,36 @@ def _recommended_takserver_heap_gb(total_ram_gb):
     return 2
 
 
+def _get_current_takserver_heap_gb():
+    """Return current -Xmx heap in GB from systemd drop-in if set, else None."""
+    import re
+    dropin = '/etc/systemd/system/takserver.service.d/heap.conf'
+    content = None
+    try:
+        with open(dropin, 'r') as f:
+            content = f.read()
+    except (OSError, IOError):
+        try:
+            r = subprocess.run(f'sudo cat {dropin} 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout:
+                content = r.stdout
+        except Exception:
+            pass
+    if content:
+        m = re.search(r'-Xmx(\d+)g', content, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return None
+
+
 @app.route('/api/takserver/heap-info')
 @login_required
 def takserver_heap_info():
-    """Return total RAM and recommended heap for this host (TAK Server core runs here)."""
+    """Return total RAM, recommended heap, and current heap (if set via drop-in) for this host."""
     total = _get_total_ram_gb_local()
     recommended = _recommended_takserver_heap_gb(total)
-    return jsonify({'total_ram_gb': total, 'recommended_heap_gb': recommended})
+    current = _get_current_takserver_heap_gb()
+    return jsonify({'total_ram_gb': total, 'recommended_heap_gb': recommended, 'current_heap_gb': current})
 
 
 @app.route('/api/takserver/set-heap', methods=['POST'])
@@ -2048,6 +2072,7 @@ def takserver_set_heap():
         'success': True,
         'message': f'TAK Server heap set to -Xmx{heap_gb}g and restarted.',
         'heap_gb': heap_gb,
+        'current_heap_gb': heap_gb,
         'total_ram_gb': total_ram_gb,
     })
 
@@ -20479,7 +20504,15 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
 <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">JVM heap</div>
 <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">If CloudTAK or 8446 return HTTP 500 with <code style="font-size:10px">OutOfMemoryError: Java heap space</code>, TAK Server's JVM heap may be too small. <span id="heap-why" style="display:none">TAK Server uses a fixed heap limit (-Xmx), often 2–4 GB by default; it does not auto-scale. With many CloudTAK tabs or connections, the active-groups cache can exceed that and trigger OOM. This button sets a systemd drop-in so the service can use more memory (and restarts TAK Server).</span><button type="button" onclick="var e=document.getElementById('heap-why');e.style.display=e.style.display?'none':'block'" style="background:none;border:none;color:var(--cyan);cursor:pointer;font-size:11px;padding:0;margin-left:4px">Why?</button></p>
-<button type="button" id="set-heap-btn" onclick="setTakHeap()" class="control-btn" style="margin-right:8px">Set recommended JVM heap ({{ recommended_heap_gb }} GB)</button><span id="set-heap-msg" style="font-size:12px;color:var(--text-dim);margin-left:8px"></span>
+<div style="margin-bottom:10px;font-family:'JetBrains Mono',monospace;font-size:12px">Current: <span id="heap-current-display" style="color:var(--green)">{% if current_heap_gb %}{{ current_heap_gb }} GB <span style="color:var(--text-dim);font-weight:400">(set via drop-in)</span>{% else %}<span style="color:var(--text-dim)">Not set (package default)</span>{% endif %}</span></div>
+<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+<button type="button" id="set-heap-btn" onclick="setTakHeap()" class="control-btn">Set recommended ({{ recommended_heap_gb }} GB)</button>
+<label style="font-size:11px;color:var(--text-dim);margin-left:8px">or set to:</label>
+<input type="number" id="heap-custom-gb" min="2" max="32" value="{{ current_heap_gb or recommended_heap_gb }}" style="width:52px;padding:6px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px" />
+<span style="font-size:11px;color:var(--text-dim)">GB</span>
+<button type="button" id="set-heap-apply-btn" onclick="setTakHeapCustom()" class="control-btn">Apply</button>
+</div>
+<span id="set-heap-msg" style="font-size:12px;color:var(--text-dim);display:block;margin-top:4px"></span>
 </div>
 </div>
 {% endif %}
