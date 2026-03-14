@@ -722,11 +722,62 @@ def _build_uu_hosts(metrics, settings):
     return hosts
 
 
-def _top_processes_local():
-    """Return { cpu_top: [{ name, cpu_pct, mem_pct }], mem_top: [...] } for this host (top 12 by CPU and by RAM)."""
+def _get_total_ram_gb_local():
+    """Return total RAM in GB from /proc/meminfo MemTotal (kB), or None."""
     try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return round(int(parts[1]) / (1024 * 1024), 2)  # kB -> GB
+    except Exception:
+        pass
+    return None
+
+
+def _get_total_ram_gb_remote(remote_cfg):
+    """Return total RAM in GB on remote host via SSH, or None."""
+    try:
+        ok, out = _ssh_probe(remote_cfg, "awk '/MemTotal/{print $2/1024/1024}' /proc/meminfo 2>/dev/null", timeout=5)
+        if ok and out:
+            return round(float(out.strip()), 2)
+    except Exception:
+        pass
+    return None
+
+
+def _friendly_process_name(args):
+    """Derive a recognizable name from process args (e.g. takserver, authentik, cloudtak, caddy, containers)."""
+    a = (args or '').lower()
+    if 'takserver' in a or 'tak-server' in a or 'core-api' in a or 'messaging' in a:
+        return 'takserver'
+    if 'authentik' in a:
+        return 'authentik'
+    if 'cloudtak' in a:
+        return 'cloudtak'
+    if 'caddy' in a:
+        return 'caddy'
+    if 'postgres' in a:
+        return 'postgres'
+    if 'redis' in a:
+        return 'redis'
+    if 'containerd' in a or 'runc' in a:
+        return 'containerd/docker'
+    if 'dockerd' in a or 'docker' in a:
+        return 'docker'
+    if 'guarddog' in a or 'guard_dog' in a:
+        return 'guarddog'
+    first = (args or '').strip().split(None, 1)[0] if (args or '').strip() else '?'
+    return first.split('/')[-1] if first else '?'
+
+
+def _top_processes_local():
+    """Return { cpu_top, mem_top, total_ram_gb } with friendly names (takserver, authentik, etc.) and percentages."""
+    try:
+        total_ram_gb = _get_total_ram_gb_local()
         r = subprocess.run(
-            'ps -eo pcpu,pmem,comm --no-headers 2>/dev/null',
+            'ps -eo pcpu,pmem,args --no-headers 2>/dev/null',
             shell=True, capture_output=True, text=True, timeout=5
         )
         out = (r.stdout or '').strip()
@@ -738,8 +789,8 @@ def _top_processes_local():
             try:
                 cpu = float(parts[0])
                 mem = float(parts[1])
-                name = (parts[2] or '').strip() or '?'
-                if name and name != 'comm':
+                name = _friendly_process_name((parts[2] or '').strip())
+                if name and name != '?':
                     by_name[name] = by_name.get(name, {'cpu': 0, 'mem': 0})
                     by_name[name]['cpu'] += cpu
                     by_name[name]['mem'] += mem
@@ -748,17 +799,21 @@ def _top_processes_local():
         items = [{'name': n, 'cpu_pct': round(v['cpu'], 1), 'mem_pct': round(v['mem'], 1)} for n, v in by_name.items()]
         cpu_top = sorted(items, key=lambda x: -x['cpu_pct'])[:12]
         mem_top = sorted(items, key=lambda x: -x['mem_pct'])[:12]
-        return {'cpu_top': cpu_top, 'mem_top': mem_top}
+        result = {'cpu_top': cpu_top, 'mem_top': mem_top}
+        if total_ram_gb is not None:
+            result['total_ram_gb'] = total_ram_gb
+        return result
     except Exception:
         return {'cpu_top': [], 'mem_top': []}
 
 
 def _top_processes_remote(remote_cfg):
-    """Return { cpu_top: [...], mem_top: [...] } for remote host via SSH."""
+    """Return { cpu_top, mem_top, total_ram_gb?, error? } with friendly names for remote host via SSH."""
     if not remote_cfg or not (remote_cfg.get('host') or '').strip():
         return {'cpu_top': [], 'mem_top': [], 'error': 'no host'}
     try:
-        ok, out = _ssh_probe(remote_cfg, 'ps -eo pcpu,pmem,comm --no-headers 2>/dev/null', timeout=10)
+        total_ram_gb = _get_total_ram_gb_remote(remote_cfg)
+        ok, out = _ssh_probe(remote_cfg, 'ps -eo pcpu,pmem,args --no-headers 2>/dev/null', timeout=10)
         if not ok or not out:
             return {'cpu_top': [], 'mem_top': [], 'error': (out or 'ssh failed')[:80]}
         by_name = {}
@@ -769,8 +824,8 @@ def _top_processes_remote(remote_cfg):
             try:
                 cpu = float(parts[0])
                 mem = float(parts[1])
-                name = (parts[2] or '').strip() or '?'
-                if name and name != 'comm':
+                name = _friendly_process_name((parts[2] or '').strip())
+                if name and name != '?':
                     by_name[name] = by_name.get(name, {'cpu': 0, 'mem': 0})
                     by_name[name]['cpu'] += cpu
                     by_name[name]['mem'] += mem
@@ -779,7 +834,10 @@ def _top_processes_remote(remote_cfg):
         items = [{'name': n, 'cpu_pct': round(v['cpu'], 1), 'mem_pct': round(v['mem'], 1)} for n, v in by_name.items()]
         cpu_top = sorted(items, key=lambda x: -x['cpu_pct'])[:12]
         mem_top = sorted(items, key=lambda x: -x['mem_pct'])[:12]
-        return {'cpu_top': cpu_top, 'mem_top': mem_top}
+        result = {'cpu_top': cpu_top, 'mem_top': mem_top}
+        if total_ram_gb is not None:
+            result['total_ram_gb'] = total_ram_gb
+        return result
     except Exception as e:
         return {'cpu_top': [], 'mem_top': [], 'error': str(e)[:80]}
 
@@ -19896,11 +19954,13 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
 {% for host in uu_hosts %}
 <div class="metric-card" style="position:relative" title="OS/apt automatic upgrades on this host." data-uu-target="{{ host.id }}">
+<div style="min-height:52px">
 <div class="metric-label" style="display:flex;align-items:center;gap:6px">Unattended upgrades — {{ host.label }}
 {% if host.enabled and host.running %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 2s infinite" title="Upgrade in progress"></span>{% endif %}
 </div>
 {% if host.get('error') %}<div class="metric-detail" style="color:var(--red);font-size:10px;margin-top:2px">{{ host.error }}</div>{% endif %}
 <div class="metric-detail" style="margin-top:2px;font-size:10px;color:var(--text-dim)">OS/apt</div>
+</div>
 <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
 <label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;margin:0">
 <input type="checkbox" class="uu-toggle" data-target="{{ host.id }}" {% if host.enabled %}checked{% endif %} onchange="toggleUU(this)" style="opacity:0;width:0;height:0">
@@ -19967,11 +20027,23 @@ async function toggleUU(cb){
         else{cb.checked=!cb.checked;if(lb){lb.textContent=(action==='disable'?'Disable failed':'Error: '+(d.error||'unknown'));lb.style.color='var(--red)';}}
     }catch(e){if(sp)sp.style.display='none';cb.checked=!cb.checked;if(lb){lb.textContent='Error';lb.style.color='var(--red)';}}
 }
-function renderResourceBreakdown(div,cpuTop,memTop,err){
-    if(err){div.innerHTML='<span style="color:var(--red)">'+err+'</span>';return;}
+function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;if(gb>=1)return gb.toFixed(1)+' GB';return (gb*1024).toFixed(0)+' MB';}
+function renderResourceBreakdown(div,data){
+    var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb;
+    if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>';return;}
+    var tbl='width:100%;border-collapse:collapse;font-size:10px;text-align:left', th='padding:2px 8px 2px 0;color:var(--cyan);font-weight:600;border-bottom:1px solid var(--border)', td='padding:2px 8px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06)', r='text-align:right';
     var html='';
-    if(cpuTop&&cpuTop.length){html+='<div style="margin-bottom:8px"><strong style="color:var(--cyan)">Top by CPU</strong><ul style="margin:4px 0 0 12px;padding:0;list-style:none">';cpuTop.forEach(function(p){html+='<li>'+escapeHtml(p.name||'')+' <span style="color:var(--green)">'+Number(p.cpu_pct||0).toFixed(1)+'%</span> CPU, '+Number(p.mem_pct||0).toFixed(1)+'% RAM</li>';});html+='</ul></div>';}
-    if(memTop&&memTop.length){html+='<div><strong style="color:var(--cyan)">Top by RAM</strong><ul style="margin:4px 0 0 12px;padding:0;list-style:none">';memTop.forEach(function(p){html+='<li>'+escapeHtml(p.name||'')+' <span style="color:var(--green)">'+Number(p.mem_pct||0).toFixed(1)+'%</span> RAM, '+Number(p.cpu_pct||0).toFixed(1)+'% CPU</li>';});html+='</ul></div>';}
+    if(totalRamGb!=null)html+='<div style="margin-bottom:6px;color:var(--text-dim)">Total RAM: '+totalRamGb+' GB</div>';
+    if(cpuTop&&cpuTop.length){
+        html+='<div style="margin-bottom:10px"><strong style="color:var(--cyan)">Top by CPU</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">CPU %</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'</tr></thead><tbody>';
+        cpuTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:var(--green)">'+Number(p.cpu_pct||0).toFixed(1)+'%</td><td style="'+td+';'+r+'">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+td+';'+r+';color:var(--text-dim)">'+ramStr+'</td>':'')+'</tr>';});
+        html+='</tbody></table></div>';
+    }
+    if(memTop&&memTop.length){
+        html+='<div><strong style="color:var(--cyan)">Top by RAM</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'<th style="'+th+';'+r+'">CPU %</th></tr></thead><tbody>';
+        memTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:var(--green)">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+td+';'+r+';color:var(--text-dim)">'+ramStr+'</td>':'')+'<td style="'+td+';'+r+'">'+Number(p.cpu_pct||0).toFixed(1)+'%</td></tr>';});
+        html+='</tbody></table></div>';
+    }
     if(!html)html='No process data.';
     div.innerHTML=html;
 }
@@ -19983,7 +20055,7 @@ async function toggleResourceBreakdown(hostId){
         div.style.display='block';div.textContent='Loading...';
         try{
             var r=await fetch('/api/host-resource-usage?target='+encodeURIComponent(hostId));var d=await r.json();
-            renderResourceBreakdown(div,d.cpu_top,d.mem_top,d.error);div.setAttribute('data-loaded','1');
+            renderResourceBreakdown(div,d);div.setAttribute('data-loaded','1');
         }catch(e){div.innerHTML='<span style="color:var(--red)">Request failed</span>';div.setAttribute('data-loaded','1');}
         return;
     }
