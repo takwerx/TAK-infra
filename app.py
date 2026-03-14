@@ -20352,6 +20352,7 @@ async function toggleUU(cb){
     }catch(e){if(sp)sp.style.display='none';cb.checked=!cb.checked;if(lb){lb.textContent='Error';lb.style.color='var(--red)';}}
 }
 function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;return gb.toFixed(2)+' GB';}
+function cpuColor(pct){var n=Number(pct||0);if(n>=90)return 'var(--red)';if(n>=70)return '#eab308';return 'var(--green)';}
 function renderResourceBreakdown(div,data,hostId){
     var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb,processor=data.processor,diskRead=data.disk_io_read_mbs,diskWrite=data.disk_io_write_mbs,speedRead=data.disk_speed_test_read_mbs,speedWrite=data.disk_speed_test_write_mbs,speedErr=data.disk_speed_test_error;
     if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>'+(hostId?' <button type="button" onclick="refreshResourceBreakdown(\\''+hostId+'\\')" style="margin-left:8px;padding:2px 8px;font-size:10px;background:rgba(59,130,246,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:4px;cursor:pointer">Refresh</button>':'');return;}
@@ -20362,14 +20363,15 @@ function renderResourceBreakdown(div,data,hostId){
     if(diskRead!=null&&diskWrite!=null)html+='<div style="margin-bottom:4px;color:var(--text-dim);font-size:10px">Disk I/O (current): '+Number(diskRead).toFixed(2)+' MB/s read, '+Number(diskWrite).toFixed(2)+' MB/s write</div>';
     if(speedRead!=null&&speedWrite!=null)html+='<div style="margin-bottom:6px;color:var(--cyan);font-size:10px">Disk speed test (256 MiB): <strong>'+Number(speedRead).toFixed(0)+' MB/s</strong> read, <strong>'+Number(speedWrite).toFixed(0)+' MB/s</strong> write</div>';
     else if(speedErr)html+='<div style="margin-bottom:6px;color:var(--text-dim);font-size:10px">Disk speed test: <span style="color:var(--red)">'+escapeHtml(speedErr)+'</span></div>';
+    var ramCell='padding:2px 8px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;color:var(--text-dim);white-space:nowrap';
     if(cpuTop&&cpuTop.length){
         html+='<div style="margin-bottom:10px"><strong style="color:var(--cyan)">Top by CPU</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">CPU %</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'</tr></thead><tbody>';
-        cpuTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:var(--green)">'+Number(p.cpu_pct||0).toFixed(1)+'%</td><td style="'+td+';'+r+'">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+td+';'+r+';color:var(--text-dim)">'+ramStr+'</td>':'')+'</tr>';});
+        cpuTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);var cpuPct=Number(p.cpu_pct||0);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:'+cpuColor(cpuPct)+'">'+cpuPct.toFixed(1)+'%</td><td style="'+td+';'+r+'">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+ramCell+'">'+ramStr+'</td>':'')+'</tr>';});
         html+='</tbody></table></div>';
     }
     if(memTop&&memTop.length){
         html+='<div><strong style="color:var(--cyan)">Top by RAM</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'<th style="'+th+';'+r+'">CPU %</th></tr></thead><tbody>';
-        memTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:var(--green)">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+td+';'+r+';color:var(--text-dim)">'+ramStr+'</td>':'')+'<td style="'+td+';'+r+'">'+Number(p.cpu_pct||0).toFixed(1)+'%</td></tr>';});
+        memTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);var cpuPct=Number(p.cpu_pct||0);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+'">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+ramCell+'">'+ramStr+'</td>':'')+'<td style="'+td+';'+r+';color:'+cpuColor(cpuPct)+'">'+cpuPct.toFixed(1)+'%</td></tr>';});
         html+='</tbody></table></div>';
     }
     if(!html)html='No process data.';
