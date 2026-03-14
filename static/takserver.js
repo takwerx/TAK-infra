@@ -544,6 +544,28 @@ async function syncTakDbPassword(){
     }catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'});}
 }
 
+async function setTakHeap(){
+    var btn=document.getElementById('set-heap-btn');
+    var msgEl=document.getElementById('set-heap-msg');
+    if(!btn)return;
+    btn.disabled=true;
+    if(msgEl)msgEl.textContent='Setting…';
+    try{
+        var r=await fetch('/api/takserver/set-heap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+        var d=await r.json();
+        if(d.success){
+            if(msgEl){msgEl.style.color='var(--green)';msgEl.textContent=d.message||'Heap set; TAK Server restarting.';}
+            setTimeout(function(){window.location.reload();},3000);
+        }else{
+            if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent=d.error||'Failed';}
+            btn.disabled=false;
+        }
+    }catch(e){
+        if(msgEl){msgEl.style.color='var(--red)';msgEl.textContent='Error: '+e.message;}
+        btn.disabled=false;
+    }
+}
+
 var _pkgLocked=null;
 async function togglePkgLock(){
     var btn=document.getElementById('pkg-lock-btn');

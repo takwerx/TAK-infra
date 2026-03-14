@@ -604,6 +604,23 @@ The first CloudTAK deploy builds several Docker images (api, tiles, events) and 
 
 ---
 
+## TAK Server — HTTP 500 / Java heap OOM (CloudTAK auth)
+
+If CloudTAK shows **HTTP 500** "Exception performing TAK Server authentication" and the error includes **`OutOfMemoryError: Java heap space`** at the bottom, TAK Server has run out of JVM heap when caching active groups. Many open CloudTAK tabs increase cached data and can trigger this.
+
+**Fix:** Increase TAK Server JVM heap on the host where TAK Server core runs. Option 1 — systemd drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/takserver.service.d
+echo -e '[Service]\nEnvironment="CATALINA_OPTS=-Xms2g -Xmx4g"' | sudo tee /etc/systemd/system/takserver.service.d/heap.conf
+sudo systemctl daemon-reload
+sudo systemctl restart takserver
+```
+
+Use `-Xmx4g` or higher if the host has RAM (e.g. 4g on 8 GB box, 8g on 16 GB). Option 2: if your install uses `/opt/tak/setenv.sh`, add `export CATALINA_OPTS="-Xms2g -Xmx4g"` there and restart. **Short-term:** close unused CloudTAK tabs to reduce active connections.
+
+---
+
 ## Diagnose CloudTAK “channel status” / constant prompts (LDAP traffic)
 
 When CloudTAK (or TAK Server) keeps asking for channel status, the traffic is **TAK Server → Authentik LDAP**, not Authentik calling TAK Server. To capture what happens during login:

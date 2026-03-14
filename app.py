@@ -754,6 +754,33 @@ def _get_total_ram_gb_remote(remote_cfg):
     return None
 
 
+def _get_cpu_model_local():
+    """Return CPU model name from /proc/cpuinfo (e.g. 'Intel Xeon ...'), or None."""
+    try:
+        with open('/proc/cpuinfo', 'r') as f:
+            for line in f:
+                if line.startswith('model name') or line.startswith('Processor'):
+                    # "model name\t: Intel(R) Xeon(R) ..." or "Processor\t: ARMv7 ..."
+                    idx = line.find(':')
+                    if idx >= 0:
+                        return line[idx + 1:].strip()
+                    break
+    except Exception:
+        pass
+    return None
+
+
+def _get_cpu_model_remote(remote_cfg):
+    """Return CPU model name on remote host via SSH, or None."""
+    try:
+        ok, out = _ssh_probe(remote_cfg, "grep -m1 -E 'model name|Processor' /proc/cpuinfo 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//'", timeout=5)
+        if ok and out:
+            return out.strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def _friendly_process_name(args):
     """Derive a recognizable name from process args (e.g. takserver, authentik, cloudtak, caddy, containers)."""
     a = (args or '').lower()
@@ -809,6 +836,9 @@ def _top_processes_local():
         result = {'cpu_top': cpu_top, 'mem_top': mem_top}
         if total_ram_gb is not None:
             result['total_ram_gb'] = total_ram_gb
+        cpu_model = _get_cpu_model_local()
+        if cpu_model:
+            result['processor'] = cpu_model
         return result
     except Exception:
         return {'cpu_top': [], 'mem_top': []}
@@ -844,6 +874,9 @@ def _top_processes_remote(remote_cfg):
         result = {'cpu_top': cpu_top, 'mem_top': mem_top}
         if total_ram_gb is not None:
             result['total_ram_gb'] = total_ram_gb
+        cpu_model = _get_cpu_model_remote(remote_cfg)
+        if cpu_model:
+            result['processor'] = cpu_model
         return result
     except Exception as e:
         return {'cpu_top': [], 'mem_top': [], 'error': str(e)[:80]}
@@ -1051,6 +1084,8 @@ def takserver_page():
     _tak_cfg = _get_tak_deployment_config(_settings)
     _is_two_server = _tak_cfg.get('mode') == 'two_server'
     _s1_host = (_tak_cfg.get('server_one', {}).get('host') or '').strip() if _is_two_server else ''
+    _total_ram = _get_total_ram_gb_local() if tak.get('installed') else None
+    _recommended_heap = _recommended_takserver_heap_gb(_total_ram) if _total_ram is not None else 4
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=_settings, modules=modules, tak=tak, tak_version=tak_version,
         show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
@@ -1060,7 +1095,8 @@ def takserver_page():
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False),
         upgrading=upgrade_status.get('running', False), upgrade_done=upgrade_status.get('complete', False),
         upgrade_error=upgrade_status.get('error', False),
-        two_server_mode=_is_two_server, s1_host=_s1_host)
+        two_server_mode=_is_two_server, s1_host=_s1_host,
+        total_ram_gb=_total_ram, recommended_heap_gb=_recommended_heap)
 
 @app.route('/api/takserver/deployment-config', methods=['GET'])
 @login_required
@@ -1947,6 +1983,73 @@ def takserver_pin_packages_status():
     if results.get('server_one') is not None:
         breakdown.append('DB host: ' + _pin_status_short(results['server_one']))
     return jsonify({'pinned': all_pinned, 'results': results, 'breakdown': ' · '.join(breakdown) if breakdown else None})
+
+
+def _recommended_takserver_heap_gb(total_ram_gb):
+    """Suggest -Xmx heap in GB from total system RAM (TAK Server core runs on this host)."""
+    if total_ram_gb is None or total_ram_gb <= 0:
+        return 4
+    if total_ram_gb >= 32:
+        return 12
+    if total_ram_gb >= 16:
+        return 8
+    if total_ram_gb >= 8:
+        return 4
+    return 2
+
+
+@app.route('/api/takserver/heap-info')
+@login_required
+def takserver_heap_info():
+    """Return total RAM and recommended heap for this host (TAK Server core runs here)."""
+    total = _get_total_ram_gb_local()
+    recommended = _recommended_takserver_heap_gb(total)
+    return jsonify({'total_ram_gb': total, 'recommended_heap_gb': recommended})
+
+
+@app.route('/api/takserver/set-heap', methods=['POST'])
+@login_required
+def takserver_set_heap():
+    """Set TAK Server JVM heap via systemd drop-in and restart. Applies on this host (where core runs)."""
+    data = request.get_json() or {}
+    heap_gb = data.get('heap_gb')
+    total_ram_gb = _get_total_ram_gb_local()
+    if heap_gb is None:
+        heap_gb = _recommended_takserver_heap_gb(total_ram_gb)
+    try:
+        heap_gb = int(heap_gb)
+        if heap_gb < 2 or heap_gb > 32:
+            return jsonify({'success': False, 'error': 'heap_gb must be between 2 and 32'}), 400
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'heap_gb must be an integer'}), 400
+    xms = max(2, heap_gb // 2)
+    opts = f'-Xms{xms}g -Xmx{heap_gb}g'
+    dropin_dir = '/etc/systemd/system/takserver.service.d'
+    dropin_file = os.path.join(dropin_dir, 'heap.conf')
+    cmd_mkdir = f'sudo mkdir -p {dropin_dir}'
+    cmd_write = f'echo \'[Service]\nEnvironment="CATALINA_OPTS={opts}"\' | sudo tee {dropin_file}'
+    cmd_reload = 'sudo systemctl daemon-reload'
+    cmd_restart = 'sudo systemctl restart takserver'
+    try:
+        for c in (cmd_mkdir, cmd_write, cmd_reload, cmd_restart):
+            r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0 and c == cmd_restart:
+                return jsonify({
+                    'success': False,
+                    'error': f'Restart failed: {(r.stderr or r.stdout or "unknown").strip()[:200]}'
+                }), 500
+            if r.returncode != 0:
+                return jsonify({'success': False, 'error': (r.stderr or r.stdout or '').strip()[:200]}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False, 'error': 'Command timed out'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)[:200]}), 500
+    return jsonify({
+        'success': True,
+        'message': f'TAK Server heap set to -Xmx{heap_gb}g and restarted.',
+        'heap_gb': heap_gb,
+        'total_ram_gb': total_ram_gb,
+    })
 
 
 @app.route('/api/takserver/unpin-packages', methods=['POST'])
@@ -4865,10 +4968,14 @@ def generate_caddyfile(settings=None):
         ct_tiles = sd['cloudtak_tiles']
         ct_video = sd['cloudtak_video']
         ct_up = _get_cloudtak_upstreams(settings)
-        lines.append(f"# CloudTAK Web UI (flush for SSE channels / WebSocket)")
+        lines.append(f"# CloudTAK Web UI (flush for SSE channels / WebSocket; longer timeouts for channel sync)")
         lines.append(f"{ct_map} {{")
         lines.append(f"    reverse_proxy {ct_up['map']} {{")
         lines.append(f"        flush_interval -1")
+        lines.append(f"        transport http {{")
+        lines.append(f"            read_timeout 120s")
+        lines.append(f"            write_timeout 120s")
+        lines.append(f"        }}")
         lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
@@ -20036,10 +20143,11 @@ async function toggleUU(cb){
 }
 function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;if(gb>=1)return gb.toFixed(1)+' GB';return (gb*1024).toFixed(0)+' MB';}
 function renderResourceBreakdown(div,data){
-    var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb;
+    var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb,processor=data.processor;
     if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>';return;}
     var tbl='width:100%;border-collapse:collapse;font-size:10px;text-align:left', th='padding:2px 8px 2px 0;color:var(--cyan);font-weight:600;border-bottom:1px solid var(--border)', td='padding:2px 8px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06)', r='text-align:right';
     var html='';
+    if(processor)html+='<div style="margin-bottom:4px;color:var(--text-dim);font-size:10px">Processor: '+escapeHtml(processor)+'</div>';
     if(totalRamGb!=null)html+='<div style="margin-bottom:6px;color:var(--text-dim)">Total RAM: '+totalRamGb+' GB</div>';
     if(cpuTop&&cpuTop.length){
         html+='<div style="margin-bottom:10px"><strong style="color:var(--cyan)">Top by CPU</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">CPU %</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'</tr></thead><tbody>';
@@ -20368,6 +20476,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 {% endif %}
 <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim)">Unattended-upgrades (each host) are controlled on the <a href="/" style="color:var(--cyan);text-decoration:none">main dashboard</a>.</div>
+<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">JVM heap</div>
+<p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">If CloudTAK or 8446 return HTTP 500 with <code style="font-size:10px">OutOfMemoryError: Java heap space</code>, TAK Server's JVM heap may be too small. <span id="heap-why" style="display:none">TAK Server uses a fixed heap limit (-Xmx), often 2–4 GB by default; it does not auto-scale. With many CloudTAK tabs or connections, the active-groups cache can exceed that and trigger OOM. This button sets a systemd drop-in so the service can use more memory (and restarts TAK Server).</span><button type="button" onclick="var e=document.getElementById('heap-why');e.style.display=e.style.display?'none':'block'" style="background:none;border:none;color:var(--cyan);cursor:pointer;font-size:11px;padding:0;margin-left:4px">Why?</button></p>
+<button type="button" id="set-heap-btn" onclick="setTakHeap()" class="control-btn" style="margin-right:8px">Set recommended JVM heap ({{ recommended_heap_gb }} GB)</button><span id="set-heap-msg" style="font-size:12px;color:var(--text-dim);margin-left:8px"></span>
+</div>
 </div>
 {% endif %}
 
