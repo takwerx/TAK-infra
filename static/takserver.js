@@ -563,10 +563,10 @@ function renderPkgLock(){
     var label=document.getElementById('pkg-lock-status-label');
     if(!btn)return;
     if(_pkgLocked){
-        btn.innerHTML='🔒 Unlock';
+        btn.innerHTML='<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">lock</span> Unlock';
         if(label)label.innerHTML='<span style="color:var(--success)">Locked — auto-updates blocked</span>';
     }else{
-        btn.innerHTML='🔓 Lock';
+        btn.innerHTML='<span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">lock_open</span> Lock';
         if(label)label.innerHTML='<span style="color:var(--text-dim)">Unlocked — auto-updates active</span>';
     }
 }

@@ -1759,7 +1759,8 @@ def takserver_pin_packages_status():
             except Exception:
                 results['server_one'] = 'unknown'
 
-    all_pinned = all(v in ('pinned', 'safe') for v in results.values())
+    # Only show "Locked" when blacklist is actually present. 'safe' (no UA file) = show Unlocked.
+    all_pinned = all(v == 'pinned' for v in results.values())
     return jsonify({'pinned': all_pinned, 'results': results})
 
 
