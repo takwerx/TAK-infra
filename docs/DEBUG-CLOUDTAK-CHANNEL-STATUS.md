@@ -26,7 +26,11 @@ When CloudTAK keeps showing the channel-status prompt or “channels thing” re
 
 - **CloudTAK** as the source of the constant calls: with CloudTAK stopped, the LDAP traffic continued at the same rate.
 - **Connected clients** as the source: with no clients connected to TAK Server, the LDAP traffic continued.
-- So the constant calls are driven by **TAK Server’s own logic**, not by CloudTAK or by anyone being logged in.
+- **Authentik** as the cause: traffic is TAK Server → LDAP; Authentik is only answering requests. Nothing in Authentik config drives the 2-second loop.
+- **CoreConfig** as the cause: the only LDAP interval we set is `updateinterval="30"` (30-second group cache refresh). The TAK Server Configuration Guide (Ch. 9.7.2 LDAP) documents that same attribute only (example uses `updateinterval="60000"`). There is no CoreConfig setting in the guide or in our LDAP block that would cause a 2-second refresh.
+- **TAK Server API / Configuration Guide:** we checked the in-repo TAK Server Configuration Guide (PDF) and REFERENCES (OpenAPI, API docs). The guide does not describe any setting or behavior that would cause a ~2 s LDAP poll for admin/webadmin. We also checked **TAK_Server_OpenAPI_v0.json**: it only defines REST endpoints (e.g. `/Marti/api/groups/active`, `/Marti/api/activeconnections`, `/Marti/api/util/user/roles`, `/Marti/api/util/isAdmin`); there are no interval, poll, or refresh parameters in the API spec. The 2-second loop is not configurable via the API and appears to be an internal TAK Server code path (e.g. admin or connection/channel-status logic).
+
+So the constant calls are driven by **TAK Server’s own logic**, not by CloudTAK, Authentik, CoreConfig, or connected clients.
 
 ---
 
@@ -82,6 +86,8 @@ When you’re done testing, start CloudTAK again from the same page (**▶ Start
 - **Direction:** Traffic is **TAK Server → LDAP** (port 389). Authentik/LDAP is not calling TAK Server.
 - **Cause:** Something in the TAK Server or CloudTAK path is doing an LDAP lookup for the user’s groups/attributes on a very short interval (e.g. every 2 s) instead of using a cache or a longer refresh.
 - **Fix:** The change needs to be in **TAK Server or CloudTAK** (e.g. throttle or cache these LDAP lookups for channel/connection checks). Authentik/LDAP config on its own does not fix it.
+
+**Resource impact:** High `takserver` CPU (e.g. 140%+ on a multi-core host) and substantial RAM (e.g. 12+ GB) are consistent with this behavior. TAK Server is doing LDAP bind+search in a tight loop every ~2 seconds; that work (TLS, network, parsing, JVM) burns one or more cores and can dominate the “Top by CPU” list. So yes—if you see takserver at 140%+ CPU with the constant LDAP traffic, the 2-second loop is a very plausible cause.
 
 See **docs/TAK-SERVER-LDAP-BEHAVIOR.md** for the observed pattern and **docs/COMMANDS.md** → “Diagnose CloudTAK channel status” for the full flow.
 
