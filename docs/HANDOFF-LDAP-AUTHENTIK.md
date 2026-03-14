@@ -16,11 +16,81 @@ Use docs/HANDOFF-LDAP-AUTHENTIK.md as the single source of truth for what's done
 
 ---
 
-## 0. Current Session State (Last Updated: 2026-03-12) — v0.2.0-alpha
+## 0. Current Session State (Last Updated: 2026-03-13) — v0.2.0-alpha
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
 
 **Version:** v0.2.0-alpha (not v0.1.10). Main was updated with selective dev->main release commit `50895d2` and release docs.
+
+### v0.2.0-alpha — 2026-03-13 Session Updates (DB Credential Drift, Guard Dog Hardening, Package Pinning)
+
+**Root cause investigation — TAK Server database connection failures:**
+- Fresh two-server deployment (Server One = DB, Server Two = Core + CloudTAK) exhibited `HikariPool-1 - Connection is not available` and `PSQLException: This connection has been closed` errors. CloudTAK showed `502 Bad Gateway` and could not register/connect.
+- Diagnosed as **credential drift**: `CoreConfig.xml` on Server Two had a different password than what PostgreSQL on Server One expected for `martiuser`. Direct `psql` test from Server Two to Server One confirmed `FATAL: password authentication failed for user "martiuser"`.
+- **Hypothesis**: `unattended-upgrades` on Server One upgraded PostgreSQL overnight, which can reset or regenerate the `martiuser` password in `/opt/tak/CoreConfig.example.xml`, causing the password in Server Two's `CoreConfig.xml` to go stale.
+- **Immediate fix**: Used "Sync DB Password" button in infra-TAK UI to re-sync the password from Server One and restart TAK Server. CloudTAK came back online.
+
+**Guard Dog — DB Auth monitor (new):**
+- New monitor `remotedb_auth` added to Guard Dog for two-server deployments. Checks every **2 minutes** (systemd timer `takremotedbauthguard.timer`, 3-minute `OnBootSec`).
+- Script: `scripts/guarddog/tak-remotedb-auth-watch.sh`
+- Behavior on **first** authentication failure:
+  1. Fetches fresh password from Server One's `CoreConfig.example.xml` via SSH
+  2. Verifies the fresh password against PostgreSQL using `psql`
+  3. Patches local `/opt/tak/CoreConfig.xml` with the correct password
+  4. Restarts `takserver`
+  5. Sends immediate email/SMS notification (successful resync)
+  6. 30-minute cooldown to prevent resync loops
+  7. Repeat failure alerts rate-limited to once per hour
+- Health check in `app.py` (`_monitor_health_check` for `remotedb_auth`): reads password from **local** `/opt/tak/CoreConfig.xml`, tests it against remote PostgreSQL on Server One.
+- UI description: "Validates martiuser password from CoreConfig.xml against PostgreSQL on Server One / remote server. Red means credential drift — Guard Dog auto-resyncs and notifies you."
+
+**DB password validation hardening in app.py:**
+- `_fetch_db_password_from_server_one(s1_cfg)`: Regex now prioritizes JDBC-specific password patterns (from `<connection>` element) to avoid accidentally capturing LDAP `serviceAccountCredential` passwords.
+- `_verify_server_one_db_password(s1_cfg, db_password, ...)`: New function that directly tests the password via SSH + `psql` on Server One. Returns `(True, msg)` or `(False, msg)`.
+- `takserver_two_server_deploy_server_two()`: Calls `_verify_server_one_db_password` before patching `CoreConfig.xml` to prevent deployment with stale credentials.
+- `takserver_two_server_sync_db_password()`: Calls `_verify_server_one_db_password` before writing/restarting.
+- `run_takserver_upgrade_two_server()`: After upgrading the database package on Server One, re-fetches and validates the DB password; updates `CoreConfig.xml` and saves settings if the password changed during the upgrade.
+
+**Auto-Update Protection (Pin Packages) — two-server only:**
+- New UI toggle on TAK Server page (only visible in two-server mode): lock icon with "Lock" / "Unlock" action.
+- When **locked**: `takserver*` and `postgresql*` are added to the `unattended-upgrades` blacklist (`50unattended-upgrades`) on both Server One (via SSH) and Server Two (local). Prevents automatic package upgrades that could cause credential drift.
+- When **unlocked**: blacklist entries removed; packages receive automatic security updates as normal.
+- UI shows current state: "Locked — auto-updates blocked" (lock icon) or "Unlocked — auto-updates active" (unlock icon).
+- Trade-off: locking prevents drift but requires manual `apt upgrade` for security patches. Recommended only after confirming drift is a problem.
+- API endpoints: `POST /api/takserver/pin-packages`, `POST /api/takserver/unpin-packages`, `GET /api/takserver/pin-packages/status`
+- **Decision**: Pinning was intentionally NOT added to install flows (user feedback — could make single-server deployments worse). It is an optional, manual action for two-server operators who experience drift.
+
+**Guard Dog — auto-update on console startup:**
+- `_auto_update_guarddog()` runs automatically when the console starts (`if __name__ == '__main__':` block). If Guard Dog is installed (`/opt/tak-guarddog/` exists), it re-copies all scripts from the console's `scripts/guarddog/` directory, applies placeholder replacements (DB_HOST, DB_PORT, SSH_KEY, SSH_USER), and reloads relevant systemd timers.
+- This ensures Guard Dog scripts stay in sync with the console version after a `git pull && systemctl restart takwerx-console` — no separate "redeploy" needed.
+
+**Guard Dog — "Update" button + UI layout:**
+- Added `/api/guarddog/update` endpoint that calls `_auto_update_guarddog()` for manual trigger.
+- **UI layout change**: All Guard Dog control buttons (Update, Disable/Enable, Uninstall) moved to the **top status banner** row, consistent with other module pages. Previously Update and Uninstall were at the bottom of the page.
+
+**Guard Dog — terminology update:**
+- Monitor descriptions and UI buttons now consistently say **"Server One / remote server"** instead of just "Server One" or "Server Two" to help users understand the architecture.
+- "Deploy health agent to remote server" → "Deploy health agent to Server One / remote server"
+
+**Console crash fix:**
+- After adding the Guard Dog auto-update and update button features, the console entered a restart loop (`AssertionError: View function mapping is overwriting an existing endpoint function: guarddog_update`).
+- Root cause: duplicate `def guarddog_update()` function definition in `app.py` — one from the auto-update code, one from the update button endpoint.
+- Fix: removed the duplicate definition.
+
+**Security audit:**
+- `docs/SECURITY-AUDIT-v0.2.0-alpha.md` created with vulnerability assessment and hardening recommendations.
+- Initial hardening applied: CSRF protection considerations, rate limiting, `secure_filename` for uploads, security headers (CSP, HSTS, Referrer-Policy, Permissions-Policy).
+
+### Current monitoring state (2026-03-13 evening)
+
+**Active test on test8.taktical.net:**
+- `unattended-upgrades` **ON** (not pinned)
+- Package lock **UNLOCKED** — TAK Server and PostgreSQL receive automatic updates
+- Guard Dog **RUNNING** with email notifications enabled
+- Guard Dog monitors active: Port 8089, Process, Network, Remote DB TCP, Remote DB Health Agent, **DB Auth** (2-min interval)
+- **Watching for credential drift** — if `unattended-upgrades` touches PostgreSQL and causes a password change, Guard Dog `DB Auth` will detect it within 2 minutes, auto-resync, restart TAK Server, and send an email alert
+- If an alert fires: confirms the drift hypothesis, and user will decide whether to lock packages at that point
+- If no alert after several days: drift on prior deployment was likely a one-off timing issue during initial setup
 
 ### v0.2.0-alpha — 2026-03-12 Session Updates (Release + UI + docs)
 
@@ -38,9 +108,9 @@ Use docs/HANDOFF-LDAP-AUTHENTIK.md as the single source of truth for what's done
 - Reproduced with both admin and regular users; anecdotal report from a non-infra-TAK TAK Portal environment suggests this is likely upstream CloudTAK behavior, not infra-TAK specific.
 - Treat as **known upstream issue** for now; keep deployment pinned to stable release and document reproducible steps for CloudTAK maintainers.
 
-### Today's priority (Mac Studio handoff) — MediaMTX token + playback tuning
+### Deferred priority — MediaMTX token + playback tuning
 
-**Primary focus:** MediaMTX end-user playback stability and token handling simplification.
+**Primary focus (when ready):** MediaMTX end-user playback stability and token handling simplification.
 
 1. **Token path simplification**
    - Investigate moving token handling into the upstream/regular MediaMTX path we pull from so infra-TAK skin has less token-specific logic.
@@ -93,21 +163,25 @@ Use docs/HANDOFF-LDAP-AUTHENTIK.md as the single source of truth for what's done
 - **TAK Server update (two-server):** Upload both takserver-core and takserver-database .deb; upgrade core locally, restore JDBC in CoreConfig, SCP DB .deb to Server One, install via SSH, start takserver.
 - **Restart controls:** Restart / Restart DB (Server One) / Restart Both / **Sync DB password** (see below) / Update config / Stop / Remove.
 - **VACUUM and CoT DB size:** Run remotely on Server One via SSH when two-server.
-- **Sync DB password:** Button "🔑 Sync DB password" (two-server only). **No SSH to Server One.** Uses password from: (1) the "DB password (from Server One)" field on the page (paste from Server One), or (2) saved password in Settings (from deploy). Patches CoreConfig.xml on Server Two and restarts takserver. API: `POST /api/takserver/two-server/sync-db-password` with optional `{"password": "..."}`.
+- **Sync DB password:** Button "🔑 Sync DB password" (two-server only). Fetches password from Server One via SSH, validates via `psql`, patches CoreConfig.xml on Server Two, and restarts takserver. Includes `_verify_server_one_db_password()` validation before writing. API: `POST /api/takserver/two-server/sync-db-password` with optional `{"password": "..."}`.
+- **Auto-Update Protection (Pin Packages):** Lock/unlock toggle (two-server only). Adds/removes `takserver*` and `postgresql*` from `unattended-upgrades` blacklist on both servers. Not applied automatically during install — user opt-in only. API: `POST /api/takserver/pin-packages`, `POST /api/takserver/unpin-packages`, `GET /api/takserver/pin-packages/status`.
+- **Guard Dog DB Auth monitor:** Checks CoreConfig.xml password against remote PostgreSQL every 2 minutes. Auto-resyncs on first failure (fetches fresh password from Server One, patches CoreConfig, restarts TAK Server, notifies via email/SMS). 30-minute resync cooldown. Script: `scripts/guarddog/tak-remotedb-auth-watch.sh`.
 
-**Known issue — 8443 / 8446 failing (empty DB password):**
-- **Symptom:** 8443 (cert auth) shows "Exception performing TAK Server authentication" with root cause `PSQLException: The server requested SCRAM-based authentication, but the password is an empty string.` 8446 may show "bad password" or similar. TAK Server startup can be slow; first load may time out.
-- **Cause:** CoreConfig.xml on Server Two has empty `password=""` in the `<connection>` element for the JDBC URL to Server One. Either the password was never captured during deploy or the patch didn’t run (e.g. deploy order, or grep -oP not available on Server One).
-- **Fix (UI):** Either (1) In the **deploy wizard** (TAK Server → deployment → Split Server): set **DB password (from Server One)** and click **1. Save Config** — then run step 5 / Deploy TAK Server or use **Sync DB password**; or (2) On the TAK Server page, paste the password in the **DB password (from Server One)** field and click **Sync DB password**. Wait for restart (~1 min) then retry 8443/8446.
-- **Fix (manual):** On Server One run `sudo sed -n 's/.*password="\([^"]*\)".*/\1/p' /opt/tak/CoreConfig.example.xml | head -1` to get password. On Server Two run `sudo sed -i 's/password="[^"]*"/password="PASTE_PASSWORD_HERE"/' /opt/tak/CoreConfig.xml` then `sudo systemctl restart takserver`.
-- **Code:** Sync DB password uses request body or settings only (no SSH). Deploy steps and "Deploy TAK Server" may still use `_fetch_db_password_from_server_one(s1_cfg)` when SSH is available; Sync DB password is the no-SSH repair.
+**Known issue — DB credential drift (empty or wrong DB password):**
+- **Symptom:** TAK Server logs show `HikariPool-1 - Connection is not available`, `PSQLException: This connection has been closed`, or `FATAL: password authentication failed for user "martiuser"`. CloudTAK shows 502/504. 8443/8446 may fail.
+- **Cause:** CoreConfig.xml on Server Two has a stale or empty `password=""` in the `<connection>` element. Can happen if: (1) password was never captured during deploy; (2) `unattended-upgrades` on Server One upgraded PostgreSQL and regenerated the password; (3) manual DB operations changed the password.
+- **Automated protection (Guard Dog):** The `DB Auth` monitor checks every 2 minutes. On first failure it auto-fetches the correct password from Server One, patches CoreConfig.xml, restarts TAK Server, and sends a notification. 30-minute cooldown prevents loops.
+- **Manual fix (UI):** Click **Sync DB Password** on the TAK Server page. Fetches password from Server One via SSH, validates it, patches CoreConfig.xml, and restarts.
+- **Manual fix (CLI):** On Server One run `sudo sed -n 's/.*password="\([^"]*\)".*/\1/p' /opt/tak/CoreConfig.example.xml | head -1` to get password. On Server Two run `sudo sed -i 's/password="[^"]*"/password="PASTE_PASSWORD_HERE"/' /opt/tak/CoreConfig.xml` then `sudo systemctl restart takserver`.
+- **Prevention:** Use the **Auto-Update Protection** (lock icon) on the TAK Server page to block `unattended-upgrades` from touching `takserver*` and `postgresql*` packages. Trade-off: manual `apt upgrade` needed for security patches.
+- **Code:** Deploy and sync flows now call `_verify_server_one_db_password()` to test credentials before writing. Upgrade flow re-fetches password from Server One after upgrading the DB package.
 
 **Other two-server notes:**
 - **pg_hba.conf:** Must have a newline before the new `host ... scram-sha-256` line; otherwise it can concatenate with previous line (e.g. `md5host`). Code does `printf "\\nhost ..."` and a repair `sed` for `md5host` → `md5\nhost`.
 - **PostgreSQL start:** Use `pg_ctlcluster 15 main start` (or restart); `systemctl start postgresql` on Debian/Ubuntu often does nothing (ExecStart=/bin/true).
 - **Preflight:** "Run Preflight" was removed; DB port check failed until after Server One was configured.
 
-**Where to continue:** If 8443/8446 still fail after Sync DB password, ensure the password in the field (or in Settings) matches the martiuser password in `/opt/tak/CoreConfig.example.xml` (or CoreConfig.xml) on Server One. Optional: "Show DB password" (from settings) for debugging.
+**Where to continue:** DB credential drift should now be handled automatically by Guard Dog (DB Auth monitor). If 8443/8446 still fail after Sync DB password, ensure the password matches the martiuser password in `/opt/tak/CoreConfig.example.xml` on Server One. Check Guard Dog DB Auth monitor status (green = passwords match). If drift keeps recurring, use Auto-Update Protection to lock packages and investigate what's changing the password on Server One.
 
 **Other recent UI/two-server tweaks (2026-03-07):** TAK Server status area: control buttons (Restart, Restart DB, Sync DB password, etc.) moved to a second row below the status/CA text so the cert expiry (Root CA / Intermediate CA) doesn’t wrap. Cert banner: Intermediate CA shown on its own line below Root CA. Guard Dog: per-monitor green/red status dots (Port 8089, Process, Network, OOM, Disk, Cert, etc.) via `/api/guarddog/monitor-health`; cache-bust on guarddog.js with version query.
 
@@ -427,7 +501,7 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 - **Help page** -- Sidebar link to `/help`; backdoor URL, console password, reset form (when logged in), full-lockout note (CLI + README), Uninstall all services (modal), deployment order, Docs link
 - **Uninstall all** -- Only on Help; full uninstall order MediaMTX→Portal→CloudTAK→Node-RED→TAK Server→Email→Authentik→Caddy; Caddy purge + binary/config removal; leftover Caddy cleanup in `detect_modules()` when service disabled/inactive
 
-- **Guard Dog** -- Full deploy with 9 monitors (TAK Server) + service monitors for Authentik, MediaMTX, Node-RED, CloudTAK. Root CA / Intermediate CA escalating notification schedule. Health endpoint port 8888.
+- **Guard Dog** -- Full deploy with 9 monitors (TAK Server) + service monitors for Authentik, MediaMTX, Node-RED, CloudTAK. Root CA / Intermediate CA escalating notification schedule. Health endpoint port 8888. Two-server: `DB Auth` monitor (2-min check, auto-resync + restart + notify on drift), `Remote DB TCP` and `Health Agent` monitors. Auto-updates scripts on console restart (`_auto_update_guarddog()`). Manual "Update" button in UI. Controls (Update, Disable/Enable, Uninstall) in top status banner.
 - **TAK Server update** -- Upload .deb, progress bar, cancel, update with pre-upload guard
 - **Client certificate creation** -- Name + group selection (Marti API) + IN/OUT/Both permissions → .p12 download
 - **Certificate expiry** -- Displayed on TAK Server page (banner + Certificates card), Console dashboard card, Rotate CA cards. Color-coded time remaining.
@@ -467,7 +541,7 @@ ldapsearch -x -H ldap://127.0.0.1:389 -D 'cn=adm_ldapservice,ou=users,dc=takldap
 - `app.py` — All prior changes plus (v0.1.9): Guard Dog deploy with 9 monitors + service monitors, TAK Server update flow (upload/progress/cancel), client cert creation (groups via Marti API), cert expiry API + display, Intermediate CA rotation, Root CA rotation, revoke old CA, ca-info API, collapsible sections (TAK Server page + Help page), console dashboard cert expiry, Help page reorder + left-align. Removed hidden "Manage" spans from console cards.
 - `static/takserver.js` — Extracted TAK Server page inline script. All TAK Server JS: services, deploy, upgrade, cert expiry, groups, client cert creation, CA rotation (intermediate + root), collapsible section toggle.
 - `static/guarddog.js` — Guard Dog page JavaScript.
-- `scripts/guarddog/` — All Guard Dog monitor scripts (tak-port-watch.sh, tak-proc-watch.sh, tak-net-watch.sh, tak-pg-watch.sh, tak-cot-watch.sh, tak-oom-watch.sh, tak-disk-watch.sh, tak-cert-watch.sh, tak-intca-watch.sh), health endpoint script, sms_send.sh.
+- `scripts/guarddog/` — All Guard Dog monitor scripts (tak-port-watch.sh, tak-proc-watch.sh, tak-net-watch.sh, tak-pg-watch.sh, tak-cot-watch.sh, tak-oom-watch.sh, tak-disk-watch.sh, tak-cert-watch.sh, tak-intca-watch.sh, tak-remotedb-auth-watch.sh), health endpoint script, sms_send.sh.
 - `docs/TAK_Server_OpenAPI_v0.json` — TAK Server OpenAPI 3.1 spec (in-repo reference).
 - `docs/REFERENCES.md` — Added OpenAPI spec entry.
 - `docs/GUARDDOG.md` — Guard Dog documentation with all monitors, VACUUM guidance, scope.
@@ -934,6 +1008,6 @@ Error decoding:
 
 ### Two-server remote deployment (TAK Server DB / core split)
 
-**Status:** **Implemented** (see Section 0 — Two-Server Split Mode). Console supports full two-server deploy (Server One = DB, Server Two = Core), Guard Dog remote DB monitoring, two-server TAK Server update, Restart DB / Restart Both, Sync DB password, and remote VACUUM/CoT size. Remaining follow-up: ensure 8443/8446 work reliably after Sync DB password (and that password capture works on all Server One images, including those without `grep -P`). Optional: "Test DB connection" or "Show DB password" in UI for debugging.
+**Status:** **Implemented and hardened** (see Section 0 — Two-Server Split Mode). Console supports full two-server deploy (Server One = DB, Server Two = Core), Guard Dog remote DB monitoring (TCP, Health Agent, DB Auth with auto-resync), two-server TAK Server update (re-validates password after DB upgrade), Restart DB / Restart Both, Sync DB password (with `_verify_server_one_db_password()` validation), remote VACUUM/CoT size, and Auto-Update Protection (pin/unpin packages). DB credential drift is now detected and auto-repaired by Guard Dog within 2 minutes.
 
 **Future:** Reuse the same pattern (SSH, config sync, health checks) for other services (e.g. Authentik, TAK Portal, MediaMTX on separate hosts) if needed. Design decisions for any new remote services could go in `docs/REMOTE-SERVICES-DEPLOYMENT.md`.
