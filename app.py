@@ -58,7 +58,7 @@ from flask import (Flask, render_template_string, request, jsonify,
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 from functools import wraps
-import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil, copy, tempfile
+import os, re, ssl, json, secrets, subprocess, time, psutil, threading, html, shutil, copy, tempfile, shlex
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -1209,7 +1209,7 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
         "printf \"\\nlisten_addresses = '*'\\n\" | sudo tee -a \"$PG_MAIN/postgresql.conf\" > /dev/null && "
         'sudo sed -i "s/md5host/md5\\nhost/g" "$PG_MAIN/pg_hba.conf" && '
         f'(grep -q "^host.*{core_ip}/32" "$PG_MAIN/pg_hba.conf" 2>/dev/null || '
-        f'printf "\\nhost    all    all    {core_ip}/32    scram-sha-256\\n" | sudo tee -a "$PG_MAIN/pg_hba.conf" > /dev/null) && '
+        f'printf "\\nhost    all    all    {core_ip}/32    md5\\n" | sudo tee -a "$PG_MAIN/pg_hba.conf" > /dev/null) && '
         '(sudo pg_ctlcluster 15 main restart 2>/dev/null || sudo systemctl restart postgresql 2>/dev/null || true)'
     )
     ok, out = _ssh_probe(s1, pg_config_cmd, timeout=30)
@@ -1236,6 +1236,12 @@ def _setup_server_one(s1, core_ip, db_port, db_pkg_path=None, db_pkg_name=None):
     db_password, _ = _fetch_db_password_from_server_one(s1)
     if db_password:
         log.append('Captured DB password from Server One.')
+        pw_ok, pw_msg = _verify_server_one_db_password(s1, db_password, db_port=db_port)
+        if pw_ok:
+            log.append('DB credential verified on Server One.')
+        else:
+            log.append(f'Warning: captured password failed validation ({pw_msg}). '
+                       'Use Sync DB Password after deploy if TAK Server cannot connect.')
     else:
         log.append('Warning: could not read DB password from Server One — CoreConfig may need manual password fix.')
 
@@ -1256,8 +1262,11 @@ def _fetch_db_password_from_server_one(s1_cfg):
             continue
         if not (out or '').strip():
             continue
-        # Prefer Python regex (allow single or double quotes, optional spaces)
+        # Prefer JDBC <connection ...> password first (avoid matching unrelated
+        # password fields like LDAP/service-account credentials in CoreConfig).
         for pattern in (
+            r'<connection[^>]*url\s*=\s*["\']jdbc:postgresql://[^"\']+/cot["\'][^>]*password\s*=\s*["\']([^"\']*)["\']',
+            r'<connection[^>]*username\s*=\s*["\']martiuser["\'][^>]*password\s*=\s*["\']([^"\']*)["\']',
             r'password\s*=\s*["\']([^"\']*)["\']',
             r'password=["\']([^"\']*)["\']',
         ):
@@ -1277,6 +1286,39 @@ def _fetch_db_password_from_server_one(s1_cfg):
     if first_ssh_error:
         return '', f'SSH to Server One failed: {first_ssh_error}'
     return '', 'No password= found in CoreConfig.example.xml or CoreConfig.xml on Server One (or password was empty).'
+
+
+def _verify_server_one_db_password(s1_cfg, db_password, db_port=5432, db_user='martiuser', db_name='cot'):
+    """Validate DB credentials directly on Server One via psql.
+    Returns (True, msg) when auth works, else (False, reason)."""
+    if not (db_password or '').strip():
+        return False, 'empty DB password'
+    try:
+        port = int(db_port or 5432)
+    except Exception:
+        port = 5432
+    pw_q = shlex.quote((db_password or '').strip())
+    user_q = shlex.quote((db_user or 'martiuser').strip() or 'martiuser')
+    db_q = shlex.quote((db_name or 'cot').strip() or 'cot')
+    cmd = (
+        "if ! command -v psql >/dev/null 2>&1; then "
+        "echo NO_PSQL; "
+        f"elif PGPASSWORD={pw_q} psql -h 127.0.0.1 -p {port} -U {user_q} -d {db_q} -tAc \"select 1\" 2>/dev/null | "
+        "tr -d '[:space:]' | grep -qx 1; then "
+        "echo AUTH_OK; "
+        "else "
+        "echo AUTH_FAIL; "
+        "fi"
+    )
+    ok, out = _ssh_probe(s1_cfg, cmd, timeout=15)
+    out_s = (out or '').strip()
+    if not ok:
+        return False, (out_s[:200] or 'SSH validation failed')
+    if 'AUTH_OK' in out_s:
+        return True, 'DB auth verified on Server One'
+    if 'NO_PSQL' in out_s:
+        return False, 'psql not available on Server One for credential validation'
+    return False, 'DB password rejected by PostgreSQL on Server One'
 
 
 @app.route('/api/takserver/two-server/open-db-firewall', methods=['POST'])
@@ -1481,6 +1523,20 @@ def takserver_two_server_deploy_server_two():
                 'detail': (fetch_err or '')[:200],
             }), 400
 
+    # Validate DB password against Server One before patching CoreConfig.
+    db_user = (cfg.get('database', {}).get('user') or 'martiuser').strip() or 'martiuser'
+    db_name = (cfg.get('database', {}).get('name') or 'cot').strip() or 'cot'
+    ok_pw, msg_pw = _verify_server_one_db_password(s1, db_password, db_port=db_port, db_user=db_user, db_name=db_name)
+    if not ok_pw:
+        return jsonify({
+            'success': False,
+            'error': (
+                'DB credential validation failed on Server One. '
+                'Use Sync DB Password with the current martiuser password from Server One, then retry.'
+            ),
+            'detail': msg_pw,
+        }), 400
+
     # Increase concurrent TCP connections per TAK guide
     try:
         subprocess.run(
@@ -1558,6 +1614,23 @@ def takserver_two_server_sync_db_password():
             'success': False,
             'error': 'No DB password provided. Paste the martiuser password from Server One in the "DB password" field (from /opt/tak/CoreConfig.example.xml on Server One), or add it in Settings → TAK deployment → Server One / Database.'
         }), 400
+
+    # Validate the provided password against Server One before writing CoreConfig.
+    s1 = cfg.get('server_one', {})
+    db_port = int(cfg.get('database', {}).get('port') or 5432)
+    db_user = (cfg.get('database', {}).get('user') or 'martiuser').strip() or 'martiuser'
+    db_name = (cfg.get('database', {}).get('name') or 'cot').strip() or 'cot'
+    if (s1.get('host') or '').strip():
+        ok_pw, msg_pw = _verify_server_one_db_password(s1, db_pass, db_port=db_port, db_user=db_user, db_name=db_name)
+        if not ok_pw:
+            return jsonify({
+                'success': False,
+                'error': (
+                    'Password was not accepted by PostgreSQL on Server One. '
+                    'Paste the current martiuser password and try again.'
+                ),
+                'detail': msg_pw,
+            }), 400
 
     try:
         r = subprocess.run(['sudo', 'cat', '/opt/tak/CoreConfig.xml'], capture_output=True, text=True, timeout=5)
@@ -1660,6 +1733,7 @@ def guarddog_page():
         guarddog_services.append({'id': 'remotedb', 'name': f'Remote Database ({s1_host})', 'monitored': gd.get('installed'), 'monitors': [
             {'name': 'TCP + SSH', 'id': 'remotedb_tcp', 'interval': '2 min', 'desc': f'Checks port 5432 on {s1_host} is reachable and PostgreSQL cluster is up. Auto-restarts PG via SSH after 3 consecutive failures. Alerts on persistent failure.'},
             {'name': 'Health Agent', 'id': 'remotedb_agent', 'interval': 'Always', 'desc': f'Lightweight health endpoint on {s1_host}:8080/health — checks PG ready, cot database, disk usage. If red, click "Deploy health agent to Server One" below.'},
+            {'name': 'DB Auth', 'id': 'remotedb_auth', 'interval': '5 min', 'desc': 'Validates martiuser password from CoreConfig.xml against PostgreSQL on Server One. Red means credential drift — use Sync DB Password to fix.'},
         ]})
     guarddog_services.extend([
         {'id': 'authentik', 'name': 'Authentik', 'monitored': modules.get('authentik', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'id': 'authentik_http', 'interval': '1 min', 'desc': 'Checks Authentik HTTP (9090). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
@@ -1885,7 +1959,7 @@ def _guarddog_service_monitor_ids(settings):
     takserver_ids.extend(['oom', 'disk', 'cert', 'intca'])
     multi = {
         'takserver': takserver_ids,
-        'remotedb': ['remotedb_tcp', 'remotedb_agent'],
+        'remotedb': ['remotedb_tcp', 'remotedb_agent', 'remotedb_auth'],
         'authentik': ['authentik_http'],
         'mediamtx': ['mediamtx_svc'],
         'nodered': ['nodered_http'],
@@ -2158,6 +2232,16 @@ def _monitor_health_check(monitor_id):
                 return resp.status == 200
             except Exception:
                 return False
+        if monitor_id == 'remotedb_auth':
+            settings = load_settings()
+            tak_cfg = _get_tak_deployment_config(settings)
+            if tak_cfg.get('mode') != 'two_server':
+                return None
+            s1_cfg = tak_cfg.get('server_one', {})
+            db_password = _fetch_db_password_from_server_one(s1_cfg)
+            if not db_password:
+                return False
+            return _verify_server_one_db_password(s1_cfg, db_password)
         if monitor_id == 'authentik_http':
             settings = load_settings()
             ak_url = _get_authentik_api_url(settings)
@@ -2600,6 +2684,7 @@ def run_guarddog_deploy(alert_email):
         # Two-server: replace local PG monitors with remote DB monitor
         if is_two_server and s1_host:
             script_files.append('tak-remotedb-watch.sh')
+            script_files.append('tak-remotedb-auth-watch.sh')
         else:
             script_files.extend(['tak-db-watch.sh', 'tak-cotdb-watch.sh'])
         # Optional: monitors for other services (only install if that service is present)
@@ -2626,7 +2711,7 @@ def run_guarddog_deploy(alert_email):
                 .replace('ALERT_EMAIL_PLACEHOLDER', alert_email)
                 .replace('ALERT_SMS_PLACEHOLDER', alert_sms or '')
                 .replace('CERT_PASS_PLACEHOLDER', cert_pass))
-            if is_two_server and name == 'tak-remotedb-watch.sh':
+            if is_two_server and name in ('tak-remotedb-watch.sh', 'tak-remotedb-auth-watch.sh'):
                 content = content.replace('DB_HOST_PLACEHOLDER', s1_host)
                 content = content.replace('DB_PORT_PLACEHOLDER', db_port)
                 content = content.replace('SSH_KEY_PLACEHOLDER', ssh_key_path)
@@ -2665,6 +2750,8 @@ def run_guarddog_deploy(alert_email):
             units.extend([
                 ('takremotedbguard.service', '[Unit]\nDescription=Guard Dog Remote Database Monitor\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-remotedb-watch.sh\n'),
                 ('takremotedbguard.timer', '[Unit]\nDescription=Run remote DB monitor every 2 minutes\n\n[Timer]\nOnBootSec=5min\nOnUnitActiveSec=2min\nUnit=takremotedbguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+                ('takremotedbauthguard.service', '[Unit]\nDescription=Guard Dog Remote DB Auth Monitor\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-remotedb-auth-watch.sh\n'),
+                ('takremotedbauthguard.timer', '[Unit]\nDescription=Validate DB credentials every 5 minutes\n\n[Timer]\nOnBootSec=6min\nOnUnitActiveSec=5min\nUnit=takremotedbauthguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ])
         else:
             units.extend([
@@ -18138,6 +18225,35 @@ def run_takserver_upgrade_two_server(core_pkg_path, db_pkg_path, s1_cfg, tak_cfg
                 upgrade_status.update({'running': False, 'complete': False, 'error': True})
                 return
         ulog("✓ Database package upgraded on Server One")
+
+        # Re-fetch password from Server One — the DB package upgrade may have regenerated it
+        fresh_pw, _pw_err = _fetch_db_password_from_server_one(s1_cfg)
+        if fresh_pw and fresh_pw != db_password:
+            pw_ok, pw_msg = _verify_server_one_db_password(s1_cfg, fresh_pw, db_port=db_port)
+            if pw_ok:
+                ulog("⚠ DB password changed during upgrade — re-patching CoreConfig.xml")
+                try:
+                    with open('/opt/tak/CoreConfig.xml', 'r') as f:
+                        cc = f.read()
+                    cc = _re.sub(r'(<connection[^>]*password=")[^"]*(")', lambda m: m.group(1) + fresh_pw + m.group(2), cc)
+                    with open('/opt/tak/CoreConfig.xml', 'w') as f:
+                        f.write(cc)
+                    db_password = fresh_pw
+                    tak_cfg.setdefault('database', {})['password'] = fresh_pw
+                    settings = load_settings()
+                    settings['tak_deployment'] = tak_cfg
+                    save_settings(settings)
+                    ulog("✓ CoreConfig.xml and saved settings updated with new DB password")
+                except Exception as e:
+                    ulog(f"⚠ Could not update CoreConfig with new password: {e}")
+            else:
+                ulog(f"⚠ Fresh password from Server One also failed validation ({pw_msg})")
+        elif fresh_pw:
+            pw_ok, pw_msg = _verify_server_one_db_password(s1_cfg, fresh_pw, db_port=db_port)
+            if pw_ok:
+                ulog("✓ DB credential verified after upgrade")
+            else:
+                ulog(f"⚠ DB credential check failed after upgrade: {pw_msg}")
 
         # Step 4: Start TAK Server
         ulog("")
