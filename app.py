@@ -825,39 +825,69 @@ def _get_disk_io_remote(remote_cfg):
         return None
 
 
-# Temp file for disk speed test (256 MiB, direct I/O). Same path locally and over SSH.
-_DISK_SPEED_TEST_FILE = '/var/tmp/infra_tak_disk_speed_test'
+# Disk speed test: 256 MiB. Prefer /var/tmp (on-disk); fallback to gettempdir() (may be tmpfs).
 _DISK_SPEED_TEST_SIZE_MB = 256
 
 
+def _disk_speed_test_path():
+    """Return a writable path for the disk test file (local only). Prefer /var/tmp."""
+    for d in ('/var/tmp', tempfile.gettempdir()):
+        if d and os.path.isdir(d) and os.access(d, os.W_OK):
+            return os.path.join(d, 'infra_tak_disk_speed_test')
+    return None
+
+
 def _parse_dd_speed_mbs(stderr_or_stdout):
-    """Parse dd output for 'copied, X.XXX s, YYY MB/s' or 'YYY MiB/s'. Return float MB/s or None."""
+    """Parse dd output for speed in MB/s or MiB/s. Tries 'copied, X s, Y MB/s' then any Y MB/s."""
     if not stderr_or_stdout:
         return None
-    m = re.search(r'copied,\s*[\d.]+\s*s,\s*([\d.]+)\s*(?:MiB|MB)/s', stderr_or_stdout)
+    text = (stderr_or_stdout or '').replace(',', '.')
+    m = re.search(r'copied,\s*[\d.]+\s*s,\s*([\d.]+)\s*(?:MiB|MB)/s', text)
     if m:
         return round(float(m.group(1)), 1)
+    # Fallback: last number followed by MB/s or MiB/s (dd often prints speed at end of line)
+    all_m = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text)
+    if all_m:
+        return round(float(all_m[-1]), 1)
     return None
 
 
 def _run_disk_speed_test_local():
-    """Run 256 MiB write then read with direct I/O; return (read_mbs, write_mbs) or None. Takes ~2–10s."""
+    """Run 256 MiB write then read; return (read_mbs, write_mbs) or None. Uses direct I/O if possible."""
+    path = _disk_speed_test_path()
+    if not path:
+        return None
     try:
+        # Write: try direct I/O first (real disk throughput); fall back to normal if unsupported
         rw = subprocess.run(
-            ['dd', 'if=/dev/zero', 'of=' + _DISK_SPEED_TEST_FILE,
+            ['dd', 'if=/dev/zero', 'of=' + path,
              'bs=1M', 'count=' + str(_DISK_SPEED_TEST_SIZE_MB), 'oflag=direct'],
             capture_output=True, text=True, timeout=60
         )
-        write_mbs = _parse_dd_speed_mbs((rw.stdout or '') + (rw.stderr or ''))
+        out_w = (rw.stdout or '') + (rw.stderr or '')
+        write_mbs = _parse_dd_speed_mbs(out_w)
+        if write_mbs is None and rw.returncode != 0:
+            rw2 = subprocess.run(
+                ['dd', 'if=/dev/zero', 'of=' + path, 'bs=1M', 'count=' + str(_DISK_SPEED_TEST_SIZE_MB)],
+                capture_output=True, text=True, timeout=60
+            )
+            write_mbs = _parse_dd_speed_mbs((rw2.stdout or '') + (rw2.stderr or ''))
         if write_mbs is None:
             return None
         rr = subprocess.run(
-            ['dd', 'if=' + _DISK_SPEED_TEST_FILE, 'of=/dev/null', 'bs=1M', 'iflag=direct'],
+            ['dd', 'if=' + path, 'of=/dev/null', 'bs=1M', 'iflag=direct'],
             capture_output=True, text=True, timeout=60
         )
-        read_mbs = _parse_dd_speed_mbs((rr.stdout or '') + (rr.stderr or ''))
+        out_r = (rr.stdout or '') + (rr.stderr or '')
+        read_mbs = _parse_dd_speed_mbs(out_r)
+        if read_mbs is None and rr.returncode != 0:
+            rr2 = subprocess.run(
+                ['dd', 'if=' + path, 'of=/dev/null', 'bs=1M'],
+                capture_output=True, text=True, timeout=60
+            )
+            read_mbs = _parse_dd_speed_mbs((rr2.stdout or '') + (rr2.stderr or ''))
         try:
-            os.unlink(_DISK_SPEED_TEST_FILE)
+            os.unlink(path)
         except Exception:
             pass
         if read_mbs is None:
@@ -865,7 +895,7 @@ def _run_disk_speed_test_local():
         return (read_mbs, write_mbs)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         try:
-            os.unlink(_DISK_SPEED_TEST_FILE)
+            os.unlink(path)
         except Exception:
             pass
         return None
@@ -875,29 +905,26 @@ def _run_disk_speed_test_remote(remote_cfg):
     """Run same 256 MiB disk speed test on remote host via SSH. Returns (read_mbs, write_mbs) or None."""
     if not remote_cfg or not (remote_cfg.get('host') or '').strip():
         return None
+    # Use /var/tmp if writable, else /tmp (e.g. in containers)
     script = (
-        'f="' + _DISK_SPEED_TEST_FILE + '"; '
+        'f=/var/tmp/infra_tak_disk_speed_test; '
+        'touch "$f" 2>/dev/null || f=/tmp/infra_tak_disk_speed_test; '
         'dd if=/dev/zero of="$f" bs=1M count=' + str(_DISK_SPEED_TEST_SIZE_MB) + ' oflag=direct 2>&1; '
         'dd if="$f" of=/dev/null bs=1M iflag=direct 2>&1; '
-        'rm -f "$f"'
+        'rm -f /var/tmp/infra_tak_disk_speed_test /tmp/infra_tak_disk_speed_test 2>/dev/null'
     )
     try:
         ok, out = _ssh_probe(remote_cfg, script, timeout=90)
         if not ok or not out:
             return None
-        # Output is: write dd output, then read dd output. First "copied" = write, second = read.
-        write_mbs = read_mbs = None
-        for line in out.strip().split('\n'):
-            m = re.search(r'copied,\s*[\d.]+\s*s,\s*([\d.]+)\s*(?:MiB|MB)/s', line)
-            if m:
-                if write_mbs is None:
-                    write_mbs = round(float(m.group(1)), 1)
-                else:
-                    read_mbs = round(float(m.group(1)), 1)
-                    break
-        if write_mbs is None or read_mbs is None:
-            return None
-        return (read_mbs, write_mbs)
+        text = out.replace(',', '.')
+        # First speed = write, second = read
+        all_speeds = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text)
+        if len(all_speeds) >= 2:
+            write_mbs = round(float(all_speeds[0]), 1)
+            read_mbs = round(float(all_speeds[1]), 1)
+            return (read_mbs, write_mbs)
+        return None
     except Exception:
         return None
 
@@ -966,6 +993,8 @@ def _top_processes_local():
         disk_speed = _run_disk_speed_test_local()
         if disk_speed is not None:
             result['disk_speed_test_read_mbs'], result['disk_speed_test_write_mbs'] = disk_speed
+        else:
+            result['disk_speed_test_error'] = 'unavailable'
         return result
     except Exception:
         return {'cpu_top': [], 'mem_top': []}
@@ -1010,6 +1039,8 @@ def _top_processes_remote(remote_cfg):
         disk_speed = _run_disk_speed_test_remote(remote_cfg)
         if disk_speed is not None:
             result['disk_speed_test_read_mbs'], result['disk_speed_test_write_mbs'] = disk_speed
+        else:
+            result['disk_speed_test_error'] = 'unavailable'
         return result
     except Exception as e:
         return {'cpu_top': [], 'mem_top': [], 'error': str(e)[:80]}
@@ -20306,7 +20337,7 @@ async function toggleUU(cb){
 }
 function formatRamGb(memPct,totalRamGb){if(totalRamGb==null)return '';var gb=(Number(memPct||0)/100)*totalRamGb;if(gb>=1)return gb.toFixed(1)+' GB';return (gb*1024).toFixed(0)+' MB';}
 function renderResourceBreakdown(div,data){
-    var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb,processor=data.processor,diskRead=data.disk_io_read_mbs,diskWrite=data.disk_io_write_mbs,speedRead=data.disk_speed_test_read_mbs,speedWrite=data.disk_speed_test_write_mbs;
+    var err=data.error,cpuTop=data.cpu_top,memTop=data.mem_top,totalRamGb=data.total_ram_gb,processor=data.processor,diskRead=data.disk_io_read_mbs,diskWrite=data.disk_io_write_mbs,speedRead=data.disk_speed_test_read_mbs,speedWrite=data.disk_speed_test_write_mbs,speedErr=data.disk_speed_test_error;
     if(err){div.innerHTML='<span style="color:var(--red)">'+escapeHtml(err)+'</span>';return;}
     var tbl='width:100%;border-collapse:collapse;font-size:10px;text-align:left', th='padding:2px 8px 2px 0;color:var(--cyan);font-weight:600;border-bottom:1px solid var(--border)', td='padding:2px 8px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06)', r='text-align:right';
     var html='';
@@ -20314,6 +20345,7 @@ function renderResourceBreakdown(div,data){
     if(totalRamGb!=null)html+='<div style="margin-bottom:4px;color:var(--text-dim)">Total RAM: '+totalRamGb+' GB</div>';
     if(diskRead!=null&&diskWrite!=null)html+='<div style="margin-bottom:4px;color:var(--text-dim);font-size:10px">Disk I/O (current): '+Number(diskRead).toFixed(2)+' MB/s read, '+Number(diskWrite).toFixed(2)+' MB/s write</div>';
     if(speedRead!=null&&speedWrite!=null)html+='<div style="margin-bottom:6px;color:var(--cyan);font-size:10px">Disk speed test (256 MiB): <strong>'+Number(speedRead).toFixed(0)+' MB/s</strong> read, <strong>'+Number(speedWrite).toFixed(0)+' MB/s</strong> write</div>';
+    else if(speedErr)html+='<div style="margin-bottom:6px;color:var(--text-dim);font-size:10px">Disk speed test: <span style="color:var(--red)">'+escapeHtml(speedErr)+'</span></div>';
     if(cpuTop&&cpuTop.length){
         html+='<div style="margin-bottom:10px"><strong style="color:var(--cyan)">Top by CPU</strong><table style="'+tbl+';margin-top:4px"><thead><tr><th style="'+th+'">Process</th><th style="'+th+';'+r+'">CPU %</th><th style="'+th+';'+r+'">RAM %</th>'+(totalRamGb!=null?'<th style="'+th+';'+r+'">RAM</th>':'')+'</tr></thead><tbody>';
         cpuTop.forEach(function(p){var ramStr=formatRamGb(p.mem_pct,totalRamGb);html+='<tr><td style="'+td+'">'+escapeHtml(p.name||'')+'</td><td style="'+td+';'+r+';color:var(--green)">'+Number(p.cpu_pct||0).toFixed(1)+'%</td><td style="'+td+';'+r+'">'+Number(p.mem_pct||0).toFixed(1)+'%</td>'+(totalRamGb!=null?'<td style="'+td+';'+r+';color:var(--text-dim)">'+ramStr+'</td>':'')+'</tr>';});
