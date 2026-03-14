@@ -3255,26 +3255,62 @@ def _caddy_letsencrypt_days_left(settings):
     fqdn = (settings.get('fqdn') or '').strip().split(':')[0]
     if not fqdn:
         return None
-    try:
-        cmd = (
-            f'echo | openssl s_client -connect localhost:443 -servername {fqdn} 2>/dev/null '
-            '| openssl x509 -noout -enddate 2>/dev/null'
-        )
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-        out = (r.stdout or '').strip()
-        if not out or 'notAfter=' not in out:
-            return None
-        # notAfter=Mar 15 12:00:00 2026 GMT
-        date_str = out.replace('notAfter=', '').strip()
-        from datetime import datetime
-        expiry = datetime.strptime(date_str, '%b %d %H:%M:%S %Y %Z')
-        now = datetime.utcnow()
-        if expiry.tzinfo:
-            expiry = expiry.replace(tzinfo=None)
-        delta = expiry - now
-        return max(0, delta.days)
-    except Exception:
-        return None
+    from datetime import datetime
+    # Try s_client with servername (Caddy may serve cert for base domain or infratak.<fqdn>)
+    for servername in (fqdn, f'infratak.{fqdn}'):
+        try:
+            cmd = (
+                f'echo | openssl s_client -connect localhost:443 -servername {servername} 2>/dev/null '
+                '| openssl x509 -noout -enddate 2>/dev/null'
+            )
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            out = (r.stdout or '').strip()
+            if not out or 'notAfter=' not in out:
+                continue
+            date_str = out.replace('notAfter=', '').strip()
+            # Accept GMT or UTC
+            for fmt in ('%b %d %H:%M:%S %Y %Z', '%b %d %H:%M:%S %Y GMT', '%b %d %H:%M:%S %Y UTC'):
+                try:
+                    expiry = datetime.strptime(date_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                continue
+            now = datetime.utcnow()
+            if getattr(expiry, 'tzinfo', None):
+                expiry = expiry.replace(tzinfo=None)
+            delta = expiry - now
+            return max(0, delta.days)
+        except Exception:
+            continue
+    # Fallback: read cert from Caddy's storage (primary domain or infratak)
+    cert_base = '/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory'
+    for name in (fqdn, f'infratak.{fqdn}'):
+        crt = os.path.join(cert_base, name, f'{name}.crt')
+        if not os.path.isfile(crt):
+            continue
+        try:
+            r = subprocess.run(
+                ['openssl', 'x509', '-enddate', '-noout', '-in', crt],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode != 0:
+                continue
+            raw = (r.stdout or '').strip().split('=', 1)[-1]
+            for fmt in ('%b %d %H:%M:%S %Y %Z', '%b %d %H:%M:%S %Y GMT', '%b %d %H:%M:%S %Y UTC'):
+                try:
+                    expiry = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                continue
+            now = datetime.utcnow()
+            return max(0, (expiry - now).days)
+        except Exception:
+            continue
+    return None
 
 
 def _caddy_cert_days_color(days_left):
@@ -12573,9 +12609,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="main">
 <div class="status-banner">
 {% if caddy.installed and caddy.running %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}{% if cert_days_left is not none %} · Let's Encrypt cert: <span style="color:var(--{{ cert_days_color or 'text-dim' }});font-weight:600">{{ cert_days_left }} day{{ 's' if cert_days_left != 1 else '' }} left</span>{% endif %}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div><div id="caddy-cert-days-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
 {% elif caddy.installed %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running{% if cert_days_left is not none %} · Let's Encrypt cert: <span style="color:var(--{{ cert_days_color or 'text-dim' }});font-weight:600">{{ cert_days_left }} day{{ 's' if cert_days_left != 1 else '' }} left</span>{% endif %}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running</div><div id="caddy-cert-days-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Set up a domain for full functionality</div></div></div>
 {% endif %}
@@ -12780,7 +12816,21 @@ async function saveDomains(){
         btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
     }
 }
+async function loadCaddyCertDays(){
+    var el=document.getElementById('caddy-cert-days-banner');
+    if(!el)return;
+    try{
+        var r=await fetch('/api/caddy/cert-days');
+        var d=await r.json();
+        var days=d.days_left,color=d.color;
+        if(days==null){el.textContent='';return;}
+        var c='var(--text-dim)';
+        if(color==='green')c='var(--green)';else if(color==='yellow')c='var(--yellow)';else if(color==='red')c='var(--red)';
+        el.innerHTML='Let\'s Encrypt cert: <span style="color:'+c+';font-weight:600">'+days+' day'+(days!==1?'s':'')+' left</span>';
+    }catch(e){el.textContent='';}
+}
 loadServiceDomains();
+if(document.getElementById('caddy-cert-days-banner'))loadCaddyCertDays();
 {% if deploying %}pollCaddyLog();{% endif %}
 </script>
 </body></html>'''
