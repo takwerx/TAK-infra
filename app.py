@@ -838,17 +838,24 @@ def _disk_speed_test_path():
 
 
 def _parse_dd_speed_mbs(stderr_or_stdout):
-    """Parse dd output for speed in MB/s or MiB/s. Tries 'copied, X s, Y MB/s' then any Y MB/s."""
+    """Parse dd output for speed in MB/s, MiB/s, or GB/s. Returns MB/s."""
     if not stderr_or_stdout:
         return None
     text = (stderr_or_stdout or '').replace(',', '.')
-    m = re.search(r'copied,\s*[\d.]+\s*s,\s*([\d.]+)\s*(?:MiB|MB)/s', text)
+
+    def to_mbs(num_str, unit_str):
+        n = float(num_str)
+        if unit_str and 'GB' in unit_str:
+            return round(n * 1024, 1)
+        return round(n, 1)
+
+    m = re.search(r'copied,\s*[\d.]+\s*s,\s*([\d.]+)\s*(MiB|MB|GB)/s', text)
     if m:
-        return round(float(m.group(1)), 1)
-    # Fallback: last number followed by MB/s or MiB/s (dd often prints speed at end of line)
-    all_m = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text)
-    if all_m:
-        return round(float(all_m[-1]), 1)
+        return to_mbs(m.group(1), m.group(2))
+    for m in re.finditer(r'([\d.]+)\s*(MiB|MB|GB)/s', text):
+        pass
+    if m:
+        return to_mbs(m.group(1), m.group(2))
     return None
 
 
@@ -928,13 +935,15 @@ def _run_disk_speed_test_remote(remote_cfg):
         if not out:
             return {'disk_speed_test_error': 'no output'}
         text = out.replace(',', '.')
-        all_speeds = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text) or re.findall(r'([\d.]+)(?:MiB|MB)/s', text)
+        # Parse MB/s, MiB/s, or GB/s (convert GB to MB)
+        all_speeds = []
+        for match in re.finditer(r'([\d.]+)\s*(?:MiB|MB|GB)/s', text):
+            num, suffix = float(match.group(1)), match.group(0)
+            all_speeds.append(round(num * 1024, 1) if 'GB/s' in suffix else round(num, 1))
         if len(all_speeds) >= 2:
-            write_mbs = round(float(all_speeds[0]), 1)
-            read_mbs = round(float(all_speeds[1]), 1)
-            return {'disk_speed_test_read_mbs': read_mbs, 'disk_speed_test_write_mbs': write_mbs}
-        # Fallback: "copied, X.XXX s" may be present even if "MB/s" is truncated (e.g. SSH). Speed = 256/time.
-        times = re.findall(r'copied,\s*([\d.]+)\s*s', text)
+            return {'disk_speed_test_read_mbs': all_speeds[1], 'disk_speed_test_write_mbs': all_speeds[0]}
+        # Fallback: "copied, X.XXX s" or truncated "copied, 0.3" (no " s"). Speed = 256/time.
+        times = re.findall(r'copied,\s*([\d.]+)(?:\s*s)?', text)
         if len(times) >= 2:
             write_mbs = round(_DISK_SPEED_TEST_SIZE_MB / float(times[0]), 1)
             read_mbs = round(_DISK_SPEED_TEST_SIZE_MB / float(times[1]), 1)
