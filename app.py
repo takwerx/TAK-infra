@@ -853,14 +853,14 @@ def _parse_dd_speed_mbs(stderr_or_stdout):
 
 
 def _run_disk_speed_test_local():
-    """Run 256 MiB write then read; return (read_mbs, write_mbs) or None. Uses direct I/O if possible."""
+    """Run 256 MiB write then read. Returns dict with disk_speed_test_read_mbs/write_mbs or disk_speed_test_error."""
     path = _disk_speed_test_path()
     if not path:
-        return None
+        return {'disk_speed_test_error': 'no writable temp dir'}
+    dd = '/usr/bin/dd' if os.path.isfile('/usr/bin/dd') else 'dd'
     try:
-        # Write: try direct I/O first (real disk throughput); fall back to normal if unsupported
         rw = subprocess.run(
-            ['dd', 'if=/dev/zero', 'of=' + path,
+            [dd, 'if=/dev/zero', 'of=' + path,
              'bs=1M', 'count=' + str(_DISK_SPEED_TEST_SIZE_MB), 'oflag=direct'],
             capture_output=True, text=True, timeout=60
         )
@@ -868,21 +868,26 @@ def _run_disk_speed_test_local():
         write_mbs = _parse_dd_speed_mbs(out_w)
         if write_mbs is None and rw.returncode != 0:
             rw2 = subprocess.run(
-                ['dd', 'if=/dev/zero', 'of=' + path, 'bs=1M', 'count=' + str(_DISK_SPEED_TEST_SIZE_MB)],
+                [dd, 'if=/dev/zero', 'of=' + path, 'bs=1M', 'count=' + str(_DISK_SPEED_TEST_SIZE_MB)],
                 capture_output=True, text=True, timeout=60
             )
             write_mbs = _parse_dd_speed_mbs((rw2.stdout or '') + (rw2.stderr or ''))
         if write_mbs is None:
-            return None
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            err = (out_w.strip() or 'write failed')[:120]
+            return {'disk_speed_test_error': err}
         rr = subprocess.run(
-            ['dd', 'if=' + path, 'of=/dev/null', 'bs=1M', 'iflag=direct'],
+            [dd, 'if=' + path, 'of=/dev/null', 'bs=1M', 'iflag=direct'],
             capture_output=True, text=True, timeout=60
         )
         out_r = (rr.stdout or '') + (rr.stderr or '')
         read_mbs = _parse_dd_speed_mbs(out_r)
         if read_mbs is None and rr.returncode != 0:
             rr2 = subprocess.run(
-                ['dd', 'if=' + path, 'of=/dev/null', 'bs=1M'],
+                [dd, 'if=' + path, 'of=/dev/null', 'bs=1M'],
                 capture_output=True, text=True, timeout=60
             )
             read_mbs = _parse_dd_speed_mbs((rr2.stdout or '') + (rr2.stderr or ''))
@@ -891,21 +896,24 @@ def _run_disk_speed_test_local():
         except Exception:
             pass
         if read_mbs is None:
-            return None
-        return (read_mbs, write_mbs)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return {'disk_speed_test_error': (out_r.strip() or 'read failed')[:120]}
+        return {'disk_speed_test_read_mbs': read_mbs, 'disk_speed_test_write_mbs': write_mbs}
+    except subprocess.TimeoutExpired:
         try:
             os.unlink(path)
         except Exception:
             pass
-        return None
+        return {'disk_speed_test_error': 'timeout'}
+    except FileNotFoundError:
+        return {'disk_speed_test_error': 'dd not found'}
+    except OSError as e:
+        return {'disk_speed_test_error': str(e)[:80]}
 
 
 def _run_disk_speed_test_remote(remote_cfg):
-    """Run same 256 MiB disk speed test on remote host via SSH. Returns (read_mbs, write_mbs) or None."""
+    """Run same 256 MiB disk speed test on remote host via SSH. Returns dict with speeds or disk_speed_test_error."""
     if not remote_cfg or not (remote_cfg.get('host') or '').strip():
-        return None
-    # Use /var/tmp if writable, else /tmp (e.g. in containers)
+        return {'disk_speed_test_error': 'no host'}
     script = (
         'f=/var/tmp/infra_tak_disk_speed_test; '
         'touch "$f" 2>/dev/null || f=/tmp/infra_tak_disk_speed_test; '
@@ -915,18 +923,19 @@ def _run_disk_speed_test_remote(remote_cfg):
     )
     try:
         ok, out = _ssh_probe(remote_cfg, script, timeout=90)
-        if not ok or not out:
-            return None
+        if not ok:
+            return {'disk_speed_test_error': (out or 'ssh failed')[:120]}
+        if not out:
+            return {'disk_speed_test_error': 'no output'}
         text = out.replace(',', '.')
-        # First speed = write, second = read
-        all_speeds = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text)
+        all_speeds = re.findall(r'([\d.]+)\s*(?:MiB|MB)/s', text) or re.findall(r'([\d.]+)(?:MiB|MB)/s', text)
         if len(all_speeds) >= 2:
             write_mbs = round(float(all_speeds[0]), 1)
             read_mbs = round(float(all_speeds[1]), 1)
-            return (read_mbs, write_mbs)
-        return None
-    except Exception:
-        return None
+            return {'disk_speed_test_read_mbs': read_mbs, 'disk_speed_test_write_mbs': write_mbs}
+        return {'disk_speed_test_error': ('parse failed: ' + out.strip()[:80])}
+    except Exception as e:
+        return {'disk_speed_test_error': str(e)[:80]}
 
 
 def _friendly_process_name(args):
@@ -990,11 +999,7 @@ def _top_processes_local():
         disk_io = _get_disk_io_local()
         if disk_io is not None:
             result['disk_io_read_mbs'], result['disk_io_write_mbs'] = disk_io
-        disk_speed = _run_disk_speed_test_local()
-        if disk_speed is not None:
-            result['disk_speed_test_read_mbs'], result['disk_speed_test_write_mbs'] = disk_speed
-        else:
-            result['disk_speed_test_error'] = 'unavailable'
+        result.update(_run_disk_speed_test_local())
         return result
     except Exception:
         return {'cpu_top': [], 'mem_top': []}
@@ -1036,11 +1041,7 @@ def _top_processes_remote(remote_cfg):
         disk_io = _get_disk_io_remote(remote_cfg)
         if disk_io is not None:
             result['disk_io_read_mbs'], result['disk_io_write_mbs'] = disk_io
-        disk_speed = _run_disk_speed_test_remote(remote_cfg)
-        if disk_speed is not None:
-            result['disk_speed_test_read_mbs'], result['disk_speed_test_write_mbs'] = disk_speed
-        else:
-            result['disk_speed_test_error'] = 'unavailable'
+        result.update(_run_disk_speed_test_remote(remote_cfg))
         return result
     except Exception as e:
         return {'cpu_top': [], 'mem_top': [], 'error': str(e)[:80]}
