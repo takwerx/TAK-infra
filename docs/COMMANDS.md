@@ -753,7 +753,7 @@ git push origin main
 git checkout dev
 ```
 
-**Note:** If a file doesn’t exist on dev (e.g. you removed `scripts/fix-mediamtx-stream-redirect.sh`), drop that line from the `git checkout dev --` list. For a new release, change `docs/RELEASE-v0.2.0.md` to the new release doc and the commit message to the new tag. After pushing, create the tag on main if you use one: `git tag v0.2.0-alpha && git push origin v0.2.0-alpha`.
+**Note:** If a file doesn’t exist on dev (e.g. you removed `scripts/fix-mediamtx-stream-redirect.sh`), drop that line from the `git checkout dev --` list. For a new release, change `docs/RELEASE-v0.2.1.md` to the new release doc (e.g. `docs/RELEASE-v0.2.2.md`) and the commit message to the new version. After pushing, create the tag on main if you use one: `git tag v0.2.1-alpha && git push origin v0.2.1-alpha`.
 
 ---
 
