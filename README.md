@@ -170,6 +170,18 @@ start.sh                    ← One CLI command to launch everything
 
 ## Changelog
 
+### v0.2.2-alpha — 2026-03-14
+
+**CSRF behind Caddy**
+- Same-origin check now uses **X-Forwarded-Host** (and X-Forwarded-Port when non-standard) so the console works when accessed through Caddy or another reverse proxy. Fixes 403 "CSRF validation failed" when clicking Update CloudTAK, Apply log limits, etc. Ensure Caddy forwards Host (e.g. `header_up Host {host}`); see COMMANDS.md.
+
+**CloudTAK deploy and update**
+- **Deploy** and **Update** both use **`docker compose build --no-cache`** so the running CloudTAK version matches the tag (e.g. v12.103.0). Previously Docker could reuse cached layers and serve an older version.
+- **Deploy log** ends with explicit "Deploy finished — CloudTAK is running." (and "✓ Containers built and restarted" / "✓ Restart complete.") so you can tell when the restart is done.
+- **Access** links (Web UI, Tile Server, Video, Install Dir) are hidden until deploy/update is complete.
+
+---
+
 ### v0.2.1-alpha — 2026-03-14
 
 **Security hardening**

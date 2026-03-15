@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""infra-TAK v0.2.1 - TAK Infrastructure Platform"""
+"""infra-TAK v0.2.2 - TAK Infrastructure Platform"""
 
 # === Auto-upgrade: seamlessly switch from Flask dev server to gunicorn ===
 # When the old systemd service runs "python3 app.py", this block installs
@@ -270,7 +270,7 @@ def apply_security_headers(response):
     if request.is_secure or xf_proto == 'https':
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
-VERSION = "0.2.1-alpha"
+VERSION = "0.2.2-alpha"
 GITHUB_REPO = "takwerx/infra-TAK"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
 # Marker in Caddyfile: content below this line is preserved when infra-TAK regenerates the file (e.g. health.tntak.net for Uptime Robot).
@@ -8771,6 +8771,7 @@ def run_cloudtak_deploy(cfg=None):
                 plog(f"✗ Remote build/start failed: {(out or '')[:220]}")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
                 return
+            plog("✓ Containers built and restarted.")
             fw_cmd = (
                 "sudo ufw allow 5000/tcp >/dev/null 2>&1 || true; "
                 "sudo ufw allow 5002/tcp >/dev/null 2>&1 || true; "
@@ -8817,6 +8818,7 @@ def run_cloudtak_deploy(cfg=None):
             settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
             save_settings(settings)
             plog("✓ CloudTAK remote deployment complete")
+            plog("Deploy finished — CloudTAK is running.")
             cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
             return
 
@@ -8990,6 +8992,7 @@ def run_cloudtak_deploy(cfg=None):
             cloudtak_deploy_status.update({'running': False, 'error': True})
             return
         plog("✓ Containers started")
+        plog("✓ Restart complete.")
 
         # Open port 5000 (and 5002 for tiles) so http://ip:5000 works when no domain or before Caddy is used
         for port in ['5000/tcp', '5002/tcp']:
@@ -9111,6 +9114,7 @@ def run_cloudtak_deploy(cfg=None):
             plog(f"🎉 CloudTAK deployed! Open http://{server_ip}:5000 in your browser")
         plog(f"   Log in and go to Admin → Connections to configure your TAK Server")
         plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        plog("Deploy finished — CloudTAK is running and ready.")
         cfg['deployed'] = True
         settings['cloudtak_deployment'] = _normalize_cloudtak_deployment_config(cfg)
         save_settings(settings)
@@ -9350,6 +9354,7 @@ def run_cloudtak_update():
         plog("✓ Containers rebuilt and restarted")
         plog("")
         plog(f"✓ CloudTAK updated to {release_tag}")
+        plog("Update finished — CloudTAK is running.")
         _update_boot_stagger_service()
         cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
     except Exception as e:
