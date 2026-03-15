@@ -1168,8 +1168,9 @@ def update_check():
     now = time.time()
     def _parse_version_tuple(v):
         return tuple(int(p) for p in v.replace('-alpha','').replace('-beta','').split('.'))
-    # Cache for 1 hour
-    if update_cache['latest'] and (now - update_cache['checked']) < 3600:
+    # Cache for 1 hour; use "Check for new release" to force a fresh check
+    force = request.args.get('refresh') == '1'
+    if not force and update_cache['latest'] and (now - update_cache['checked']) < 3600:
         try:
             cached_newer = _parse_version_tuple(update_cache['latest']) > _parse_version_tuple(VERSION)
         except (ValueError, IndexError):
@@ -20482,7 +20483,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 {% endfor %}
 </div>
 <div class="section-title">Console</div>
-<div class="meta-line">v{{ version }} | {{ settings.get('os_name', 'Unknown OS') }} | {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} | {{ settings.get('fqdn') }}{% endif %}</div>
+<div class="meta-line" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">v{{ version }} | {{ settings.get('os_name', 'Unknown OS') }} | {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} | {{ settings.get('fqdn') }}{% endif %}<button type="button" id="check-release-btn" onclick="checkUpdate(true)" style="padding:4px 10px;background:rgba(59,130,246,0.15);color:var(--cyan);border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;cursor:pointer">Check for new release</button></div>
 <div class="modules-grid">
 {% if not modules %}
 <div style="grid-column:1/-1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:48px;text-align:center">
@@ -20668,15 +20669,19 @@ function loadCaddyCertDays(){
 loadTakCertExpiry();
 loadCaddyCertDays();
 var updateBody='';
-async function checkUpdate(){
+async function checkUpdate(forceRefresh){
+    var btn=document.getElementById('check-release-btn');
+    if(btn){btn.disabled=true;btn.textContent='Checking...';}
     try{
-        var r=await fetch('/api/update/check');var d=await r.json();
+        var url='/api/update/check';if(forceRefresh)url+='?refresh=1';
+        var r=await fetch(url);var d=await r.json();
         if(d.update_available){
             document.getElementById('update-banner').style.display='block';
             document.getElementById('update-info').textContent='v'+d.current+' -> v'+d.latest+(d.notes?' - '+d.notes:'');
             updateBody=d.body||'No details available';
-        }
-    }catch(e){}
+        }else if(forceRefresh&&btn){btn.textContent='Up to date';setTimeout(function(){btn.textContent='Check for new release';},2000);}
+    }catch(e){if(forceRefresh&&btn)btn.textContent='Check failed';}
+    if(btn){btn.disabled=false;if(btn.textContent==='Checking...'||btn.textContent==='Check failed')setTimeout(function(){btn.textContent='Check for new release';},2000);}
 }
 function toggleUpdateDetails(){
     var el=document.getElementById('update-details');
