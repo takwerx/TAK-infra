@@ -106,17 +106,37 @@ def _is_rate_limited(key, limit, window_seconds):
         return False
 
 
+def _effective_request_host():
+    """Host the browser sees when behind a reverse proxy. Use X-Forwarded-* when present."""
+    xfh = (request.headers.get('X-Forwarded-Host') or '').strip()
+    if xfh:
+        xfp = (request.headers.get('X-Forwarded-Port') or '').strip()
+        if xfp and xfp != '443' and xfp != '80':
+            return f'{xfh}:{xfp}' if ':' not in xfh else xfh
+        return xfh
+    return (request.host or '').strip()
+
+
 def _same_origin_ok():
     """CSRF baseline: allow only same-origin state-changing browser requests.
-    Accepts exact Origin host match, or Referer prefix match when Origin is absent."""
-    host = (request.host or '').strip()
+    Accepts exact Origin host match, or Referer prefix match when Origin is absent.
+    Uses X-Forwarded-Host when behind Caddy/nginx so proxied requests pass."""
+    host = _effective_request_host()
     if not host:
         return False
+    # Normalize for comparison: treat host and "host:443" / "host:80" as same
+    def norm(n):
+        if not n:
+            return ''
+        if n.endswith(':443') or n.endswith(':80'):
+            return n.rsplit(':', 1)[0]
+        return n
     origin = (request.headers.get('Origin') or '').strip()
     if origin:
         try:
             po = urllib.parse.urlparse(origin)
-            if po.netloc == host:
+            onet = (po.netloc or '').strip()
+            if onet == host or norm(onet) == norm(host):
                 return True
         except Exception:
             return False
@@ -124,7 +144,8 @@ def _same_origin_ok():
     if referer:
         try:
             pr = urllib.parse.urlparse(referer)
-            if pr.netloc == host:
+            rnet = (pr.netloc or '').strip()
+            if rnet == host or norm(rnet) == norm(host):
                 return True
         except Exception:
             return False
@@ -8742,7 +8763,7 @@ def run_cloudtak_deploy(cfg=None):
             plog("━━━ Step 5/6: Building/Starting remote containers ━━━")
             run_cmd = (
                 "cd ~/CloudTAK && "
-                "docker compose build && "
+                "docker compose build --no-cache && "
                 "docker compose up -d"
             )
             ok, out = _ssh_probe(remote_cfg, run_cmd, timeout=3600)
@@ -8928,7 +8949,7 @@ def run_cloudtak_deploy(cfg=None):
         plog("━━━ Step 4/7: Building Docker Images ━━━")
         plog("  This may take 5-10 minutes on first run...")
         proc = subprocess.Popen(
-            'docker compose build 2>&1',
+            'docker compose build --no-cache 2>&1',
             shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cloudtak_dir, bufsize=1
         )
         def _read_build():
@@ -12571,8 +12592,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
   </div>
 
-  {% if cloudtak.running %}
-  <!-- Access -->
+  {% if cloudtak.running and not deploying %}
+  <!-- Access (only when install/deploy is complete) -->
   <div class="card">
     <div class="card-title">Access</div>
     <div class="info-grid">
