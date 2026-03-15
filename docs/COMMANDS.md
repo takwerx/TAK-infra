@@ -657,50 +657,6 @@ Client certificates (.p12) are created on the **TAK Server** side (e.g. infra-TA
 
 ---
 
-## Diagnose CloudTAK “channel status” / constant prompts (LDAP traffic)
-
-When CloudTAK (or TAK Server) keeps asking for channel status, the traffic is **TAK Server → Authentik LDAP**, not Authentik calling TAK Server. To capture what happens during login:
-
-**Setup:** SSH to the host where **CloudTAK, Authentik, and TAK Server core** run (Server Two in two-server mode). Use two terminals (or tmux panes).
-
-**Terminal 1 — LDAP outpost (bind/search traffic from TAK Server):**
-
-```bash
-# Replace with your Authentik project dir if different (e.g. /opt/authentik)
-cd ~/authentik && docker compose logs -f ldap --tail=0
-```
-
-**Terminal 2 — Authentik server HTTP (who hits Authentik and when):**
-
-```bash
-cd ~/authentik && docker compose logs -f server --tail=0 2>&1 | grep -E '"event"|"request_id"'
-```
-
-**Optional, Terminal 3 — TAK Server core (connection/channel activity):**
-
-```bash
-sudo journalctl -u takserver -f -n 0
-```
-
-**Reproduce:**
-
-1. Start the two (or three) log tails above.
-2. In the browser: open **CloudTAK** (e.g. `https://map.<your-fqdn>`), log in via Authentik if prompted.
-3. Use CloudTAK until the “channel status” or update prompt appears (or for ~60 seconds).
-4. Stop the tails (Ctrl+C).
-
-**What to look for:**
-
-- **LDAP (Terminal 1):** Bursts of `Bind request` + `Search request` for the same user (e.g. `cn=admin`) every few seconds → TAK Server (or CloudTAK backend) is polling LDAP very often for that user’s groups/attributes. That matches “constant channel/status” behavior.
-- **Authentik server (Terminal 2):** Requests to `/api/v3/flows/executor/ldap-authentication-flow` (LDAP outpost warmup) are rare. Many `GET /` or `GET /if/flow/default-authentication-flow` with `Python-urllib` or `curl` from `172.18.0.1` = something on the host hitting Authentik without a session (health checks or scripts).
-- **TAK Server (Terminal 3):** Repeated connection/channel or LDAP-related lines in the same window as the prompt → confirms TAK Server side is driving the traffic.
-
-**Workaround (R22):** The channels prompt only spams when an **admin or webadmin** is logged into CloudTAK; normal users do not get blasted with it. Use a **normal (non-admin) user** for CloudTAK: create a user in TAK Portal, then use that user to log into CloudTAK. If you need admin functions in CloudTAK, enroll or set that same normal user as the CloudTAK admin so you are not logging in as the TAK Server admin user.
-
-**Conclusion:** If LDAP shows a tight loop of bind+search for one user while you use CloudTAK, the fix is on the **TAK Server / CloudTAK** side (e.g. throttle or cache LDAP lookups for channel/connection checks), not an Authentik config change. See also **docs/HANDOFF-LDAP-AUTHENTIK.md** → “Current operational note — CloudTAK channels/update prompt behavior”.
-
----
-
 ## Disk full / container logs (Node-RED, Authentik, etc.)
 
 If root is 100% full, the cause is often **one huge container log** (e.g. Node-RED 8+ GB). Fix and prevent:
