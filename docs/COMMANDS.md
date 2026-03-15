@@ -659,6 +659,8 @@ sudo journalctl -u takserver -f -n 0
 - **Authentik server (Terminal 2):** Requests to `/api/v3/flows/executor/ldap-authentication-flow` (LDAP outpost warmup) are rare. Many `GET /` or `GET /if/flow/default-authentication-flow` with `Python-urllib` or `curl` from `172.18.0.1` = something on the host hitting Authentik without a session (health checks or scripts).
 - **TAK Server (Terminal 3):** Repeated connection/channel or LDAP-related lines in the same window as the prompt → confirms TAK Server side is driving the traffic.
 
+**Workaround (R22):** The channels prompt only spams when an **admin or webadmin** is logged into CloudTAK; normal users do not get blasted with it. Use a **normal (non-admin) user** for CloudTAK: create a user in TAK Portal, then use that user to log into CloudTAK. If you need admin functions in CloudTAK, enroll or set that same normal user as the CloudTAK admin so you are not logging in as the TAK Server admin user.
+
 **Conclusion:** If LDAP shows a tight loop of bind+search for one user while you use CloudTAK, the fix is on the **TAK Server / CloudTAK** side (e.g. throttle or cache LDAP lookups for channel/connection checks), not an Authentik config change. See also **docs/HANDOFF-LDAP-AUTHENTIK.md** → “Current operational note — CloudTAK channels/update prompt behavior”.
 
 ---

@@ -12600,7 +12600,6 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     <div class="card-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
     <div class="log-box" id="container-logs">Loading...</div>
   </div>
-  <p style="margin-top:12px;font-size:12px;color:var(--text-dim)">Channel status / constant prompts? <a href="https://github.com/takwerx/infra-TAK/blob/main/docs/DEBUG-CLOUDTAK-CHANNEL-STATUS.md" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">Debug guide</a> (LDAP traffic, workarounds, reporting upstream).</p>
   {% endif %}
 
   {% else %}
