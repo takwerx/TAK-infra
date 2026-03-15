@@ -2432,6 +2432,7 @@ def guarddog_page():
         {'id': 'mediamtx', 'name': 'MediaMTX', 'monitored': modules.get('mediamtx', {}).get('installed'), 'monitors': [{'name': 'Service', 'id': 'mediamtx_svc', 'interval': '1 min', 'desc': 'Checks systemd mediamtx. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
         {'id': 'nodered', 'name': 'Node-RED', 'monitored': modules.get('nodered', {}).get('installed'), 'monitors': [{'name': 'Container / HTTP', 'id': 'nodered_http', 'interval': '1 min', 'desc': 'Checks Node-RED HTTP (1880). Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
         {'id': 'cloudtak', 'name': 'CloudTAK', 'monitored': modules.get('cloudtak', {}).get('installed'), 'monitors': [{'name': 'Container', 'id': 'cloudtak_ctr', 'interval': '1 min', 'desc': 'Checks CloudTAK container. Alert and restart after 3 failures. 15 min boot skip + cooldown to avoid restart loops.'}]},
+        {'id': 'updates', 'name': 'Updates', 'monitored': gd.get('installed'), 'monitors': [{'name': 'Update check', 'id': 'updates_check', 'interval': '6 h', 'desc': 'Checks for newer versions of infra-TAK, Authentik, MediaMTX, CloudTAK, and TAK Portal (same sources as the console update icons). Sends one email when any update is available (or when the set of available updates changes). Uses same alert email as other monitors.'}]},
     ])
     guarddog_docs_url = f'https://github.com/{GITHUB_REPO}/blob/main/docs/GUARDDOG.md'
     notifications_configured = bool((settings.get('guarddog_alert_email') or '').strip())
@@ -3423,7 +3424,8 @@ def run_guarddog_deploy(alert_email):
             plog(f"Two-server mode detected — DB on {s1_host}:{db_port}")
         script_files = [
             'tak-8089-watch.sh', 'tak-oom-watch.sh', 'tak-disk-watch.sh',
-            'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py'
+            'tak-network-watch.sh', 'tak-process-watch.sh', 'tak-cert-watch.sh', 'tak-intca-watch.sh', 'tak-health-endpoint.py',
+            'tak-updates-watch.sh'
         ]
         # Two-server: replace local PG monitors with remote DB monitor
         if is_two_server and s1_host:
@@ -3454,7 +3456,8 @@ def run_guarddog_deploy(alert_email):
             content = (content
                 .replace('ALERT_EMAIL_PLACEHOLDER', alert_email)
                 .replace('ALERT_SMS_PLACEHOLDER', alert_sms or '')
-                .replace('CERT_PASS_PLACEHOLDER', cert_pass))
+                .replace('CERT_PASS_PLACEHOLDER', cert_pass)
+                .replace('CONSOLE_VERSION_PLACEHOLDER', VERSION))
             if is_two_server and name in ('tak-remotedb-watch.sh', 'tak-remotedb-auth-watch.sh'):
                 content = content.replace('DB_HOST_PLACEHOLDER', s1_host)
                 content = content.replace('DB_PORT_PLACEHOLDER', db_port)
@@ -3530,6 +3533,10 @@ def run_guarddog_deploy(alert_email):
                 ('takcloudtakguard.service', '[Unit]\nDescription=Guard Dog CloudTAK Monitor\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-cloudtak-watch.sh\n'),
                 ('takcloudtakguard.timer', '[Unit]\nDescription=Run CloudTAK guard every 1 minute\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1min\nUnit=takcloudtakguard.service\n\n[Install]\nWantedBy=timers.target\n'),
             ])
+        units.extend([
+            ('takupdatesguard.service', '[Unit]\nDescription=Guard Dog Updates Check (infra-TAK, Authentik, MediaMTX, CloudTAK)\n\n[Service]\nType=oneshot\nExecStart=/opt/tak-guarddog/tak-updates-watch.sh\n'),
+            ('takupdatesguard.timer', '[Unit]\nDescription=Check for updates every 6 hours\n\n[Timer]\nOnBootSec=30min\nOnUnitActiveSec=6h\nUnit=takupdatesguard.service\n\n[Install]\nWantedBy=timers.target\n'),
+        ])
         for name, content in units:
             path = os.path.join('/etc/systemd/system', name)
             with open(path, 'w') as f:
@@ -3588,6 +3595,7 @@ def run_guarddog_deploy(alert_email):
             timers.append('taknoderedguard.timer')
         if 'tak-cloudtak-watch.sh' in script_files:
             timers.append('takcloudtakguard.timer')
+        timers.append('takupdatesguard.timer')
         for t in timers:
             re = subprocess.run(['systemctl', 'enable', t], capture_output=True, text=True, timeout=5)
             if re.returncode != 0:
