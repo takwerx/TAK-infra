@@ -11531,7 +11531,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     {% if notifications_configured %}
     <div id="gd-notify-banner" class="status-banner running" style="margin-bottom:12px"><div class="dot"></div>Notifications configured</div>
     {% endif %}
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts.</p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Configure email, Uptime Robot, and optional SMS (Twilio or Brevo) for Guard Dog alerts. The same email receives <strong>update notifications</strong> when a newer version of infra-TAK, Authentik, MediaMTX, CloudTAK, or TAK Portal is available (checked every 6 hours; one email per change so you are not spammed).</p>
     <div class="gd-section" style="margin-bottom:20px">
       <div class="form-label">Server nickname</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Optional. Shown in alert subject and body so you can tell which server when monitoring multiple (e.g. Production, Staging).</p>
