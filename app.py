@@ -18200,15 +18200,15 @@ def takserver_rotate_intca():
                 root_pem = os.path.join(cert_dir, 'root-ca.pem')
                 bundle = '/tmp/tak-ca-transition.pem'
                 if os.path.exists(old_pem):
-                    # New intermediate first so clients prefer it when validating server cert after Revoke
-                    run(f'cat {int_pem} {old_pem} {root_pem} > {bundle} 2>/dev/null', check=False)
+                    # Old intermediate FIRST so server (still presenting old cert) is trusted by Portal and clients right after Rotate
+                    run(f'cat {old_pem} {int_pem} {root_pem} > {bundle} 2>/dev/null', check=False)
                 else:
                     run(f'cat {int_pem} {root_pem} > {bundle} 2>/dev/null', check=False)
                 if os.path.exists(bundle) and os.path.getsize(bundle) > 0:
                     run(f'docker cp {bundle} tak-portal:/usr/src/app/data/certs/tak-ca.pem', check=False)
                     os.remove(bundle)
                     if os.path.exists(old_pem):
-                        log("  ✓ CA bundle (old + new intermediate + root) copied to TAK Portal — clients trust both CAs until Revoke")
+                        log("  ✓ CA bundle (old + new intermediate + root) copied to TAK Portal — trust preserved until Revoke")
                     else:
                         log("  ✓ CA bundle (new intermediate + root) copied to TAK Portal")
                 run('docker restart tak-portal 2>/dev/null', check=False)
