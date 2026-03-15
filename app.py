@@ -1168,9 +1168,9 @@ def update_check():
     now = time.time()
     def _parse_version_tuple(v):
         return tuple(int(p) for p in v.replace('-alpha','').replace('-beta','').split('.'))
-    # Cache for 1 hour; use "Check for new release" to force a fresh check
+    # Cache 10 min so even old builds (no button) see new releases soon; button forces immediate check
     force = request.args.get('refresh') == '1'
-    if not force and update_cache['latest'] and (now - update_cache['checked']) < 3600:
+    if not force and update_cache['latest'] and (now - update_cache['checked']) < 600:
         try:
             cached_newer = _parse_version_tuple(update_cache['latest']) > _parse_version_tuple(VERSION)
         except (ValueError, IndexError):
