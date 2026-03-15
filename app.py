@@ -3791,6 +3791,24 @@ def _caddy_cert_days_color(days_left):
     return 'green'
 
 
+def _fmt_caddy_cert_days(days_left):
+    """Format days like dashboard card: e.g. '42d' or '1y 2mo 5d'. Returns (text, None) for no cert."""
+    if days_left is None:
+        return None, None
+    y = days_left // 365
+    r = days_left % 365
+    m = r // 30
+    dd = r % 30
+    parts = []
+    if y > 0:
+        parts.append(f'{y}y')
+    if m > 0:
+        parts.append(f'{m}mo')
+    if dd > 0 or not parts:
+        parts.append(f'{dd}d')
+    return ' '.join(parts), _caddy_cert_days_color(days_left)
+
+
 def _caddy_configured_urls(settings, modules):
     """Build list of configured subdomain → service for the Caddy page. Only when FQDN is set."""
     fqdn = settings.get('fqdn', '').strip()
@@ -3842,10 +3860,12 @@ def caddy_page():
     configured_urls = _caddy_configured_urls(settings, modules)
     cert_days = _caddy_letsencrypt_days_left(settings)
     cert_days_color = _caddy_cert_days_color(cert_days)
+    cert_days_fmt, _ = _fmt_caddy_cert_days(cert_days)  # same format as dashboard card
     return render_template_string(CADDY_TEMPLATE,
         settings=settings, caddy=caddy, caddyfile=caddyfile_content,
         configured_urls=configured_urls,
         cert_days_left=cert_days, cert_days_color=cert_days_color,
+        cert_days_fmt=cert_days_fmt,
         version=VERSION, deploying=caddy_deploy_status.get('running', False),
         deploy_done=caddy_deploy_status.get('complete', False))
 
@@ -13092,9 +13112,9 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="main">
 <div class="status-banner">
 {% if caddy.installed and caddy.running %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div><div id="caddy-cert-days-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div><div style="font-family:'JetBrains Mono',monospace;font-size:10px;margin-top:4px;color:{% if cert_days_fmt %}{% if cert_days_color == 'green' %}var(--green){% elif cert_days_color == 'yellow' %}var(--yellow){% elif cert_days_color == 'red' %}var(--red){% else %}var(--text-dim){% endif %}{% else %}var(--text-dim){% endif %}">Cert: {% if cert_days_fmt %}{{ cert_days_fmt }}{% else %}—{% endif %}</div></div></div>
 {% elif caddy.installed %}
-<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running</div><div id="caddy-cert-days-banner" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px"></div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running</div><div style="font-family:'JetBrains Mono',monospace;font-size:10px;margin-top:4px;color:var(--text-dim)">Cert: {% if cert_days_fmt %}{{ cert_days_fmt }}{% else %}—{% endif %}</div></div></div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Set up a domain for full functionality</div></div></div>
 {% endif %}
@@ -13299,26 +13319,7 @@ async function saveDomains(){
         btn.disabled=false;btn.textContent='Save & Reload Caddy';btn.style.opacity='1';
     }
 }
-function fmtCaddyCertDays(days){
-    var y=Math.floor(days/365),r=days%365,m=Math.floor(r/30),dd=r%30;
-    var p=[];if(y>0)p.push(y+'y');if(m>0)p.push(m+'mo');if(dd>0||p.length===0)p.push(dd+'d');
-    return p.join(' ');
-}
-async function loadCaddyCertDays(){
-    var el=document.getElementById('caddy-cert-days-banner');
-    if(!el)return;
-    try{
-        var r=await fetch('/api/caddy/cert-days');
-        var d=await r.json();
-        var days=d.days_left,color=d.color;
-        if(days==null){el.textContent='';return;}
-        var c='var(--text-dim)';
-        if(color==='green')c='var(--green)';else if(color==='yellow')c='var(--yellow)';else if(color==='red')c='var(--red)';
-        el.innerHTML='Let\'s Encrypt cert: <span style="color:'+c+';font-weight:600">'+fmtCaddyCertDays(days)+'</span>';
-    }catch(e){el.textContent='';}
-}
 loadServiceDomains();
-if(document.getElementById('caddy-cert-days-banner'))loadCaddyCertDays();
 {% if deploying %}pollCaddyLog();{% endif %}
 </script>
 </body></html>'''
