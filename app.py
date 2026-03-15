@@ -5887,6 +5887,9 @@ def _get_cloudtak_latest_release_tag(use_cache=True):
                 _cloudtak_release_cache['ts'] = _time.time()
             return tag
     except Exception:
+        # During deploy (use_cache=False) do not use stale cache — return None so we clone default branch
+        if not use_cache:
+            return None
         return _cloudtak_release_cache.get('tag')
 
 
@@ -8625,6 +8628,9 @@ def run_cloudtak_deploy(cfg=None):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         cloudtak_deploy_log.append(entry)
         print(entry, flush=True)
+    # Clear release tag cache so we fetch fresh "latest" from GitHub (avoid deploying an old tag)
+    _cloudtak_release_cache['tag'] = None
+    _cloudtak_release_cache['ts'] = 0
     try:
         settings = load_settings()
         cfg = cfg or _get_cloudtak_deployment_config(settings)
@@ -9301,7 +9307,7 @@ def run_cloudtak_update():
         plog("")
         plog("━━━ Step 3/3: Rebuilding and restarting ━━━")
         if is_remote:
-            build_cmd = "cd ~/CloudTAK && docker compose up -d --build"
+            build_cmd = "cd ~/CloudTAK && docker compose build --no-cache && docker compose up -d"
             ok, out = _ssh_probe(remote_cfg, build_cmd, timeout=2700)
             if not ok:
                 plog(f"✗ Build/restart failed on remote: {(out or '')[:220]}")
@@ -9310,11 +9316,11 @@ def run_cloudtak_update():
         else:
             cloudtak_dir = os.path.expanduser('~/CloudTAK')
             r = subprocess.run(
-                'docker compose up -d --build 2>&1',
+                'docker compose build --no-cache && docker compose up -d 2>&1',
                 shell=True, capture_output=True, text=True, timeout=2700, cwd=cloudtak_dir)
             if r.returncode != 0:
                 r = subprocess.run(
-                    'docker-compose up -d --build 2>&1',
+                    'docker-compose build --no-cache && docker-compose up -d 2>&1',
                     shell=True, capture_output=True, text=True, timeout=2700, cwd=cloudtak_dir)
             if r.returncode != 0:
                 plog(f"✗ Build/restart failed: {(r.stderr or r.stdout or 'unknown')[:300]}")
